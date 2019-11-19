@@ -13,6 +13,7 @@ import (
 
 const (
 	initReconnectMul = 20
+	forceInitCounter = 60
 )
 
 var peerDiscoveryTimeout = 10 * time.Second
@@ -107,19 +108,22 @@ func (kdd *KadDhtDiscoverer) connectToInitialAndBootstrap() {
 		kdd.mutKadDht.Lock()
 		go func() {
 			i := 1
+			forceInit := forceInitCounter
 			for {
-				if kdd.initConns {
+				if kdd.initConns || forceInit <= 0 {
 					err := kdd.kadDHT.BootstrapOnce(ctx, cfg)
 					if err == kbucket.ErrLookupFailure {
 						<-kdd.ReconnectToNetwork()
 					}
 					i = 1
+					forceInit = forceInitCounter
 				} else {
 					i++
 					if (i % initReconnectMul) == 0 {
 						<-kdd.ReconnectToNetwork()
 						i = 1
 					}
+					forceInit--
 				}
 				select {
 				case <-time.After(cfg.Period):
