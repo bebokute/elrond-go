@@ -13,32 +13,17 @@ var ErrEmptyConsensusGroup = errors.New("consensusGroup is empty")
 // ErrNotFoundInConsensus is raised when self expected in consensus group but not found
 var ErrNotFoundInConsensus = errors.New("self not found in consensus group")
 
-// ErrNilPublicKey is raised when a valid public key was expected but nil was used
-var ErrNilPublicKey = errors.New("public key is nil")
-
 // ErrNilPrivateKey is raised when a valid private key was expected but nil was used
 var ErrNilPrivateKey = errors.New("private key is nil")
 
-// ErrNilConsensusData is raised when valid consensus data was expected but nil was received
-var ErrNilConsensusData = errors.New("consensus data is nil")
-
 // ErrNilSignature is raised when a valid signature was expected but nil was used
 var ErrNilSignature = errors.New("signature is nil")
-
-// ErrNilCommitment is raised when a valid commitment was expected but nil was used
-var ErrNilCommitment = errors.New("commitment is nil")
-
-// ErrNilKeyGenerator is raised when a valid key generator is expected but nil was used
-var ErrNilKeyGenerator = errors.New("key generator is nil")
 
 // ErrNilSingleSigner is raised when a valid singleSigner is expected but nil used
 var ErrNilSingleSigner = errors.New("singleSigner is nil")
 
 // ErrNilMultiSigner is raised when a valid multiSigner is expected but nil used
 var ErrNilMultiSigner = errors.New("multiSigner is nil")
-
-// ErrInvalidMultiSigner is raised when an invalid multiSigner is used
-var ErrInvalidMultiSigner = errors.New("multiSigner is invalid")
 
 // ErrNilConsensusState is raised when a valid consensus is expected but nil used
 var ErrNilConsensusState = errors.New("consensus state is nil")
@@ -64,23 +49,20 @@ var ErrNilMessenger = errors.New("messenger is nil")
 // ErrNilBlockProcessor is raised when a valid block processor is expected but nil used
 var ErrNilBlockProcessor = errors.New("block processor is nil")
 
-// ErrNilBlocksTracker is raised when a valid block tracker is expected but nil used
-var ErrNilBlocksTracker = errors.New("blocks tracker is nil")
-
 // ErrNilBootstrapper is raised when a valid block processor is expected but nil used
 var ErrNilBootstrapper = errors.New("bootstrapper is nil")
 
 // ErrNilBroadcastMessenger is raised when a valid broadcast messenger is expected but nil used
 var ErrNilBroadcastMessenger = errors.New("broadcast messenger is nil")
 
+// ErrNilHeadersSubscriber is raised when a valid headers subscriber is expected but nil is provided
+var ErrNilHeadersSubscriber = errors.New("headers subscriber is nil")
+
 // ErrInvalidKey is raised when an invalid key is used with a map
 var ErrInvalidKey = errors.New("map key is invalid")
 
 // ErrNilRoundState is raised when a valid round state is expected but nil used
 var ErrNilRoundState = errors.New("round state is nil")
-
-// ErrCommitmentHashDoesNotMatch is raised when the commitment hash does not match expected value
-var ErrCommitmentHashDoesNotMatch = errors.New("commitment hash does not match")
 
 // ErrNilMessage signals that a nil message has been received
 var ErrNilMessage = errors.New("nil message")
@@ -91,11 +73,20 @@ var ErrNilDataToProcess = errors.New("nil data to process")
 // ErrNilWorker is raised when a valid Worker is expected but nil used
 var ErrNilWorker = errors.New("worker is nil")
 
+// ErrNilWorkerArgs signals that nil a workerArgs has been provided
+var ErrNilWorkerArgs = errors.New("worker args is nil")
+
 // ErrNilShardCoordinator is raised when a valid shard coordinator is expected but nil used
 var ErrNilShardCoordinator = errors.New("shard coordinator is nil")
 
-// ErrNilValidatorGroupSelector is raised when a valid validator group selector is expected but nil used
-var ErrNilValidatorGroupSelector = errors.New("validator group selector is nil")
+// ErrNilNodesCoordinator is raised when a valid validator group selector is expected but nil used
+var ErrNilNodesCoordinator = errors.New("validator group selector is nil")
+
+// ErrNilInterceptorsContainer is raised when a nil interceptor container is provided
+var ErrNilInterceptorsContainer = errors.New("interceptor container is nil")
+
+// ErrNilParameter is raised when a nil parameter is provided
+var ErrNilParameter = errors.New("parameter is nil")
 
 // ErrNilChronologyHandler is raised when a valid chronology handler is expected but nil used
 var ErrNilChronologyHandler = errors.New("chronology handler is nil")
@@ -115,14 +106,20 @@ var ErrNilChannel = errors.New("channel is nil")
 // ErrRoundCanceled is raised when round is canceled
 var ErrRoundCanceled = errors.New("round is canceled")
 
-// ErrSenderNotOk is raised when sender is invalid
-var ErrSenderNotOk = errors.New("sender is invalid")
+// ErrNodeIsNotInEligibleList is raised when a node is not in eligible list
+var ErrNodeIsNotInEligibleList = errors.New("node is not in eligible list")
 
 // ErrMessageForPastRound is raised when message is for past round
 var ErrMessageForPastRound = errors.New("message is for past round")
 
+// ErrMessageForFutureRound is raised when message is for future round
+var ErrMessageForFutureRound = errors.New("message is for future round")
+
 // ErrInvalidSignature is raised when signature is invalid
 var ErrInvalidSignature = errors.New("signature is invalid")
+
+// ErrInvalidHeader is raised when header is invalid
+var ErrInvalidHeader = errors.New("header is invalid")
 
 // ErrMessageFromItself is raised when a message from itself is received
 var ErrMessageFromItself = errors.New("message is from itself")
@@ -136,14 +133,17 @@ var ErrNilBlsSingleSigner = errors.New("BLS single signer should not be nil")
 // ErrNilHeader is raised when an expected header is nil
 var ErrNilHeader = errors.New("header is nil")
 
+// ErrNilHeaderHash is raised when a nil header hash is provided
+var ErrNilHeaderHash = errors.New("header hash is nil")
+
 // ErrNilBody is raised when an expected body is nil
 var ErrNilBody = errors.New("body is nil")
 
 // ErrNilMetaHeader is raised when an expected meta header is nil
 var ErrNilMetaHeader = errors.New("meta header is nil")
 
-// ErrNilBroadcastUnnotarisedBlocks is raised when a valid broadcastUnnotarisedBlocks function is expected but nil used
-var ErrNilBroadcastUnnotarisedBlocks = errors.New("broadcastUnnotarisedBlocks is nil")
+// ErrInvalidMetaHeader is raised when an invalid meta header was provided
+var ErrInvalidMetaHeader = errors.New("meta header is invalid")
 
 // ErrNilForkDetector is raised when a valid fork detector is expected but nil used
 var ErrNilForkDetector = errors.New("fork detector is nil")
@@ -153,3 +153,66 @@ var ErrNilExecuteStoredMessages = errors.New("executeStoredMessages is nil")
 
 // ErrNilAppStatusHandler defines the error for setting a nil AppStatusHandler
 var ErrNilAppStatusHandler = errors.New("nil AppStatusHandler")
+
+// ErrNilAntifloodHandler signals that a nil antiflood handler has been provided
+var ErrNilAntifloodHandler = errors.New("nil antiflood handler")
+
+// ErrNilPoolAdder signals that a nil pool adder has been provided
+var ErrNilPoolAdder = errors.New("nil pool adder")
+
+// ErrNilHeaderSigVerifier signals that a nil header sig verifier has been provided
+var ErrNilHeaderSigVerifier = errors.New("nil header sig verifier")
+
+// ErrNilHeaderIntegrityVerifier signals that a nil header integrity verifier has been provided
+var ErrNilHeaderIntegrityVerifier = errors.New("nil header integrity verifier")
+
+// ErrInvalidChainID signals that an invalid chain ID has been provided
+var ErrInvalidChainID = errors.New("invalid chain ID in consensus")
+
+// ErrNilNetworkShardingCollector defines the error for setting a nil network sharding collector
+var ErrNilNetworkShardingCollector = errors.New("nil network sharding collector")
+
+// ErrInvalidMessageType signals that an invalid message type has been received from consensus topic
+var ErrInvalidMessageType = errors.New("invalid message type")
+
+// ErrInvalidHeaderHashSize signals that an invalid header hash size has been received from consensus topic
+var ErrInvalidHeaderHashSize = errors.New("invalid header hash size")
+
+// ErrInvalidBodySize signals that an invalid body size has been received from consensus topic
+var ErrInvalidBodySize = errors.New("invalid body size")
+
+// ErrInvalidHeaderSize signals that an invalid header size has been received from consensus topic
+var ErrInvalidHeaderSize = errors.New("invalid header size")
+
+// ErrInvalidPublicKeySize signals that an invalid public key size has been received from consensus topic
+var ErrInvalidPublicKeySize = errors.New("invalid public key size")
+
+// ErrInvalidSignatureSize signals that an invalid signature size has been received from consensus topic
+var ErrInvalidSignatureSize = errors.New("invalid signature size")
+
+// ErrInvalidMessage signals that an invalid message has been received from consensus topic
+var ErrInvalidMessage = errors.New("invalid message")
+
+// ErrInvalidPublicKeyBitmapSize signals that an invalid public key bitmap size has been received from consensus topic
+var ErrInvalidPublicKeyBitmapSize = errors.New("invalid public key bitmap size")
+
+// ErrInvalidCacheSize signals an invalid size provided for cache
+var ErrInvalidCacheSize = errors.New("invalid cache size")
+
+// ErrNilPeerHonestyHandler signals that a nil peer honesty handler has been provided
+var ErrNilPeerHonestyHandler = errors.New("nil peer honesty handler")
+
+// ErrOriginatorMismatch signals that an original consensus message has been re-broadcast manually by another peer
+var ErrOriginatorMismatch = errors.New("consensus message originator mismatch")
+
+// ErrNilPeerSignatureHandler signals that a nil peerSignatureHandler object has been provided
+var ErrNilPeerSignatureHandler = errors.New("trying to set nil peerSignatureHandler")
+
+// ErrMessageTypeLimitReached signals that a consensus message type limit has been reached for a public key
+var ErrMessageTypeLimitReached = errors.New("consensus message type limit has been reached")
+
+// ErrNilFallbackHeaderValidator signals that a nil fallback header validator has been provided
+var ErrNilFallbackHeaderValidator = errors.New("nil fallback header validator")
+
+// ErrNilNodeRedundancyHandler signals that provided node redundancy handler is nil
+var ErrNilNodeRedundancyHandler = errors.New("nil node redundancy handler")

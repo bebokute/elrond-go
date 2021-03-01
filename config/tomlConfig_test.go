@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strconv"
 	"testing"
 
@@ -15,14 +16,19 @@ func TestTomlParser(t *testing.T) {
 	txBlockBodyStorageFile := "path1/file1"
 	txBlockBodyStorageTypeDB := "type2"
 
+	receiptsStorageSize := 171
+	receiptsStorageType := "type3"
+	receiptsStorageFile := "path1/file2"
+	receiptsStorageTypeDB := "type4"
+
 	logsPath := "pathLogger"
 	logsStackDepth := 1010
 
-	accountsStorageSize := 171
-	accountsStorageType := "type3"
-	accountsStorageFile := "path2/file2"
-	accountsStorageTypeDB := "type4"
-	accountsStorageBlomSize := 172
+	accountsStorageSize := 172
+	accountsStorageType := "type5"
+	accountsStorageFile := "path2/file3"
+	accountsStorageTypeDB := "type6"
+	accountsStorageBlomSize := 173
 	accountsStorageBlomHash1 := "hashFunc1"
 	accountsStorageBlomHash2 := "hashFunc2"
 	accountsStorageBlomHash3 := "hashFunc3"
@@ -30,38 +36,41 @@ func TestTomlParser(t *testing.T) {
 	hasherType := "hashFunc4"
 	multiSigHasherType := "hashFunc5"
 
-	consensusType := "bn"
-
-	communityAddress := "community"
-	burnAddress := "burnAddress"
+	consensusType := "bls"
 
 	cfgExpected := Config{
 		MiniBlocksStorage: StorageConfig{
 			Cache: CacheConfig{
-				Size:   uint32(txBlockBodyStorageSize),
-				Type:   txBlockBodyStorageType,
-				Shards: uint32(txBlockBodyStorageShards),
+				Capacity: uint32(txBlockBodyStorageSize),
+				Type:     txBlockBodyStorageType,
+				Shards:   uint32(txBlockBodyStorageShards),
 			},
 			DB: DBConfig{
 				FilePath: txBlockBodyStorageFile,
 				Type:     txBlockBodyStorageTypeDB,
 			},
 		},
-		Logger: LoggerConfig{
-			Path:            logsPath,
-			StackTraceDepth: logsStackDepth,
+		ReceiptsStorage: StorageConfig{
+			Cache: CacheConfig{
+				Capacity: uint32(receiptsStorageSize),
+				Type:     receiptsStorageType,
+			},
+			DB: DBConfig{
+				FilePath: receiptsStorageFile,
+				Type:     receiptsStorageTypeDB,
+			},
 		},
 		AccountsTrieStorage: StorageConfig{
 			Cache: CacheConfig{
-				Size: uint32(accountsStorageSize),
-				Type: accountsStorageType,
+				Capacity: uint32(accountsStorageSize),
+				Type:     accountsStorageType,
 			},
 			DB: DBConfig{
 				FilePath: accountsStorageFile,
 				Type:     accountsStorageTypeDB,
 			},
 			Bloom: BloomFilterConfig{
-				Size:     172,
+				Size:     173,
 				HashFunc: []string{accountsStorageBlomHash1, accountsStorageBlomHash2, accountsStorageBlomHash3},
 			},
 		},
@@ -74,21 +83,25 @@ func TestTomlParser(t *testing.T) {
 		Consensus: TypeConfig{
 			Type: consensusType,
 		},
-		EconomicsConfig: EconomicsConfig{
-			CommunityAddress: communityAddress,
-			BurnAddress:      burnAddress,
-		},
 	}
 
 	testString := `
 [MiniBlocksStorage]
     [MiniBlocksStorage.Cache]
-        Size = ` + strconv.Itoa(txBlockBodyStorageSize) + `
+        Capacity = ` + strconv.Itoa(txBlockBodyStorageSize) + `
         Type = "` + txBlockBodyStorageType + `"
 		Shards = ` + strconv.Itoa(txBlockBodyStorageShards) + `
     [MiniBlocksStorage.DB]
         FilePath = "` + txBlockBodyStorageFile + `"
         Type = "` + txBlockBodyStorageTypeDB + `"
+
+[ReceiptsStorage]
+    [ReceiptsStorage.Cache]
+        Capacity = ` + strconv.Itoa(receiptsStorageSize) + `
+        Type = "` + receiptsStorageType + `"
+    [ReceiptsStorage.DB]
+        FilePath = "` + receiptsStorageFile + `"
+        Type = "` + receiptsStorageTypeDB + `"
 
 [Logger]
     Path = "` + logsPath + `"
@@ -96,7 +109,7 @@ func TestTomlParser(t *testing.T) {
 
 [AccountsTrieStorage]
     [AccountsTrieStorage.Cache]
-        Size = ` + strconv.Itoa(accountsStorageSize) + `
+        Capacity = ` + strconv.Itoa(accountsStorageSize) + `
         Type = "` + accountsStorageType + `"
     [AccountsTrieStorage.DB]
         FilePath = "` + accountsStorageFile + `"
@@ -115,9 +128,6 @@ func TestTomlParser(t *testing.T) {
 [Consensus]
 	Type = "` + consensusType + `"
 
-[EconomicsConfig]
-    CommunityAddress = "` + communityAddress + `"
-    BurnAddress = "` + burnAddress + `"
 `
 	cfg := Config{}
 
@@ -125,4 +135,164 @@ func TestTomlParser(t *testing.T) {
 
 	assert.Nil(t, err)
 	assert.Equal(t, cfgExpected, cfg)
+}
+
+func TestTomlEconomicsParser(t *testing.T) {
+	protocolSustainabilityPercentage := 0.1
+	leaderPercentage := 0.1
+	developerPercentage := 0.3
+	maxGasLimitPerBlock := "18446744073709551615"
+	minGasPrice := "18446744073709551615"
+	minGasLimit := "18446744073709551615"
+	protocolSustainabilityAddress := "erd1932eft30w753xyvme8d49qejgkjc09n5e49w4mwdjtm0neld797su0dlxp"
+	denomination := 18
+
+	cfgEconomicsExpected := EconomicsConfig{
+		GlobalSettings: GlobalSettings{
+			Denomination: denomination,
+		},
+		RewardsSettings: RewardsSettings{
+			LeaderPercentage:                 leaderPercentage,
+			ProtocolSustainabilityPercentage: protocolSustainabilityPercentage,
+			ProtocolSustainabilityAddress:    protocolSustainabilityAddress,
+			DeveloperPercentage:              developerPercentage,
+		},
+		FeeSettings: FeeSettings{
+			MaxGasLimitPerBlock: maxGasLimitPerBlock,
+			MinGasPrice:         minGasPrice,
+			MinGasLimit:         minGasLimit,
+		},
+	}
+
+	testString := `
+[GlobalSettings]
+    Denomination = ` + fmt.Sprintf("%d", denomination) + `
+[RewardsSettings]
+    ProtocolSustainabilityPercentage = ` + fmt.Sprintf("%.6f", protocolSustainabilityPercentage) + `
+	ProtocolSustainabilityAddress = "` + protocolSustainabilityAddress + `"
+    LeaderPercentage = ` + fmt.Sprintf("%.6f", leaderPercentage) + `
+	DeveloperPercentage = ` + fmt.Sprintf("%.6f", developerPercentage) + `
+[FeeSettings]
+	MaxGasLimitPerBlock = "` + maxGasLimitPerBlock + `"
+    MinGasPrice = "` + minGasPrice + `"
+    MinGasLimit = "` + minGasLimit + `"
+`
+
+	cfg := EconomicsConfig{}
+
+	err := toml.Unmarshal([]byte(testString), &cfg)
+
+	assert.Nil(t, err)
+	assert.Equal(t, cfgEconomicsExpected, cfg)
+}
+
+func TestTomlPreferencesParser(t *testing.T) {
+	nodeDisplayName := "test-name"
+	destinationShardAsObs := "3"
+	identity := "test-identity"
+	redundancyLevel := int64(0)
+
+	cfgPreferencesExpected := Preferences{
+		Preferences: PreferencesConfig{
+			NodeDisplayName:            nodeDisplayName,
+			DestinationShardAsObserver: destinationShardAsObs,
+			Identity:                   identity,
+			RedundancyLevel:            redundancyLevel,
+		},
+	}
+
+	testString := `
+[Preferences]
+	NodeDisplayName = "` + nodeDisplayName + `"
+	DestinationShardAsObserver = "` + destinationShardAsObs + `"
+	Identity = "` + identity + `"
+	RedundancyLevel = ` + fmt.Sprintf("%d", redundancyLevel) + `
+`
+	cfg := Preferences{}
+
+	err := toml.Unmarshal([]byte(testString), &cfg)
+
+	assert.Nil(t, err)
+	assert.Equal(t, cfgPreferencesExpected, cfg)
+}
+
+func TestTomlExternalParser(t *testing.T) {
+	indexerURL := "url"
+	elasticUsername := "user"
+	elasticPassword := "pass"
+
+	cfgExternalExpected := ExternalConfig{
+		ElasticSearchConnector: ElasticSearchConfig{
+			Enabled:  true,
+			URL:      indexerURL,
+			Username: elasticUsername,
+			Password: elasticPassword,
+		},
+	}
+
+	testString := `
+[ElasticSearchConnector]
+    Enabled = true
+    URL = "` + indexerURL + `"
+    Username = "` + elasticUsername + `"
+    Password = "` + elasticPassword + `"`
+
+	cfg := ExternalConfig{}
+
+	err := toml.Unmarshal([]byte(testString), &cfg)
+
+	assert.Nil(t, err)
+	assert.Equal(t, cfgExternalExpected, cfg)
+}
+
+func TestAPIRoutesToml(t *testing.T) {
+	package0 := "testPackage0"
+	route0 := "testRoute0"
+	route1 := "testRoute1"
+
+	package1 := "testPackage1"
+	route2 := "testRoute2"
+
+	expectedCfg := ApiRoutesConfig{
+		APIPackages: map[string]APIPackageConfig{
+			package0: {
+				Routes: []RouteConfig{
+					{Name: route0, Open: true},
+					{Name: route1, Open: true},
+				},
+			},
+			package1: {
+				Routes: []RouteConfig{
+					{Name: route2, Open: false},
+				},
+			},
+		},
+	}
+
+	testString := `
+     # API routes configuration
+[APIPackages]
+
+[APIPackages.` + package0 + `]
+	Routes = [
+        # test comment
+        { Name = "` + route0 + `", Open = true },
+
+        # test comment
+        { Name = "` + route1 + `", Open = true },
+	]
+
+[APIPackages.` + package1 + `]
+	Routes = [
+         # test comment
+        { Name = "` + route2 + `", Open = false }
+    ]
+ `
+
+	cfg := ApiRoutesConfig{}
+
+	err := toml.Unmarshal([]byte(testString), &cfg)
+
+	assert.Nil(t, err)
+	assert.Equal(t, expectedCfg, cfg)
 }

@@ -2,6 +2,7 @@ package libp2p
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -10,9 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ElrondNetwork/elrond-go/core"
 	"github.com/ElrondNetwork/elrond-go/p2p"
 	ggio "github.com/gogo/protobuf/io"
-	"github.com/libp2p/go-libp2p-core/helpers"
 	"github.com/libp2p/go-libp2p-core/host"
 	"github.com/libp2p/go-libp2p-core/network"
 	"github.com/libp2p/go-libp2p-core/peer"
@@ -21,26 +22,26 @@ import (
 	"github.com/whyrusleeping/timecache"
 )
 
+var _ p2p.DirectSender = (*directSender)(nil)
+
 const timeSeenMessages = time.Second * 120
 const maxMutexes = 10000
 
-var streamTimeout = time.Second * 5
-
 type directSender struct {
-	counter        uint64
-	ctx            context.Context
-	hostP2P        host.Host
-	messageHandler func(msg p2p.MessageP2P) error
-	mutSeenMesages sync.Mutex
-	seenMessages   *timecache.TimeCache
-	mutexForPeer   *MutexHolder
+	counter         uint64
+	ctx             context.Context
+	hostP2P         host.Host
+	messageHandler  func(msg *pubsub.Message, fromConnectedPeer core.PeerID) error
+	mutSeenMessages sync.Mutex
+	seenMessages    *timecache.TimeCache
+	mutexForPeer    *MutexHolder
 }
 
 // NewDirectSender returns a new instance of direct sender object
 func NewDirectSender(
 	ctx context.Context,
 	h host.Host,
-	messageHandler func(msg p2p.MessageP2P) error,
+	messageHandler func(msg *pubsub.Message, fromConnectedPeer core.PeerID) error,
 ) (*directSender, error) {
 
 	if h == nil {
@@ -86,7 +87,10 @@ func (ds *directSender) directStreamHandler(s network.Stream) {
 
 				if err != io.EOF {
 					_ = s.Reset()
-					log.Debug(fmt.Sprintf("error reading rpc from %s: %s", s.Conn().RemotePeer(), err))
+					log.Trace("error reading rpc",
+						"from", s.Conn().RemotePeer(),
+						"error", err.Error(),
+					)
 				} else {
 					// Just be nice. They probably won't read this
 					// but it doesn't hurt to send it.
@@ -95,37 +99,40 @@ func (ds *directSender) directStreamHandler(s network.Stream) {
 				return
 			}
 
-			err = ds.processReceivedDirectMessage(msg)
+			err = ds.processReceivedDirectMessage(msg, s.Conn().RemotePeer())
 			if err != nil {
-				log.Debug(err.Error())
+				log.Trace("p2p processReceivedDirectMessage", "error", err.Error())
 			}
 		}
 	}(reader)
 }
 
-func (ds *directSender) processReceivedDirectMessage(message *pubsubPb.Message) error {
+func (ds *directSender) processReceivedDirectMessage(message *pubsubPb.Message, fromConnectedPeer peer.ID) error {
 	if message == nil {
 		return p2p.ErrNilMessage
 	}
-	if message.TopicIDs == nil {
+	if message.Topic == nil {
 		return p2p.ErrNilTopic
 	}
-	if len(message.TopicIDs) == 0 {
-		return p2p.ErrEmptyTopicList
+	if !bytes.Equal(message.GetFrom(), []byte(fromConnectedPeer)) {
+		return fmt.Errorf("%w mismatch between From and fromConnectedPeer values", p2p.ErrInvalidValue)
 	}
 	if ds.checkAndSetSeenMessage(message) {
 		return p2p.ErrAlreadySeenMessage
 	}
 
-	p2pMsg := NewMessage(&pubsub.Message{Message: message})
-	return ds.messageHandler(p2pMsg)
+	pbMessage := &pubsub.Message{
+		Message: message,
+	}
+
+	return ds.messageHandler(pbMessage, core.PeerID(fromConnectedPeer))
 }
 
 func (ds *directSender) checkAndSetSeenMessage(msg *pubsubPb.Message) bool {
 	msgId := string(msg.GetFrom()) + string(msg.GetSeqno())
 
-	ds.mutSeenMesages.Lock()
-	defer ds.mutSeenMesages.Unlock()
+	ds.mutSeenMessages.Lock()
+	defer ds.mutSeenMessages.Unlock()
 
 	if ds.seenMessages.Has(msgId) {
 		return true
@@ -136,17 +143,17 @@ func (ds *directSender) checkAndSetSeenMessage(msg *pubsubPb.Message) bool {
 }
 
 // NextSeqno returns the next uint64 found in *counter as byte slice
-func (ds *directSender) NextSeqno(counter *uint64) []byte {
+func (ds *directSender) NextSeqno() []byte {
 	seqno := make([]byte, 8)
-	newVal := atomic.AddUint64(counter, 1)
+	newVal := atomic.AddUint64(&ds.counter, 1)
 	binary.BigEndian.PutUint64(seqno, newVal)
 	return seqno
 }
 
 // Send will send a direct message to the connected peer
-func (ds *directSender) Send(topic string, buff []byte, peer p2p.PeerID) error {
+func (ds *directSender) Send(topic string, buff []byte, peer core.PeerID) error {
 	if len(buff) >= maxSendBuffSize {
-		return p2p.ErrMessageTooLarge
+		return fmt.Errorf("%w, to be sent: %d, maximum: %d", p2p.ErrMessageTooLarge, len(buff), maxSendBuffSize)
 	}
 
 	mut := ds.mutexForPeer.Get(string(peer))
@@ -171,21 +178,21 @@ func (ds *directSender) Send(topic string, buff []byte, peer p2p.PeerID) error {
 	err = w.WriteMsg(msg)
 	if err != nil {
 		_ = stream.Reset()
-		_ = helpers.FullClose(stream)
+		_ = stream.Close()
 		return err
 	}
 
 	err = bufw.Flush()
 	if err != nil {
 		_ = stream.Reset()
-		_ = helpers.FullClose(stream)
+		_ = stream.Close()
 		return err
 	}
 
 	return nil
 }
 
-func (ds *directSender) getConnection(p p2p.PeerID) (network.Conn, error) {
+func (ds *directSender) getConnection(p core.PeerID) (network.Conn, error) {
 	conns := ds.hostP2P.Network().ConnsToPeer(peer.ID(p))
 	if len(conns) == 0 {
 		return nil, p2p.ErrPeerNotDirectlyConnected
@@ -221,8 +228,7 @@ func (ds *directSender) getOrCreateStream(conn network.Conn) (network.Stream, er
 	var err error
 
 	if foundStream == nil {
-		ctx, _ := context.WithTimeout(ds.ctx, streamTimeout)
-		foundStream, err = ds.hostP2P.NewStream(ctx, conn.RemotePeer(), DirectSendID)
+		foundStream, err = ds.hostP2P.NewStream(ds.ctx, conn.RemotePeer(), DirectSendID)
 		if err != nil {
 			return nil, err
 		}
@@ -232,10 +238,10 @@ func (ds *directSender) getOrCreateStream(conn network.Conn) (network.Stream, er
 }
 
 func (ds *directSender) createMessage(topic string, buff []byte, conn network.Conn) *pubsubPb.Message {
-	seqno := ds.NextSeqno(&ds.counter)
+	seqno := ds.NextSeqno()
 	mes := pubsubPb.Message{}
 	mes.Data = buff
-	mes.TopicIDs = []string{topic}
+	mes.Topic = &topic
 	mes.From = []byte(conn.LocalPeer())
 	mes.Seqno = seqno
 
@@ -244,8 +250,5 @@ func (ds *directSender) createMessage(topic string, buff []byte, conn network.Co
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (ds *directSender) IsInterfaceNil() bool {
-	if ds == nil {
-		return true
-	}
-	return false
+	return ds == nil
 }

@@ -1,15 +1,54 @@
 package dataRetriever
 
 import (
+	"fmt"
 	"time"
 
-	"github.com/ElrondNetwork/elrond-go/data/block"
+	"github.com/ElrondNetwork/elrond-go/core"
+	"github.com/ElrondNetwork/elrond-go/core/counting"
+	"github.com/ElrondNetwork/elrond-go/data"
 	"github.com/ElrondNetwork/elrond-go/p2p"
 	"github.com/ElrondNetwork/elrond-go/storage"
 )
 
 // UnitType is the type for Storage unit identifiers
 type UnitType uint8
+
+// String returns the friendly name of the unit
+func (ut UnitType) String() string {
+	switch ut {
+	case TransactionUnit:
+		return "TransactionUnit"
+	case MiniBlockUnit:
+		return "MiniBlockUnit"
+	case PeerChangesUnit:
+		return "PeerChangesUnit"
+	case BlockHeaderUnit:
+		return "BlockHeaderUnit"
+	case MetaBlockUnit:
+		return "MetaBlockUnit"
+	case UnsignedTransactionUnit:
+		return "UnsignedTransactionUnit"
+	case RewardTransactionUnit:
+		return "RewardTransactionUnit"
+	case MetaHdrNonceHashDataUnit:
+		return "MetaHdrNonceHashDataUnit"
+	case HeartbeatUnit:
+		return "HeartbeatUnit"
+	case BootstrapUnit:
+		return "BootstrapUnit"
+	case StatusMetricsUnit:
+		return "StatusMetricsUnit"
+	case ReceiptsUnit:
+		return "ReceiptsUnit"
+	}
+
+	if ut < ShardHdrNonceHashDataUnit {
+		return fmt.Sprintf("unknown type %d", ut)
+	}
+
+	return fmt.Sprintf("%s%d", "ShardHdrNonceHashDataUnit", ut-ShardHdrNonceHashDataUnit)
+}
 
 const (
 	// TransactionUnit is the transactions storage unit identifier
@@ -22,16 +61,30 @@ const (
 	BlockHeaderUnit UnitType = 3
 	// MetaBlockUnit is the metachain blocks storage unit identifier
 	MetaBlockUnit UnitType = 4
-	// MetaShardDataUnit is the metachain shard data unit identifier
-	MetaShardDataUnit UnitType = 5
-	// MetaPeerDataUnit is the metachain peer data unit identifier
-	MetaPeerDataUnit UnitType = 6
 	// UnsignedTransactionUnit is the unsigned transaction unit identifier
-	UnsignedTransactionUnit UnitType = 7
+	UnsignedTransactionUnit UnitType = 5
 	// RewardTransactionUnit is the reward transaction unit identifier
-	RewardTransactionUnit UnitType = 8
+	RewardTransactionUnit UnitType = 6
 	// MetaHdrNonceHashDataUnit is the meta header nonce-hash pair data unit identifier
-	MetaHdrNonceHashDataUnit UnitType = 9
+	MetaHdrNonceHashDataUnit UnitType = 7
+	// HeartbeatUnit is the heartbeat storage unit identifier
+	HeartbeatUnit UnitType = 8
+	// BootstrapUnit is the bootstrap storage unit identifier
+	BootstrapUnit UnitType = 9
+	//StatusMetricsUnit is the status metrics storage unit identifier
+	StatusMetricsUnit UnitType = 10
+	// TxLogsUnit is the transactions logs storage unit identifier
+	TxLogsUnit UnitType = 11
+	// MiniblocksMetadataUnit is the miniblocks metadata storage unit identifier
+	MiniblocksMetadataUnit UnitType = 12
+	// EpochByHashUnit is the epoch by hash storage unit identifier
+	EpochByHashUnit UnitType = 13
+	// MiniblockHashByTxHashUnit is the miniblocks hash by tx hash storage unit identifier
+	MiniblockHashByTxHashUnit UnitType = 14
+	// ReceiptsUnit is the receipts storage unit identifier
+	ReceiptsUnit UnitType = 15
+	// ResultsHashesByTxHashUnit is the results hashes by transaction storage unit identifier
+	ResultsHashesByTxHashUnit UnitType = 16
 
 	// ShardHdrNonceHashDataUnit is the header nonce-hash pair data unit identifier
 	//TODO: Add only unit types lower than 100
@@ -41,32 +94,54 @@ const (
 	//creation
 )
 
+// ResolverThrottler can monitor the number of the currently running resolver go routines
+type ResolverThrottler interface {
+	CanProcess() bool
+	StartProcessing()
+	EndProcessing()
+	IsInterfaceNil() bool
+}
+
 // Resolver defines what a data resolver should do
 type Resolver interface {
-	RequestDataFromHash(hash []byte) error
-	ProcessReceivedMessage(message p2p.MessageP2P) error
+	RequestDataFromHash(hash []byte, epoch uint32) error
+	ProcessReceivedMessage(message p2p.MessageP2P, fromConnectedPeer core.PeerID) error
+	SetResolverDebugHandler(handler ResolverDebugHandler) error
+	SetNumPeersToQuery(intra int, cross int)
+	NumPeersToQuery() (int, int)
 	IsInterfaceNil() bool
+}
+
+// TrieNodesResolver defines what a trie nodes resolver should do
+type TrieNodesResolver interface {
+	Resolver
+	RequestDataFromHashArray(hashes [][]byte, epoch uint32) error
 }
 
 // HeaderResolver defines what a block header resolver should do
 type HeaderResolver interface {
 	Resolver
-	RequestDataFromNonce(nonce uint64) error
+	RequestDataFromNonce(nonce uint64, epoch uint32) error
+	RequestDataFromEpoch(identifier []byte) error
+	SetEpochHandler(epochHandler EpochHandler) error
 }
 
 // MiniBlocksResolver defines what a mini blocks resolver should do
 type MiniBlocksResolver interface {
 	Resolver
-	RequestDataFromHashArray(hashes [][]byte) error
-	GetMiniBlocks(hashes [][]byte) block.MiniBlockSlice // TODO miniblockresolver should not know about miniblockslice
+	RequestDataFromHashArray(hashes [][]byte, epoch uint32) error
 }
 
 // TopicResolverSender defines what sending operations are allowed for a topic resolver
 type TopicResolverSender interface {
-	SendOnRequestTopic(rd *RequestData) error
-	Send(buff []byte, peer p2p.PeerID) error
-	TopicRequestSuffix() string
+	SendOnRequestTopic(rd *RequestData, originalHashes [][]byte) error
+	Send(buff []byte, peer core.PeerID) error
+	RequestTopic() string
 	TargetShardID() uint32
+	SetNumPeersToQuery(intra int, cross int)
+	SetResolverDebugHandler(handler ResolverDebugHandler) error
+	ResolverDebugHandler() ResolverDebugHandler
+	NumPeersToQuery() (int, int)
 	IsInterfaceNil() bool
 }
 
@@ -78,6 +153,8 @@ type ResolversContainer interface {
 	Replace(key string, val Resolver) error
 	Remove(key string)
 	Len() int
+	ResolverKeys() string
+	Iterate(handler func(key string, resolver Resolver) bool)
 	IsInterfaceNil() bool
 }
 
@@ -87,6 +164,7 @@ type ResolversFinder interface {
 	IntraShardResolver(baseTopic string) (Resolver, error)
 	MetaChainResolver(baseTopic string) (Resolver, error)
 	CrossShardResolver(baseTopic string, crossShard uint32) (Resolver, error)
+	MetaCrossShardResolver(baseTopic string, crossShard uint32) (Resolver, error)
 }
 
 // ResolversContainerFactory defines the functionality to create a resolvers container
@@ -95,10 +173,30 @@ type ResolversContainerFactory interface {
 	IsInterfaceNil() bool
 }
 
+// EpochHandler defines the functionality to get the current epoch
+type EpochHandler interface {
+	MetaEpoch() uint32
+	IsInterfaceNil() bool
+}
+
+// ManualEpochStartNotifier can manually notify an epoch change
+type ManualEpochStartNotifier interface {
+	NewEpoch(epoch uint32)
+	CurrentEpoch() uint32
+	IsInterfaceNil() bool
+}
+
+// EpochProviderByNonce defines the functionality needed for calculating an epoch based on nonce
+type EpochProviderByNonce interface {
+	EpochForNonce(nonce uint64) (uint32, error)
+	IsInterfaceNil() bool
+}
+
 // MessageHandler defines the functionality needed by structs to send data to other peers
 type MessageHandler interface {
-	ConnectedPeersOnTopic(topic string) []p2p.PeerID
-	SendToConnectedPeer(topic string, buff []byte, peerID p2p.PeerID) error
+	ConnectedPeersOnTopic(topic string) []core.PeerID
+	SendToConnectedPeer(topic string, buff []byte, peerID core.PeerID) error
+	ID() core.PeerID
 	IsInterfaceNil() bool
 }
 
@@ -118,60 +216,35 @@ type TopicMessageHandler interface {
 
 // IntRandomizer interface provides functionality over generating integer numbers
 type IntRandomizer interface {
-	Intn(n int) (int, error)
+	Intn(n int) int
 	IsInterfaceNil() bool
 }
 
 // StorageType defines the storage levels on a node
 type StorageType uint8
 
-// DataRetriever interface provides functionality over high level data request component
-type DataRetriever interface {
-	// Get methods searches for data in storage units and returns results, it is a blocking function
-	Get(keys [][]byte, identifier string, lowestLevel StorageType, haveTime func() time.Duration) (map[string]interface{}, [][]byte, error)
-	// Has searches for a value identifier by a key in storage
-	Has(key []byte, identifier string, level StorageType) (StorageType, error)
-	// HasOrAdd searches and adds a value if not exist in storage
-	HasOrAdd(key []byte, value interface{}, identifier string, level StorageType)
-	// Remove deletes an element from storage level
-	Remove(key []byte, identifier string, lowestLevel StorageType) error
-	// Put saves a key-value pair into storage
-	Put(key []byte, value interface{}, identifier string, level StorageType) error
-	// Keys returns all the keys from an identifier and storage type
-	Keys(identifier string, level StorageType)
-	// Request searches for data in specified storage level, if not present launches threads to search in network
-	Request(keys [][]byte, identifier string, level StorageType, haveTime func() time.Duration, callbackHandler func(key []byte)) (map[string]interface{}, [][]byte, error)
-	// IsInterfaceNil returns true if there is no value under the interface
-	IsInterfaceNil() bool
-}
-
-// Notifier defines a way to register funcs that get called when something useful happens
-type Notifier interface {
-	RegisterHandler(func(key []byte))
-	IsInterfaceNil() bool
-}
-
 // PeerListCreator is used to create a peer list
 type PeerListCreator interface {
-	PeerList() []p2p.PeerID
+	PeerList() []core.PeerID
+	IntraShardPeerList() []core.PeerID
 	IsInterfaceNil() bool
 }
 
 // ShardedDataCacherNotifier defines what a sharded-data structure can perform
 type ShardedDataCacherNotifier interface {
-	Notifier
-
+	RegisterOnAdded(func(key []byte, value interface{}))
 	ShardDataStore(cacheId string) (c storage.Cacher)
-	AddData(key []byte, data interface{}, cacheId string)
+	AddData(key []byte, data interface{}, sizeInBytes int, cacheId string)
 	SearchFirstData(key []byte) (value interface{}, ok bool)
 	RemoveData(key []byte, cacheId string)
 	RemoveSetOfDataFromPool(keys [][]byte, cacheId string)
+	ImmunizeSetOfDataAgainstEviction(keys [][]byte, cacheId string)
 	RemoveDataFromAllShards(key []byte)
 	MergeShardStores(sourceCacheID, destCacheID string)
-	MoveData(sourceCacheID, destCacheID string, key [][]byte)
 	Clear()
 	ClearShardStore(cacheId string)
-	CreateShardStore(cacheId string)
+	GetCounts() counting.CountsWithSize
+	IsInterfaceNil() bool
 }
 
 // ShardIdHashMap represents a map for shardId and hash
@@ -183,14 +256,27 @@ type ShardIdHashMap interface {
 	IsInterfaceNil() bool
 }
 
-// Uint64SyncMapCacher defines a cacher-type struct that uses uint64 keys and sync-maps values
-type Uint64SyncMapCacher interface {
+// HeadersPool defines what a headers pool structure can perform
+type HeadersPool interface {
 	Clear()
-	Get(nonce uint64) (ShardIdHashMap, bool)
-	Merge(nonce uint64, src ShardIdHashMap)
-	Remove(nonce uint64, shardId uint32)
-	RegisterHandler(handler func(nonce uint64, shardId uint32, value []byte))
-	Has(nonce uint64, shardId uint32) bool
+	AddHeader(headerHash []byte, header data.HeaderHandler)
+	RemoveHeaderByHash(headerHash []byte)
+	RemoveHeaderByNonceAndShardId(headerNonce uint64, shardId uint32)
+	GetHeadersByNonceAndShardId(headerNonce uint64, shardId uint32) ([]data.HeaderHandler, [][]byte, error)
+	GetHeaderByHash(hash []byte) (data.HeaderHandler, error)
+	RegisterHandler(handler func(headerHandler data.HeaderHandler, headerHash []byte))
+	Nonces(shardId uint32) []uint64
+	Len() int
+	MaxSize() int
+	IsInterfaceNil() bool
+	GetNumHeaders(shardId uint32) int
+}
+
+// TransactionCacher defines the methods for the local cacher, info for current round
+type TransactionCacher interface {
+	Clean()
+	GetTx(txHash []byte) (data.TransactionHandler, error)
+	AddTx(txHash []byte, tx data.TransactionHandler)
 	IsInterfaceNil() bool
 }
 
@@ -199,20 +285,12 @@ type PoolsHolder interface {
 	Transactions() ShardedDataCacherNotifier
 	UnsignedTransactions() ShardedDataCacherNotifier
 	RewardTransactions() ShardedDataCacherNotifier
-	Headers() storage.Cacher
-	HeadersNonces() Uint64SyncMapCacher
+	Headers() HeadersPool
 	MiniBlocks() storage.Cacher
 	PeerChangesBlocks() storage.Cacher
-	MetaBlocks() storage.Cacher
-	IsInterfaceNil() bool
-}
-
-// MetaPoolsHolder defines getter for data pools for metachain
-type MetaPoolsHolder interface {
-	MetaChainBlocks() storage.Cacher
-	MiniBlockHashes() ShardedDataCacherNotifier
-	ShardHeaders() storage.Cacher
-	HeadersNonces() Uint64SyncMapCacher
+	TrieNodes() storage.Cacher
+	SmartContracts() storage.Cacher
+	CurrentBlockTxs() TransactionCacher
 	IsInterfaceNil() bool
 }
 
@@ -228,11 +306,15 @@ type StorageService interface {
 	Get(unitType UnitType, key []byte) ([]byte, error)
 	// Put stores the key, value pair in the selected storage unit
 	Put(unitType UnitType, key []byte, value []byte) error
+	// SetEpochForPutOperation will set the epoch which will be used for the put operation
+	SetEpochForPutOperation(epoch uint32)
 	// GetAll gets all the elements with keys in the keys array, from the selected storage unit
 	// If there is a missing key in the unit, it returns an error
 	GetAll(unitType UnitType, keys [][]byte) (map[string][]byte, error)
 	// Destroy removes the underlying files/resources used by the storage service
 	Destroy() error
+	//CloseAll will close all the units
+	CloseAll() error
 	// IsInterfaceNil returns true if there is no value under the interface
 	IsInterfaceNil() bool
 }
@@ -240,5 +322,43 @@ type StorageService interface {
 // DataPacker can split a large slice of byte slices in smaller packets
 type DataPacker interface {
 	PackDataInChunks(data [][]byte, limit int) ([][]byte, error)
+	IsInterfaceNil() bool
+}
+
+// TrieDataGetter returns requested data from the trie
+type TrieDataGetter interface {
+	GetSerializedNodes([]byte, uint64) ([][]byte, uint64, error)
+	IsInterfaceNil() bool
+}
+
+// RequestedItemsHandler can determine if a certain key has or not been requested
+type RequestedItemsHandler interface {
+	Add(key string) error
+	Has(key string) bool
+	Sweep()
+	IsInterfaceNil() bool
+}
+
+// P2PAntifloodHandler defines the behavior of a component able to signal that the system is too busy (or flooded) processing
+// p2p messages
+type P2PAntifloodHandler interface {
+	CanProcessMessage(message p2p.MessageP2P, fromConnectedPeer core.PeerID) error
+	CanProcessMessagesOnTopic(peer core.PeerID, topic string, numMessages uint32, _ uint64, sequence []byte) error
+	BlacklistPeer(peer core.PeerID, reason string, duration time.Duration)
+	IsInterfaceNil() bool
+}
+
+// WhiteListHandler is the interface needed to add whitelisted data
+type WhiteListHandler interface {
+	Remove(keys [][]byte)
+	Add(keys [][]byte)
+	IsInterfaceNil() bool
+}
+
+// ResolverDebugHandler defines an interface for debugging the reqested-resolved data
+type ResolverDebugHandler interface {
+	LogRequestedData(topic string, hashes [][]byte, numReqIntra int, numReqCross int)
+	LogFailedToResolveData(topic string, hash []byte, err error)
+	LogSucceededToResolveData(topic string, hash []byte)
 	IsInterfaceNil() bool
 }

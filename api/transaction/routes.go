@@ -5,21 +5,44 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"strconv"
 
 	"github.com/ElrondNetwork/elrond-go/api/errors"
+	"github.com/ElrondNetwork/elrond-go/api/middleware"
+	"github.com/ElrondNetwork/elrond-go/api/shared"
+	"github.com/ElrondNetwork/elrond-go/api/wrapper"
+	"github.com/ElrondNetwork/elrond-go/core"
 	"github.com/ElrondNetwork/elrond-go/data/transaction"
 	"github.com/gin-gonic/gin"
 )
 
-// TxService interface defines methods that can be used from `elrondFacade` context variable
-type TxService interface {
-	GenerateTransaction(sender string, receiver string, value *big.Int, code string) (*transaction.Transaction, error)
-	CreateTransaction(nonce uint64, value *big.Int, receiverHex string, senderHex string, gasPrice uint64, gasLimit uint64, data string, signatureHex string, challenge string) (*transaction.Transaction, error)
-	SendTransaction(nonce uint64, sender string, receiver string, value *big.Int, gasPrice uint64, gasLimit uint64, code string, signature []byte) (string, error)
+const (
+	sendTransactionEndpoint          = "/transaction/send"
+	simulateTransactionEndpoint      = "/transaction/simulate"
+	sendMultipleTransactionsEndpoint = "/transaction/send-multiple"
+	getTransactionEndpoint           = "/transaction/:hash"
+	sendTransactionPath              = "/send"
+	simulateTransactionPath          = "/simulate"
+	costPath                         = "/cost"
+	sendMultiplePath                 = "/send-multiple"
+	getTransactionPath               = "/:txhash"
+
+	queryParamWithResults    = "withResults"
+	queryParamCheckSignature = "checkSignature"
+)
+
+// FacadeHandler interface defines methods that can be used by the gin webserver
+type FacadeHandler interface {
+	CreateTransaction(nonce uint64, value string, receiver string, receiverUsername []byte, sender string, senderUsername []byte, gasPrice uint64,
+		gasLimit uint64, data []byte, signatureHex string, chainID string, version uint32, options uint32) (*transaction.Transaction, []byte, error)
+	ValidateTransaction(tx *transaction.Transaction) error
+	ValidateTransactionForSimulation(tx *transaction.Transaction, checkSignature bool) error
 	SendBulkTransactions([]*transaction.Transaction) (uint64, error)
-	GetTransaction(hash string) (*transaction.Transaction, error)
-	GenerateAndSendBulkTransactions(string, *big.Int, uint64) error
-	GenerateAndSendBulkTransactionsOneByOne(string, *big.Int, uint64) error
+	SimulateTransactionExecution(tx *transaction.Transaction) (*transaction.SimulationResults, error)
+	GetTransaction(hash string, withResults bool) (*transaction.ApiTransactionResult, error)
+	ComputeTransactionGasLimit(tx *transaction.Transaction) (*transaction.CostResponse, error)
+	EncodeAddressPubkey(pk []byte) (string, error)
+	GetThrottlerForEndpoint(endpoint string) (core.Throttler, bool)
 	IsInterfaceNil() bool
 }
 
@@ -40,15 +63,19 @@ type MultipleTxRequest struct {
 
 // SendTxRequest represents the structure that maps and validates user input for publishing a new transaction
 type SendTxRequest struct {
-	Sender    string   `form:"sender" json:"sender"`
-	Receiver  string   `form:"receiver" json:"receiver"`
-	Value     *big.Int `form:"value" json:"value"`
-	Data      string   `form:"data" json:"data"`
-	Nonce     uint64   `form:"nonce" json:"nonce"`
-	GasPrice  uint64   `form:"gasPrice" json:"gasPrice"`
-	GasLimit  uint64   `form:"gasLimit" json:"gasLimit"`
-	Signature string   `form:"signature" json:"signature"`
-	Challenge string   `form:"challenge" json:"challenge"`
+	Sender           string `form:"sender" json:"sender"`
+	Receiver         string `form:"receiver" json:"receiver"`
+	SenderUsername   []byte `json:"senderUsername,omitempty"`
+	ReceiverUsername []byte `json:"receiverUsername,omitempty"`
+	Value            string `form:"value" json:"value"`
+	Data             []byte `form:"data" json:"data"`
+	Nonce            uint64 `form:"nonce" json:"nonce"`
+	GasPrice         uint64 `form:"gasPrice" json:"gasPrice"`
+	GasLimit         uint64 `form:"gasLimit" json:"gasLimit"`
+	Signature        string `form:"signature" json:"signature"`
+	ChainID          string `form:"chainID" json:"chainID"`
+	Version          uint32 `form:"version" json:"version"`
+	Options          uint32 `json:"options,omitempty"`
 }
 
 //TxResponse represents the structure on which the response will be validated against
@@ -62,201 +89,471 @@ type TxResponse struct {
 }
 
 // Routes defines transaction related routes
-func Routes(router *gin.RouterGroup) {
-	router.POST("/generate", GenerateTransaction)
-	router.POST("/generate-and-send-multiple", GenerateAndSendBulkTransactions)
-	router.POST("/generate-and-send-multiple-one-by-one", GenerateAndSendBulkTransactionsOneByOne)
-	router.POST("/send", SendTransaction)
-	router.POST("/send-multiple", SendMultipleTransactions)
-	router.GET("/:txhash", GetTransaction)
+func Routes(router *wrapper.RouterWrapper) {
+	router.RegisterHandler(
+		http.MethodPost,
+		sendTransactionPath,
+		middleware.CreateEndpointThrottler(sendTransactionEndpoint),
+		SendTransaction,
+	)
+	router.RegisterHandler(
+		http.MethodPost,
+		simulateTransactionPath,
+		middleware.CreateEndpointThrottler(simulateTransactionEndpoint),
+		SimulateTransaction,
+	)
+	router.RegisterHandler(http.MethodPost, costPath, ComputeTransactionGasLimit)
+	router.RegisterHandler(
+		http.MethodPost,
+		sendMultiplePath,
+		middleware.CreateEndpointThrottler(sendMultipleTransactionsEndpoint),
+		SendMultipleTransactions,
+	)
+	router.RegisterHandler(
+		http.MethodGet,
+		getTransactionPath,
+		middleware.CreateEndpointThrottler(getTransactionEndpoint),
+		GetTransaction,
+	)
 }
 
-// GenerateTransaction generates a new transaction given a sender, receiver, value and data
-func GenerateTransaction(c *gin.Context) {
-	ef, ok := c.MustGet("elrondFacade").(TxService)
+func getFacade(c *gin.Context) (FacadeHandler, bool) {
+	facadeObj, ok := c.Get("facade")
 	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errors.ErrInvalidAppContext.Error()})
-		return
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: errors.ErrNilAppContext.Error(),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
+		return nil, false
 	}
 
-	var gtx = TxRequest{}
-	err := c.ShouldBindJSON(&gtx)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%s: %s", errors.ErrValidation.Error(), err.Error())})
-		return
+	facade, ok := facadeObj.(FacadeHandler)
+	if !ok {
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: errors.ErrInvalidAppContext.Error(),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
+		return nil, false
 	}
 
-	tx, err := ef.GenerateTransaction(gtx.Sender, gtx.Receiver, gtx.Value, gtx.Data)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("%s: %s", errors.ErrTxGenerationFailed.Error(), err.Error())})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"transaction": txResponseFromTransaction(tx)})
+	return facade, true
 }
 
-// SendTransaction will receive a transaction from the client and propagate it for processing
-func SendTransaction(c *gin.Context) {
-	ef, ok := c.MustGet("elrondFacade").(TxService)
+// SimulateTransaction will receive a transaction from the client and will simulate it's execution and return the results
+func SimulateTransaction(c *gin.Context) {
+	facade, ok := getFacade(c)
 	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errors.ErrInvalidAppContext.Error()})
 		return
 	}
 
 	var gtx = SendTxRequest{}
 	err := c.ShouldBindJSON(&gtx)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%s: %s", errors.ErrValidation.Error(), err.Error())})
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrValidation.Error(), err.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
 		return
 	}
 
-	signature, err := hex.DecodeString(gtx.Signature)
+	checkSignature, err := getQueryParameterCheckSignature(c)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%s: %s", errors.ErrInvalidSignatureHex.Error(), err.Error())})
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: errors.ErrValidation.Error(),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
 		return
 	}
 
-	txHash, err := ef.SendTransaction(gtx.Nonce, gtx.Sender, gtx.Receiver, gtx.Value, gtx.GasPrice, gtx.GasLimit, gtx.Data, signature)
+	tx, txHash, err := facade.CreateTransaction(
+		gtx.Nonce,
+		gtx.Value,
+		gtx.Receiver,
+		gtx.ReceiverUsername,
+		gtx.Sender,
+		gtx.SenderUsername,
+		gtx.GasPrice,
+		gtx.GasLimit,
+		gtx.Data,
+		gtx.Signature,
+		gtx.ChainID,
+		gtx.Version,
+		gtx.Options,
+	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("%s: %s", errors.ErrTxGenerationFailed.Error(), err.Error())})
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrTxGenerationFailed.Error(), err.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"txHash": txHash})
+	err = facade.ValidateTransactionForSimulation(tx, checkSignature)
+	if err != nil {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrTxGenerationFailed.Error(), err.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+
+	executionResults, err := facade.SimulateTransactionExecution(tx)
+	if err != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: err.Error(),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
+		return
+	}
+
+	executionResults.Hash = hex.EncodeToString(txHash)
+	c.JSON(
+		http.StatusOK,
+		shared.GenericAPIResponse{
+			Data:  gin.H{"result": executionResults},
+			Error: "",
+			Code:  shared.ReturnCodeSuccess,
+		},
+	)
+}
+
+// SendTransaction will receive a transaction from the client and propagate it for processing
+func SendTransaction(c *gin.Context) {
+	facade, ok := getFacade(c)
+	if !ok {
+		return
+	}
+
+	var gtx = SendTxRequest{}
+	err := c.ShouldBindJSON(&gtx)
+	if err != nil {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrValidation.Error(), err.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+
+	tx, txHash, err := facade.CreateTransaction(
+		gtx.Nonce,
+		gtx.Value,
+		gtx.Receiver,
+		gtx.ReceiverUsername,
+		gtx.Sender,
+		gtx.SenderUsername,
+		gtx.GasPrice,
+		gtx.GasLimit,
+		gtx.Data,
+		gtx.Signature,
+		gtx.ChainID,
+		gtx.Version,
+		gtx.Options,
+	)
+	if err != nil {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrTxGenerationFailed.Error(), err.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+
+	err = facade.ValidateTransaction(tx)
+	if err != nil {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrTxGenerationFailed.Error(), err.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+
+	_, err = facade.SendBulkTransactions([]*transaction.Transaction{tx})
+	if err != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: err.Error(),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
+		return
+	}
+
+	txHexHash := hex.EncodeToString(txHash)
+	c.JSON(
+		http.StatusOK,
+		shared.GenericAPIResponse{
+			Data:  gin.H{"txHash": txHexHash},
+			Error: "",
+			Code:  shared.ReturnCodeSuccess,
+		},
+	)
 }
 
 // SendMultipleTransactions will receive a number of transactions and will propagate them for processing
 func SendMultipleTransactions(c *gin.Context) {
-	ef, ok := c.MustGet("elrondFacade").(TxService)
+	facade, ok := getFacade(c)
 	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errors.ErrInvalidAppContext.Error()})
 		return
 	}
 
 	var gtx []SendTxRequest
 	err := c.ShouldBindJSON(&gtx)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%s: %s", errors.ErrValidation.Error(), err.Error())})
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrValidation.Error(), err.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
 		return
 	}
 
-	var txs []*transaction.Transaction
-	for _, receivedTx := range gtx {
-		tx, err := ef.CreateTransaction(
+	var (
+		txs    []*transaction.Transaction
+		tx     *transaction.Transaction
+		txHash []byte
+	)
+
+	txsHashes := make(map[int]string)
+	for idx, receivedTx := range gtx {
+		tx, txHash, err = facade.CreateTransaction(
 			receivedTx.Nonce,
 			receivedTx.Value,
 			receivedTx.Receiver,
+			receivedTx.ReceiverUsername,
 			receivedTx.Sender,
+			receivedTx.SenderUsername,
 			receivedTx.GasPrice,
 			receivedTx.GasLimit,
 			receivedTx.Data,
 			receivedTx.Signature,
-			receivedTx.Challenge,
+			receivedTx.ChainID,
+			receivedTx.Version,
+			receivedTx.Options,
 		)
 		if err != nil {
 			continue
 		}
 
+		err = facade.ValidateTransaction(tx)
+		if err != nil {
+			continue
+		}
+
 		txs = append(txs, tx)
+		txsHashes[idx] = hex.EncodeToString(txHash)
 	}
 
-	numOfSentTxs, err := ef.SendBulkTransactions(txs)
+	numOfSentTxs, err := facade.SendBulkTransactions(txs)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: err.Error(),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"txsSent": numOfSentTxs})
-}
-
-// GenerateAndSendBulkTransactions generates multipleTransactions
-func GenerateAndSendBulkTransactions(c *gin.Context) {
-	ef, ok := c.MustGet("elrondFacade").(TxService)
-	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errors.ErrInvalidAppContext.Error()})
-		return
-	}
-
-	var gtx = MultipleTxRequest{}
-	err := c.ShouldBindJSON(&gtx)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%s: %s", errors.ErrValidation.Error(), err.Error())})
-		return
-	}
-
-	err = ef.GenerateAndSendBulkTransactions(gtx.Receiver, gtx.Value, uint64(gtx.TxCount))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("%s: %s", errors.ErrMultipleTxGenerationFailed.Error(), err.Error())})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("%d", gtx.TxCount)})
-}
-
-// GenerateAndSendBulkTransactionsOneByOne generates multipleTransactions in a one-by-one fashion
-func GenerateAndSendBulkTransactionsOneByOne(c *gin.Context) {
-	ef, ok := c.MustGet("elrondFacade").(TxService)
-	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errors.ErrInvalidAppContext.Error()})
-		return
-	}
-
-	var gtx = MultipleTxRequest{}
-	err := c.ShouldBindJSON(&gtx)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%s: %s", errors.ErrValidation.Error(), err.Error())})
-		return
-	}
-
-	err = ef.GenerateAndSendBulkTransactionsOneByOne(gtx.Receiver, gtx.Value, uint64(gtx.TxCount))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("%s: %s", errors.ErrMultipleTxGenerationFailed.Error(), err.Error())})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("%d", gtx.TxCount)})
+	c.JSON(
+		http.StatusOK,
+		shared.GenericAPIResponse{
+			Data: gin.H{
+				"txsSent":   numOfSentTxs,
+				"txsHashes": txsHashes,
+			},
+			Error: "",
+			Code:  shared.ReturnCodeSuccess,
+		},
+	)
 }
 
 // GetTransaction returns transaction details for a given txhash
 func GetTransaction(c *gin.Context) {
-
-	ef, ok := c.MustGet("elrondFacade").(TxService)
+	facade, ok := getFacade(c)
 	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errors.ErrInvalidAppContext.Error()})
 		return
 	}
 
 	txhash := c.Param("txhash")
 	if txhash == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%s: %s", errors.ErrValidation.Error(), errors.ErrValidationEmptyTxHash.Error())})
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrValidation.Error(), errors.ErrValidationEmptyTxHash.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
 		return
 	}
 
-	tx, err := ef.GetTransaction(txhash)
+	withResults, err := getQueryParamWithResults(c)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errors.ErrGetTransaction.Error()})
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: errors.ErrValidation.Error(),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
 		return
 	}
 
-	if tx == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": errors.ErrTxNotFound.Error()})
+	tx, err := facade.GetTransaction(txhash, withResults)
+	if err != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrGetTransaction.Error(), err.Error()),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"transaction": txResponseFromTransaction(tx)})
+	c.JSON(
+		http.StatusOK,
+		shared.GenericAPIResponse{
+			Data:  gin.H{"transaction": tx},
+			Error: "",
+			Code:  shared.ReturnCodeSuccess,
+		},
+	)
 }
 
-func txResponseFromTransaction(tx *transaction.Transaction) TxResponse {
-	response := TxResponse{}
-	response.Nonce = tx.Nonce
-	response.Sender = hex.EncodeToString(tx.SndAddr)
-	response.Receiver = hex.EncodeToString(tx.RcvAddr)
-	response.Data = tx.Data
-	response.Signature = hex.EncodeToString(tx.Signature)
-	response.Challenge = string(tx.Challenge)
-	response.Value = tx.Value
-	response.GasLimit = tx.GasLimit
-	response.GasPrice = tx.GasPrice
+// ComputeTransactionGasLimit returns how many gas units a transaction wil consume
+func ComputeTransactionGasLimit(c *gin.Context) {
+	facade, ok := getFacade(c)
+	if !ok {
+		return
+	}
 
-	return response
+	var gtx SendTxRequest
+	err := c.ShouldBindJSON(&gtx)
+	if err != nil {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrValidation.Error(), err.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+
+	tx, _, err := facade.CreateTransaction(
+		gtx.Nonce,
+		gtx.Value,
+		gtx.Receiver,
+		gtx.ReceiverUsername,
+		gtx.Sender,
+		gtx.SenderUsername,
+		gtx.GasPrice,
+		gtx.GasLimit,
+		gtx.Data,
+		gtx.Signature,
+		gtx.ChainID,
+		gtx.Version,
+		gtx.Options,
+	)
+	if err != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: err.Error(),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
+		return
+	}
+
+	cost, err := facade.ComputeTransactionGasLimit(tx)
+	if err != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: err.Error(),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
+		return
+	}
+
+	c.JSON(
+		http.StatusOK,
+		shared.GenericAPIResponse{
+			Data:  cost,
+			Error: "",
+			Code:  shared.ReturnCodeSuccess,
+		},
+	)
+}
+
+func getQueryParamWithResults(c *gin.Context) (bool, error) {
+	withResultsStr := c.Request.URL.Query().Get(queryParamWithResults)
+	if withResultsStr == "" {
+		return false, nil
+	}
+
+	return strconv.ParseBool(withResultsStr)
+}
+
+func getQueryParameterCheckSignature(c *gin.Context) (bool, error) {
+	bypassSignatureStr := c.Request.URL.Query().Get(queryParamCheckSignature)
+	if bypassSignatureStr == "" {
+		return true, nil
+	}
+
+	return strconv.ParseBool(bypassSignatureStr)
 }

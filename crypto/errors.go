@@ -16,6 +16,9 @@ var ErrNilPrivateKeyScalar = errors.New("private key holds a nil scalar")
 // ErrInvalidScalar is raised when an invalid scalar is used
 var ErrInvalidScalar = errors.New("scalar is invalid")
 
+// ErrInvalidPoint is raised when an invalid point is used
+var ErrInvalidPoint = errors.New("point is invalid")
+
 // ErrNilPublicKeys is raised when public keys are expected but received nil
 var ErrNilPublicKeys = errors.New("public keys are nil")
 
@@ -73,29 +76,11 @@ var ErrNilSignaturesList = errors.New("signature list is nil")
 // ErrNilMessage is raised when trying to verify a nil signed message or trying to sign a nil message
 var ErrNilMessage = errors.New("message to be signed or to be verified is nil")
 
-// ErrNilSingleSigner is raised when using a nil single signer
-var ErrNilSingleSigner = errors.New("single signer is nil")
-
 // ErrBitmapMismatch is raised when an invalid bitmap is passed to the multisigner
 var ErrBitmapMismatch = errors.New("multi signer reported a mismatch in used bitmap")
 
-// ErrBitmapNotSet is raised when a cleared bitmap is used
-var ErrBitmapNotSet = errors.New("bitmap is not set")
-
-// ErrNilCommitment is raised when a nil commitment is used
-var ErrNilCommitment = errors.New("commitment is nil")
-
 // ErrNilBitmap is raised when a nil bitmap is used
 var ErrNilBitmap = errors.New("bitmap is nil")
-
-// ErrNilCommitmentSecret is raised when a nil commitment secret is used
-var ErrNilCommitmentSecret = errors.New("commitment secret is nil")
-
-// ErrNilAggregatedCommitment is raised when nil aggregated commitment is used
-var ErrNilAggregatedCommitment = errors.New("aggregated commitment is nil")
-
-// ErrNilCommitmentHash is raised when a nil commitment hash is used
-var ErrNilCommitmentHash = errors.New("commitment hash is nil")
 
 // ErrSigNotValid is raised when a signature verification fails due to invalid signature
 var ErrSigNotValid = errors.New("signature is invalid")
@@ -108,3 +93,42 @@ var ErrEmptyPubKeyString = errors.New("public key string is empty")
 
 // ErrInvalidSigner is raised when the signer is invalid
 var ErrInvalidSigner = errors.New("signer is invalid")
+
+// ErrEd25519InvalidSignature will be returned when ed25519 signature verification fails
+var ErrEd25519InvalidSignature = errors.New("ed25519: invalid signature")
+
+// ErrBLSInvalidSignature will be returned when the provided BLS signature is invalid
+var ErrBLSInvalidSignature = errors.New("bls12-381: invalid signature")
+
+// ErrGeneratingPubFromPriv signals that there was an error generating a public key corresponding to a provided private key
+var ErrGeneratingPubFromPriv = errors.New("unable to generate PublicKey from provided private key")
+
+// ErrNotImplemented signals that a method is not implemented for an interface implementation
+var ErrNotImplemented = errors.New("not implemented")
+
+// ErrWrongPrivateKeySize signals that the length of the provided private key is not the expected one
+var ErrWrongPrivateKeySize = errors.New("wrong private key size")
+
+// ErrWrongPrivateKeyStructure signals that the structure of the private key is incorrect
+var ErrWrongPrivateKeyStructure = errors.New("wrong private key structure")
+
+// ErrNilCacher signals that a nil cacher has been provided
+var ErrNilCacher = errors.New("nil cacher")
+
+// ErrNilSingleSigner is raised when a valid singleSigner is expected but nil used
+var ErrNilSingleSigner = errors.New("singleSigner is nil")
+
+// ErrPIDMismatch signals that the pid from the message is different from the cached pid associated to a certain pk
+var ErrPIDMismatch = errors.New("pid mismatch")
+
+// ErrSignatureMismatch signals that the signature from the message is different from the cached signature associated to a certain pk
+var ErrSignatureMismatch = errors.New("signature mismatch")
+
+// ErrInvalidPID signals that given PID is invalid
+var ErrInvalidPID = errors.New("invalid PID")
+
+// ErrInvalidSignature signals that the given signature is invalid
+var ErrInvalidSignature = errors.New("invalid signature")
+
+// ErrWrongTypeAssertion signals wrong type assertion
+var ErrWrongTypeAssertion = errors.New("wrong type assertion")

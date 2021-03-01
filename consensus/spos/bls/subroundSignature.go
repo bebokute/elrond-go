@@ -1,7 +1,7 @@
 package bls
 
 import (
-	"fmt"
+	"time"
 
 	"github.com/ElrondNetwork/elrond-go/consensus"
 	"github.com/ElrondNetwork/elrond-go/consensus/spos"
@@ -28,8 +28,8 @@ func NewSubroundSignature(
 	}
 
 	srSignature := subroundSignature{
-		baseSubround,
-		statusHandler.NewNilStatusHandler(),
+		Subround:         baseSubround,
+		appStatusHandler: statusHandler.NewNilStatusHandler(),
 	}
 	srSignature.Job = srSignature.doSignatureJob
 	srSignature.Check = srSignature.doSignatureConsensusCheck
@@ -65,43 +65,58 @@ func checkNewSubroundSignatureParams(
 
 // doSignatureJob method does the job of the subround Signature
 func (sr *subroundSignature) doSignatureJob() bool {
-	if !sr.CanDoSubroundJob(SrSignature) {
+	if !sr.IsNodeInConsensusGroup(sr.SelfPubKey()) {
+		return true
+	}
+	if !sr.CanDoSubroundJob(sr.Current()) {
 		return false
 	}
 
-	sigPart, err := sr.MultiSigner().CreateSignatureShare(sr.GetData(), nil)
+	signatureShare, err := sr.MultiSigner().CreateSignatureShare(sr.GetData(), nil)
 	if err != nil {
-		log.Error(err.Error())
+		log.Debug("doSignatureJob.CreateSignatureShare", "error", err.Error())
 		return false
 	}
 
-	if !sr.IsSelfLeaderInCurrentRound() { // is NOT self leader in this round?
-		//TODO: Check if it is possible to send message only to leader with O(1) instead of O(n)
-		msg := consensus.NewConsensusMessage(
+	isSelfLeader := sr.IsSelfLeaderInCurrentRound()
+
+	if !isSelfLeader {
+		//TODO: Analyze it is possible to send message only to leader with O(1) instead of O(n)
+		cnsMsg := consensus.NewConsensusMessage(
 			sr.GetData(),
-			sigPart,
+			signatureShare,
+			nil,
+			nil,
 			[]byte(sr.SelfPubKey()),
 			nil,
 			int(MtSignature),
-			uint64(sr.Rounder().TimeStamp().Unix()),
-			sr.Rounder().Index())
+			sr.Rounder().Index(),
+			sr.ChainID(),
+			nil,
+			nil,
+			nil,
+			sr.CurrentPid(),
+		)
 
-		err = sr.BroadcastMessenger().BroadcastConsensusMessage(msg)
+		err = sr.BroadcastMessenger().BroadcastConsensusMessage(cnsMsg)
 		if err != nil {
-			log.Info(err.Error())
+			log.Debug("doSignatureJob.BroadcastConsensusMessage", "error", err.Error())
 			return false
 		}
 
-		log.Info(fmt.Sprintf("%sStep 2: signature has been sent\n", sr.SyncTimer().FormattedCurrentTime()))
-
-		// Validator has finished its job for this round
-		sr.RoundCanceled = true
+		log.Debug("step 2: signature has been sent")
 	}
 
-	err = sr.SetSelfJobDone(SrSignature, true)
+	err = sr.SetSelfJobDone(sr.Current(), true)
 	if err != nil {
-		log.Error(err.Error())
+		log.Debug("doSignatureJob.SetSelfJobDone",
+			"subround", sr.Name(),
+			"error", err.Error())
 		return false
+	}
+
+	if isSelfLeader {
+		go sr.waitAllSignatures()
 	}
 
 	return true
@@ -117,49 +132,59 @@ func (sr *subroundSignature) receivedSignature(cnsDta *consensus.Message) bool {
 		return false
 	}
 
+	if !sr.IsNodeInConsensusGroup(node) {
+		sr.PeerHonestyHandler().ChangeScore(
+			node,
+			spos.GetConsensusTopicID(sr.ShardCoordinator()),
+			spos.ValidatorPeerHonestyDecreaseFactor,
+		)
+
+		return false
+	}
+
+	if !sr.IsSelfLeaderInCurrentRound() {
+		return false
+	}
+
 	if !sr.IsConsensusDataEqual(cnsDta.BlockHeaderHash) {
 		return false
 	}
 
-	if !sr.CanProcessReceivedMessage(cnsDta, sr.Rounder().Index(), SrSignature) {
+	if !sr.CanProcessReceivedMessage(cnsDta, sr.Rounder().Index(), sr.Current()) {
 		return false
-	}
-
-	// if this node is leader in this round and it already received 2/3 + 1 of signatures
-	// it will ignore any others received later
-	if sr.IsSelfLeaderInCurrentRound() {
-		threshold := sr.Threshold(SrSignature)
-		if ok, _ := sr.signaturesCollected(threshold); ok {
-			return false
-		}
 	}
 
 	index, err := sr.ConsensusGroupIndex(node)
 	if err != nil {
-		log.Error(err.Error())
+		log.Debug("receivedSignature.ConsensusGroupIndex",
+			"node", node,
+			"error", err.Error())
 		return false
 	}
 
 	currentMultiSigner := sr.MultiSigner()
-	err = currentMultiSigner.StoreSignatureShare(uint16(index), cnsDta.SubRoundData)
+	err = currentMultiSigner.StoreSignatureShare(uint16(index), cnsDta.SignatureShare)
 	if err != nil {
-		log.Error(err.Error())
+		log.Debug("receivedSignature.StoreSignatureShare",
+			"index", index,
+			"error", err.Error())
 		return false
 	}
 
-	err = sr.SetJobDone(node, SrSignature, true)
+	err = sr.SetJobDone(node, sr.Current(), true)
 	if err != nil {
-		log.Error(err.Error())
+		log.Debug("receivedSignature.SetJobDone",
+			"node", node,
+			"subround", sr.Name(),
+			"error", err.Error())
 		return false
 	}
 
-	if sr.IsSelfLeaderInCurrentRound() {
-		threshold := sr.Threshold(SrSignature)
-		if ok, n := sr.signaturesCollected(threshold); ok {
-			log.Info(fmt.Sprintf("%sStep 2: received %d from %d signatures\n",
-				sr.SyncTimer().FormattedCurrentTime(), n, len(sr.ConsensusGroup())))
-		}
-	}
+	sr.PeerHonestyHandler().ChangeScore(
+		node,
+		spos.GetConsensusTopicID(sr.ShardCoordinator()),
+		spos.ValidatorPeerHonestyIncreaseFactor,
+	)
 
 	sr.appStatusHandler.SetStringValue(core.MetricConsensusRoundState, "signed")
 	return true
@@ -171,16 +196,42 @@ func (sr *subroundSignature) doSignatureConsensusCheck() bool {
 		return false
 	}
 
-	if sr.Status(SrSignature) == spos.SsFinished {
+	if sr.IsSubroundFinished(sr.Current()) {
 		sr.appStatusHandler.SetStringValue(core.MetricConsensusRoundState, "signed")
 
 		return true
 	}
 
-	threshold := sr.Threshold(SrSignature)
-	if ok, _ := sr.signaturesCollected(threshold); ok {
-		log.Info(fmt.Sprintf("%sStep 2: Subround %s has been finished\n", sr.SyncTimer().FormattedCurrentTime(), sr.Name()))
-		sr.SetStatus(SrSignature, spos.SsFinished)
+	isSelfLeader := sr.IsSelfLeaderInCurrentRound()
+	isSelfInConsensusGroup := sr.IsNodeInConsensusGroup(sr.SelfPubKey())
+
+	threshold := sr.Threshold(sr.Current())
+	if sr.FallbackHeaderValidator().ShouldApplyFallbackValidation(sr.Header) {
+		threshold = sr.FallbackThreshold(sr.Current())
+		log.Warn("subroundSignature.doSignatureConsensusCheck: fallback validation has been applied",
+			"minimum number of signatures required", threshold,
+			"actual number of signatures received", sr.getNumOfSignaturesCollected(),
+		)
+	}
+
+	areSignaturesCollected, numSigs := sr.areSignaturesCollected(threshold)
+	areAllSignaturesCollected := numSigs == sr.ConsensusGroupSize()
+
+	isJobDoneByLeader := isSelfLeader && (areAllSignaturesCollected || (areSignaturesCollected && sr.WaitingAllSignaturesTimeOut))
+	isJobDoneByConsensusNode := !isSelfLeader && isSelfInConsensusGroup && sr.IsSelfJobDone(sr.Current())
+
+	isSubroundFinished := !isSelfInConsensusGroup || isJobDoneByConsensusNode || isJobDoneByLeader
+
+	if isSubroundFinished {
+		if isSelfLeader {
+			log.Debug("step 2: signatures",
+				"received", numSigs,
+				"total", len(sr.ConsensusGroup()))
+		}
+
+		log.Debug("step 2: subround has been finished",
+			"subround", sr.Name())
+		sr.SetStatus(sr.Current(), spos.SsFinished)
 
 		sr.appStatusHandler.SetStringValue(core.MetricConsensusRoundState, "signed")
 
@@ -190,17 +241,25 @@ func (sr *subroundSignature) doSignatureConsensusCheck() bool {
 	return false
 }
 
-// signaturesCollected method checks if the signatures received from the nodes, belonging to the current
+// areSignaturesCollected method checks if the signatures received from the nodes, belonging to the current
 // jobDone group, are more than the necessary given threshold
-func (sr *subroundSignature) signaturesCollected(threshold int) (bool, int) {
+func (sr *subroundSignature) areSignaturesCollected(threshold int) (bool, int) {
+	n := sr.getNumOfSignaturesCollected()
+	return n >= threshold, n
+}
+
+func (sr *subroundSignature) getNumOfSignaturesCollected() int {
 	n := 0
 
 	for i := 0; i < len(sr.ConsensusGroup()); i++ {
 		node := sr.ConsensusGroup()[i]
 
-		isSignJobDone, err := sr.JobDone(node, SrSignature)
+		isSignJobDone, err := sr.JobDone(node, sr.Current())
 		if err != nil {
-			log.Error(err.Error())
+			log.Debug("getNumOfSignaturesCollected.JobDone",
+				"node", node,
+				"subround", sr.Name(),
+				"error", err.Error())
 			continue
 		}
 
@@ -209,5 +268,29 @@ func (sr *subroundSignature) signaturesCollected(threshold int) (bool, int) {
 		}
 	}
 
-	return n >= threshold, n
+	return n
+}
+
+func (sr *subroundSignature) waitAllSignatures() {
+	remainingTime := sr.remainingTime()
+	time.Sleep(remainingTime)
+
+	if sr.IsSubroundFinished(sr.Current()) {
+		return
+	}
+
+	sr.WaitingAllSignaturesTimeOut = true
+
+	select {
+	case sr.ConsensusChannel() <- true:
+	default:
+	}
+}
+
+func (sr *subroundSignature) remainingTime() time.Duration {
+	startTime := sr.Rounder().TimeStamp()
+	maxTime := time.Duration(float64(sr.StartTime()) + float64(sr.EndTime()-sr.StartTime())*waitingAllSigsMaxTimeThreshold)
+	remainigTime := sr.Rounder().RemainingTime(startTime, maxTime)
+
+	return remainigTime
 }

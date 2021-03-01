@@ -10,12 +10,12 @@ import (
 func TestCpuStatisticsUsagePercent(t *testing.T) {
 	t.Parallel()
 
-	cs := &CpuStatistics{}
+	cs, err := NewCpuStatistics()
+	assert.Nil(t, err)
 
 	cs.ComputeStatistics()
 	cpuUsagePercentValue := cs.CpuPercentUsage()
 	fmt.Printf("CPU usage: %d%%\n", cpuUsagePercentValue)
 
-	assert.True(t, cpuUsagePercentValue >= 0)
 	assert.True(t, cpuUsagePercentValue <= 100)
 }

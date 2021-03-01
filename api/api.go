@@ -2,129 +2,181 @@ package api
 
 import (
 	"bytes"
-	"fmt"
 	"net/http"
 	"reflect"
 
+	logger "github.com/ElrondNetwork/elrond-go-logger"
 	"github.com/ElrondNetwork/elrond-go/api/address"
+	"github.com/ElrondNetwork/elrond-go/api/block"
+	"github.com/ElrondNetwork/elrond-go/api/hardfork"
+	"github.com/ElrondNetwork/elrond-go/api/logs"
 	"github.com/ElrondNetwork/elrond-go/api/middleware"
+	"github.com/ElrondNetwork/elrond-go/api/network"
 	"github.com/ElrondNetwork/elrond-go/api/node"
 	"github.com/ElrondNetwork/elrond-go/api/transaction"
+	valStats "github.com/ElrondNetwork/elrond-go/api/validator"
 	"github.com/ElrondNetwork/elrond-go/api/vmValues"
+	"github.com/ElrondNetwork/elrond-go/api/wrapper"
+	"github.com/ElrondNetwork/elrond-go/config"
+	"github.com/ElrondNetwork/elrond-go/core/check"
+	"github.com/ElrondNetwork/elrond-go/marshal"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-contrib/pprof"
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
-	"github.com/gin-gonic/gin/json"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/gorilla/websocket"
 	"gopkg.in/go-playground/validator.v8"
 )
+
+var log = logger.GetOrCreate("api")
 
 type validatorInput struct {
 	Name      string
 	Validator validator.Func
 }
 
-type prometheus struct {
-	NodePort  string
-	NetworkID string
+// MiddlewareProcessor defines a processor used internally by the web server when processing requests
+type MiddlewareProcessor interface {
+	MiddlewareHandlerFunc() gin.HandlerFunc
+	IsInterfaceNil() bool
 }
 
 // MainApiHandler interface defines methods that can be used from `elrondFacade` context variable
 type MainApiHandler interface {
-	RestApiPort() string
+	RestApiInterface() string
 	RestAPIServerDebugMode() bool
 	PprofEnabled() bool
-	PrometheusMonitoring() bool
-	PrometheusJoinURL() string
-	PrometheusNetworkID() string
 	IsInterfaceNil() bool
 }
 
+type ginWriter struct {
+}
+
+func (gv *ginWriter) Write(p []byte) (n int, err error) {
+	trimmed := bytes.TrimSpace(p)
+	log.Trace("gin server", "message", string(trimmed))
+
+	return len(p), nil
+}
+
+type ginErrorWriter struct {
+}
+
+func (gev *ginErrorWriter) Write(p []byte) (n int, err error) {
+	trimmed := bytes.TrimSpace(p)
+	log.Trace("gin server", "error", string(trimmed))
+
+	return len(p), nil
+}
+
 // Start will boot up the api and appropriate routes, handlers and validators
-func Start(elrondFacade MainApiHandler) error {
+func Start(elrondFacade MainApiHandler, routesConfig config.ApiRoutesConfig, processors ...MiddlewareProcessor) error {
 	var ws *gin.Engine
-	if elrondFacade.RestAPIServerDebugMode() {
-		ws = gin.Default()
-	} else {
-		ws = gin.New()
-		ws.Use(gin.Recovery())
+	if !elrondFacade.RestAPIServerDebugMode() {
+		gin.DefaultWriter = &ginWriter{}
+		gin.DefaultErrorWriter = &ginErrorWriter{}
+		gin.DisableConsoleColor()
 		gin.SetMode(gin.ReleaseMode)
 	}
+	ws = gin.Default()
 	ws.Use(cors.Default())
+	ws.Use(middleware.WithFacade(elrondFacade))
+	for _, proc := range processors {
+		if check.IfNil(proc) {
+			continue
+		}
 
-	err := registerValidators()
+		ws.Use(proc.MiddlewareHandlerFunc())
+	}
+
+	err := RegisterDefaultValidators()
 	if err != nil {
 		return err
 	}
 
-	registerRoutes(ws, elrondFacade)
+	RegisterRoutes(ws, routesConfig, elrondFacade)
 
-	if elrondFacade.PrometheusMonitoring() {
-		err = joinMonitoringSystem(elrondFacade)
-		if err != nil {
-			return err
+	return ws.Run(elrondFacade.RestApiInterface())
+}
+
+// RegisterRoutes will register all routes available on the web server
+func RegisterRoutes(ws *gin.Engine, routesConfig config.ApiRoutesConfig, elrondFacade middleware.Handler) {
+	nodeRoutes := ws.Group("/node")
+	wrappedNodeRouter, err := wrapper.NewRouterWrapper("node", nodeRoutes, routesConfig)
+	if err == nil {
+		node.Routes(wrappedNodeRouter)
+	}
+
+	addressRoutes := ws.Group("/address")
+	wrappedAddressRouter, err := wrapper.NewRouterWrapper("address", addressRoutes, routesConfig)
+	if err == nil {
+		address.Routes(wrappedAddressRouter)
+	}
+
+	networkRoutes := ws.Group("/network")
+	wrappedNetworkRoutes, err := wrapper.NewRouterWrapper("network", networkRoutes, routesConfig)
+	if err == nil {
+		network.Routes(wrappedNetworkRoutes)
+	}
+
+	txRoutes := ws.Group("/transaction")
+	wrappedTransactionRouter, err := wrapper.NewRouterWrapper("transaction", txRoutes, routesConfig)
+	if err == nil {
+		transaction.Routes(wrappedTransactionRouter)
+	}
+
+	vmValuesRoutes := ws.Group("/vm-values")
+	wrappedVmValuesRouter, err := wrapper.NewRouterWrapper("vm-values", vmValuesRoutes, routesConfig)
+	if err == nil {
+		vmValues.Routes(wrappedVmValuesRouter)
+	}
+
+	validatorRoutes := ws.Group("/validator")
+	wrappedValidatorsRouter, err := wrapper.NewRouterWrapper("validator", validatorRoutes, routesConfig)
+	if err == nil {
+		valStats.Routes(wrappedValidatorsRouter)
+	}
+
+	hardforkRoutes := ws.Group("/hardfork")
+	wrappedHardforkRouter, err := wrapper.NewRouterWrapper("hardfork", hardforkRoutes, routesConfig)
+	if err == nil {
+		hardfork.Routes(wrappedHardforkRouter)
+	}
+
+	blockRoutes := ws.Group("/block")
+	wrappedBlockRouter, err := wrapper.NewRouterWrapper("block", blockRoutes, routesConfig)
+	if err == nil {
+		block.Routes(wrappedBlockRouter)
+	}
+
+	apiHandler, ok := elrondFacade.(MainApiHandler)
+	if ok && apiHandler.PprofEnabled() {
+		pprof.Register(ws)
+	}
+
+	if isLogRouteEnabled(routesConfig) {
+		marshalizerForLogs := &marshal.GogoProtoMarshalizer{}
+		registerLoggerWsRoute(ws, marshalizerForLogs)
+	}
+}
+
+func isLogRouteEnabled(routesConfig config.ApiRoutesConfig) bool {
+	logConfig, ok := routesConfig.APIPackages["log"]
+	if !ok {
+		return false
+	}
+
+	for _, cfg := range logConfig.Routes {
+		if cfg.Name == "/log" && cfg.Open {
+			return true
 		}
 	}
 
-	return ws.Run(fmt.Sprintf(":%s", elrondFacade.RestApiPort()))
+	return false
 }
 
-func joinMonitoringSystem(elrondFacade MainApiHandler) error {
-	prometheusJoinUrl := elrondFacade.PrometheusJoinURL()
-	structToSend := prometheus{
-		NodePort:  elrondFacade.RestApiPort(),
-		NetworkID: elrondFacade.PrometheusNetworkID(),
-	}
-
-	jsonValue, err := json.Marshal(structToSend)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequest("POST", prometheusJoinUrl, bytes.NewBuffer(jsonValue))
-	if err != nil {
-		return err
-	}
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-
-	err = resp.Body.Close()
-	return err
-}
-
-func registerRoutes(ws *gin.Engine, elrondFacade middleware.ElrondHandler) {
-	nodeRoutes := ws.Group("/node")
-	nodeRoutes.Use(middleware.WithElrondFacade(elrondFacade))
-	node.Routes(nodeRoutes)
-
-	addressRoutes := ws.Group("/address")
-	addressRoutes.Use(middleware.WithElrondFacade(elrondFacade))
-	address.Routes(addressRoutes)
-
-	txRoutes := ws.Group("/transaction")
-	txRoutes.Use(middleware.WithElrondFacade(elrondFacade))
-	transaction.Routes(txRoutes)
-
-	vmValuesRoutes := ws.Group("/vm-values")
-	vmValuesRoutes.Use(middleware.WithElrondFacade(elrondFacade))
-	vmValues.Routes(vmValuesRoutes)
-
-	apiHandler, ok := elrondFacade.(MainApiHandler)
-	if ok && apiHandler.PrometheusMonitoring() {
-		nodeRoutes.GET("/metrics", gin.WrapH(promhttp.Handler()))
-	}
-
-	if apiHandler.PprofEnabled() {
-		pprof.Register(ws)
-	}
-}
-
-func registerValidators() error {
+// RegisterDefaultValidators will call register validation on all validator functions
+func RegisterDefaultValidators() error {
 	validators := []validatorInput{
 		{Name: "skValidator", Validator: skValidator},
 	}
@@ -137,6 +189,30 @@ func registerValidators() error {
 		}
 	}
 	return nil
+}
+
+func registerLoggerWsRoute(ws *gin.Engine, marshalizer marshal.Marshalizer) {
+	upgrader := websocket.Upgrader{}
+
+	ws.GET("/log", func(c *gin.Context) {
+		upgrader.CheckOrigin = func(r *http.Request) bool {
+			return true
+		}
+
+		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+		if err != nil {
+			log.Error(err.Error())
+			return
+		}
+
+		ls, err := logs.NewLogSender(marshalizer, conn, log)
+		if err != nil {
+			log.Error(err.Error())
+			return
+		}
+
+		ls.StartSendingBlocking()
+	})
 }
 
 // skValidator validates a secret key from user input for correctness

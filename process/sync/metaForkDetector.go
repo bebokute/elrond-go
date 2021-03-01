@@ -1,10 +1,16 @@
 package sync
 
 import (
+	"math"
+
 	"github.com/ElrondNetwork/elrond-go/consensus"
+	"github.com/ElrondNetwork/elrond-go/core"
+	"github.com/ElrondNetwork/elrond-go/core/check"
 	"github.com/ElrondNetwork/elrond-go/data"
 	"github.com/ElrondNetwork/elrond-go/process"
 )
+
+var _ process.ForkDetector = (*metaForkDetector)(nil)
 
 // metaForkDetector implements the meta fork detector mechanism
 type metaForkDetector struct {
@@ -12,23 +18,55 @@ type metaForkDetector struct {
 }
 
 // NewMetaForkDetector method creates a new metaForkDetector object
-func NewMetaForkDetector(rounder consensus.Rounder) (*metaForkDetector, error) {
-	if rounder == nil || rounder.IsInterfaceNil() {
+func NewMetaForkDetector(
+	rounder consensus.Rounder,
+	blackListHandler process.TimeCacher,
+	blockTracker process.BlockTracker,
+	genesisTime int64,
+) (*metaForkDetector, error) {
+
+	if check.IfNil(rounder) {
 		return nil, process.ErrNilRounder
+	}
+	if check.IfNil(blackListHandler) {
+		return nil, process.ErrNilBlackListCacher
+	}
+	if check.IfNil(blockTracker) {
+		return nil, process.ErrNilBlockTracker
+	}
+
+	genesisHdr, _, err := blockTracker.GetSelfNotarizedHeader(core.MetachainShardId, 0)
+	if err != nil {
+		return nil, err
 	}
 
 	bfd := &baseForkDetector{
-		rounder: rounder,
+		rounder:          rounder,
+		blackListHandler: blackListHandler,
+		genesisTime:      genesisTime,
+		blockTracker:     blockTracker,
+		genesisNonce:     genesisHdr.GetNonce(),
+		genesisRound:     genesisHdr.GetRound(),
+		genesisEpoch:     genesisHdr.GetEpoch(),
 	}
 
 	bfd.headers = make(map[uint64][]*headerInfo)
-	checkpoint := &checkpointInfo{}
+	bfd.fork.checkpoint = make([]*checkpointInfo, 0)
+	checkpoint := &checkpointInfo{
+		nonce: bfd.genesisNonce,
+		round: bfd.genesisRound,
+	}
 	bfd.setFinalCheckpoint(checkpoint)
 	bfd.addCheckpoint(checkpoint)
+	bfd.fork.rollBackNonce = math.MaxUint64
+	bfd.fork.probableHighestNonce = bfd.genesisNonce
+	bfd.fork.highestNonceReceived = bfd.genesisNonce
 
 	mfd := metaForkDetector{
 		baseForkDetector: bfd,
 	}
+
+	bfd.forkDetector = &mfd
 
 	return &mfd, nil
 }
@@ -38,52 +76,29 @@ func (mfd *metaForkDetector) AddHeader(
 	header data.HeaderHandler,
 	headerHash []byte,
 	state process.BlockHeaderState,
-	finalHeaders []data.HeaderHandler,
-	finalHeadersHashes [][]byte,
+	selfNotarizedHeaders []data.HeaderHandler,
+	selfNotarizedHeadersHashes [][]byte,
 ) error {
-
-	if header == nil || header.IsInterfaceNil() {
-		return ErrNilHeader
-	}
-	if headerHash == nil {
-		return ErrNilHash
-	}
-
-	err := mfd.checkBlockBasicValidity(header, state)
-	if err != nil {
-		return err
-	}
-
-	err = mfd.checkMetaBlockValidity(header)
-	if err != nil {
-		return err
-	}
-
-	if state == process.BHProcessed {
-		mfd.setFinalCheckpoint(mfd.lastCheckpoint())
-		mfd.addCheckpoint(&checkpointInfo{nonce: header.GetNonce(), round: header.GetRound()})
-		mfd.removePastOrInvalidRecords()
-	}
-
-	mfd.append(&headerInfo{
-		nonce: header.GetNonce(),
-		round: header.GetRound(),
-		hash:  headerHash,
-		state: state,
-	})
-
-	probableHighestNonce := mfd.computeProbableHighestNonce()
-	mfd.setLastBlockRound(uint64(mfd.rounder.Index()))
-	mfd.setProbableHighestNonce(probableHighestNonce)
-
-	return nil
+	return mfd.addHeader(
+		header,
+		headerHash,
+		state,
+		selfNotarizedHeaders,
+		selfNotarizedHeadersHashes,
+		mfd.doJobOnBHProcessed,
+	)
 }
 
-func (mfd *metaForkDetector) checkMetaBlockValidity(header data.HeaderHandler) error {
-	roundTooOld := int64(header.GetRound()) < mfd.rounder.Index()-process.MetaBlockFinality
-	if roundTooOld {
-		return ErrLowerRoundInBlock
-	}
+func (mfd *metaForkDetector) doJobOnBHProcessed(
+	header data.HeaderHandler,
+	headerHash []byte,
+	_ []data.HeaderHandler,
+	_ [][]byte,
+) {
+	mfd.setFinalCheckpoint(mfd.lastCheckpoint())
+	mfd.addCheckpoint(&checkpointInfo{nonce: header.GetNonce(), round: header.GetRound(), hash: headerHash})
+	mfd.removePastOrInvalidRecords()
+}
 
-	return nil
+func (mfd *metaForkDetector) computeFinalCheckpoint() {
 }

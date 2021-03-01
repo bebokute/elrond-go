@@ -1,78 +1,69 @@
 package consensus
 
 import (
-	"context"
-	"crypto/ecdsa"
 	"encoding/hex"
 	"fmt"
-	"math/rand"
+	"io/ioutil"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"math/big"
-
+	indexer "github.com/ElrondNetwork/elastic-indexer-go"
+	"github.com/ElrondNetwork/elrond-go/config"
 	"github.com/ElrondNetwork/elrond-go/consensus/round"
+	"github.com/ElrondNetwork/elrond-go/core"
+	"github.com/ElrondNetwork/elrond-go/core/pubkeyConverter"
 	"github.com/ElrondNetwork/elrond-go/crypto"
+	"github.com/ElrondNetwork/elrond-go/crypto/peerSignatureHandler"
 	"github.com/ElrondNetwork/elrond-go/crypto/signing"
-	"github.com/ElrondNetwork/elrond-go/crypto/signing/kyber"
-	"github.com/ElrondNetwork/elrond-go/crypto/signing/kyber/singlesig"
+	ed25519SingleSig "github.com/ElrondNetwork/elrond-go/crypto/signing/ed25519/singlesig"
+	"github.com/ElrondNetwork/elrond-go/crypto/signing/mcl"
+	mclsinglesig "github.com/ElrondNetwork/elrond-go/crypto/signing/mcl/singlesig"
 	"github.com/ElrondNetwork/elrond-go/data"
 	dataBlock "github.com/ElrondNetwork/elrond-go/data/block"
 	"github.com/ElrondNetwork/elrond-go/data/blockchain"
 	"github.com/ElrondNetwork/elrond-go/data/state"
-	"github.com/ElrondNetwork/elrond-go/data/state/addressConverters"
 	"github.com/ElrondNetwork/elrond-go/data/trie"
-	"github.com/ElrondNetwork/elrond-go/data/typeConverters/uint64ByteSlice"
+	"github.com/ElrondNetwork/elrond-go/data/trie/evictionWaitingList"
 	"github.com/ElrondNetwork/elrond-go/dataRetriever"
-	"github.com/ElrondNetwork/elrond-go/dataRetriever/dataPool"
-	"github.com/ElrondNetwork/elrond-go/dataRetriever/shardedData"
+	"github.com/ElrondNetwork/elrond-go/epochStart"
+	"github.com/ElrondNetwork/elrond-go/epochStart/metachain"
+	"github.com/ElrondNetwork/elrond-go/epochStart/notifier"
 	"github.com/ElrondNetwork/elrond-go/hashing"
 	"github.com/ElrondNetwork/elrond-go/hashing/blake2b"
 	"github.com/ElrondNetwork/elrond-go/hashing/sha256"
+	"github.com/ElrondNetwork/elrond-go/integrationTests"
 	"github.com/ElrondNetwork/elrond-go/integrationTests/mock"
 	"github.com/ElrondNetwork/elrond-go/marshal"
 	"github.com/ElrondNetwork/elrond-go/node"
 	"github.com/ElrondNetwork/elrond-go/ntp"
 	"github.com/ElrondNetwork/elrond-go/p2p"
-	"github.com/ElrondNetwork/elrond-go/p2p/libp2p"
-	"github.com/ElrondNetwork/elrond-go/p2p/libp2p/discovery"
-	"github.com/ElrondNetwork/elrond-go/p2p/loadBalancer"
 	"github.com/ElrondNetwork/elrond-go/process/factory"
 	syncFork "github.com/ElrondNetwork/elrond-go/process/sync"
 	"github.com/ElrondNetwork/elrond-go/sharding"
 	"github.com/ElrondNetwork/elrond-go/storage"
+	"github.com/ElrondNetwork/elrond-go/storage/lrucache"
 	"github.com/ElrondNetwork/elrond-go/storage/memorydb"
 	"github.com/ElrondNetwork/elrond-go/storage/storageUnit"
-	"github.com/btcsuite/btcd/btcec"
-	libp2pCrypto "github.com/libp2p/go-libp2p-core/crypto"
+	"github.com/ElrondNetwork/elrond-go/storage/timecache"
+	"github.com/ElrondNetwork/elrond-go/testscommon"
 )
 
 const blsConsensusType = "bls"
-const bnConsensusType = "bn"
+const signatureSize = 48
+const publicKeySize = 96
 
-var r *rand.Rand
-
-func init() {
-	r = rand.New(rand.NewSource(time.Now().UnixNano()))
-}
+var p2pBootstrapDelay = time.Second * 5
+var testPubkeyConverter, _ = pubkeyConverter.NewHexPubkeyConverter(32)
 
 type testNode struct {
-	node             *node.Node
-	mesenger         p2p.Messenger
-	shardId          uint32
-	accntState       state.AccountsAdapter
-	blkc             data.ChainHandler
-	blkProcessor     *mock.BlockProcessorMock
-	sk               crypto.PrivateKey
-	pk               crypto.PublicKey
-	dPool            dataRetriever.PoolsHolder
-	dMetaPool        dataRetriever.MetaPoolsHolder
-	headersRecv      int32
-	mutHeaders       sync.Mutex
-	headersHashes    [][]byte
-	headers          []data.HeaderHandler
-	metachainHdrRecv int32
+	node         *node.Node
+	mesenger     p2p.Messenger
+	blkc         data.ChainHandler
+	blkProcessor *mock.BlockProcessorMock
+	sk           crypto.PrivateKey
+	pk           crypto.PublicKey
+	shardId      uint32
 }
 
 type keyPair struct {
@@ -81,9 +72,10 @@ type keyPair struct {
 }
 
 type cryptoParams struct {
-	keyGen       crypto.KeyGenerator
-	keys         map[uint32][]*keyPair
-	singleSigner crypto.SingleSigner
+	keyGen         crypto.KeyGenerator
+	keys           map[uint32][]*keyPair
+	txSingleSigner crypto.SingleSigner
+	singleSigner   crypto.SingleSigner
 }
 
 func genValidatorsFromPubKeys(pubKeysMap map[uint32][]string) map[uint32][]sharding.Validator {
@@ -92,8 +84,7 @@ func genValidatorsFromPubKeys(pubKeysMap map[uint32][]string) map[uint32][]shard
 	for shardId, shardNodesPks := range pubKeysMap {
 		shardValidators := make([]sharding.Validator, 0)
 		for i := 0; i < len(shardNodesPks); i++ {
-			address := fmt.Sprintf("addr_%d_%d", shardId, i)
-			v, _ := sharding.NewValidator(big.NewInt(0), 1, []byte(shardNodesPks[i]), []byte(address))
+			v, _ := sharding.NewValidator([]byte(shardNodesPks[i]), 1, uint32(i))
 			shardValidators = append(shardValidators, v)
 		}
 		validatorsMap[shardId] = shardValidators
@@ -103,7 +94,7 @@ func genValidatorsFromPubKeys(pubKeysMap map[uint32][]string) map[uint32][]shard
 }
 
 func pubKeysMapFromKeysMap(keyPairMap map[uint32][]*keyPair) map[uint32][]string {
-	keysMap := make(map[uint32][]string, 0)
+	keysMap := make(map[uint32][]string)
 
 	for shardId, pairList := range keyPairMap {
 		shardKeys := make([]string, len(pairList))
@@ -115,24 +106,6 @@ func pubKeysMapFromKeysMap(keyPairMap map[uint32][]*keyPair) map[uint32][]string
 	}
 
 	return keysMap
-}
-
-func createMessengerWithKadDht(ctx context.Context, initialAddr string) p2p.Messenger {
-	prvKey, _ := ecdsa.GenerateKey(btcec.S256(), r)
-	sk := (*libp2pCrypto.Secp256k1PrivateKey)(prvKey)
-
-	libP2PMes, err := libp2p.NewNetworkMessengerOnFreePort(
-		ctx,
-		sk,
-		nil,
-		loadBalancer.NewOutgoingChannelLoadBalancer(),
-		discovery.NewKadDhtPeerDiscoverer(time.Second, "test", []string{initialAddr}),
-	)
-	if err != nil {
-		fmt.Println(err.Error())
-	}
-
-	return libP2PMes
 }
 
 func getConnectableAddress(mes p2p.Messenger) string {
@@ -153,29 +126,23 @@ func displayAndStartNodes(nodes []*testNode) {
 		fmt.Printf("Shard ID: %v, sk: %s, pk: %s\n",
 			n.shardId,
 			hex.EncodeToString(skBuff),
-			hex.EncodeToString(pkBuff),
+			testPubkeyConverter.Encode(pkBuff),
 		)
-		_ = n.node.Start()
-		_ = n.node.P2PBootstrap()
+		_ = n.mesenger.Bootstrap()
 	}
 }
 
 func createTestBlockChain() data.ChainHandler {
-	cfgCache := storageUnit.CacheConfig{Size: 100, Type: storageUnit.LRUCache}
-	badBlockCache, _ := storageUnit.NewCache(cfgCache.Type, cfgCache.Size, cfgCache.Shards)
-	blockChain, _ := blockchain.NewBlockChain(
-		badBlockCache,
-	)
-	blockChain.GenesisHeader = &dataBlock.Header{}
+	blockChain := blockchain.NewBlockChain()
+	_ = blockChain.SetGenesisHeader(&dataBlock.Header{})
 
 	return blockChain
 }
 
 func createMemUnit() storage.Storer {
-	cache, _ := storageUnit.NewCache(storageUnit.LRUCache, 10, 1)
-	persist, _ := memorydb.New()
+	cache, _ := storageUnit.NewCache(storageUnit.CacheConfig{Type: storageUnit.LRUCache, Capacity: 10, Shards: 1, SizeInBytes: 0})
 
-	unit, _ := storageUnit.NewStorageUnit(cache, persist)
+	unit, _ := storageUnit.NewStorageUnit(cache, memorydb.New())
 	return unit
 }
 
@@ -183,63 +150,52 @@ func createTestStore() dataRetriever.StorageService {
 	store := dataRetriever.NewChainStorer()
 	store.AddStorer(dataRetriever.TransactionUnit, createMemUnit())
 	store.AddStorer(dataRetriever.MiniBlockUnit, createMemUnit())
+	store.AddStorer(dataRetriever.RewardTransactionUnit, createMemUnit())
 	store.AddStorer(dataRetriever.MetaBlockUnit, createMemUnit())
 	store.AddStorer(dataRetriever.PeerChangesUnit, createMemUnit())
 	store.AddStorer(dataRetriever.BlockHeaderUnit, createMemUnit())
+	store.AddStorer(dataRetriever.BootstrapUnit, createMemUnit())
+	store.AddStorer(dataRetriever.ReceiptsUnit, createMemUnit())
 	return store
 }
 
-func createTestShardDataPool() dataRetriever.PoolsHolder {
-	txPool, _ := shardedData.NewShardedData(storageUnit.CacheConfig{Size: 100000, Type: storageUnit.LRUCache})
-	uTxPool, _ := shardedData.NewShardedData(storageUnit.CacheConfig{Size: 100000, Type: storageUnit.LRUCache})
-	rewardsTxPool, _ := shardedData.NewShardedData(storageUnit.CacheConfig{Size: 100, Type: storageUnit.LRUCache})
-	cacherCfg := storageUnit.CacheConfig{Size: 100, Type: storageUnit.LRUCache}
-	hdrPool, _ := storageUnit.NewCache(cacherCfg.Type, cacherCfg.Size, cacherCfg.Shards)
-
-	cacherCfg = storageUnit.CacheConfig{Size: 100000, Type: storageUnit.LRUCache}
-	hdrNoncesCacher, _ := storageUnit.NewCache(cacherCfg.Type, cacherCfg.Size, cacherCfg.Shards)
-	hdrNonces, _ := dataPool.NewNonceSyncMapCacher(hdrNoncesCacher, uint64ByteSlice.NewBigEndianConverter())
-
-	cacherCfg = storageUnit.CacheConfig{Size: 100000, Type: storageUnit.LRUCache}
-	txBlockBody, _ := storageUnit.NewCache(cacherCfg.Type, cacherCfg.Size, cacherCfg.Shards)
-
-	cacherCfg = storageUnit.CacheConfig{Size: 100000, Type: storageUnit.LRUCache}
-	peerChangeBlockBody, _ := storageUnit.NewCache(cacherCfg.Type, cacherCfg.Size, cacherCfg.Shards)
-
-	cacherCfg = storageUnit.CacheConfig{Size: 100000, Type: storageUnit.LRUCache}
-	metaBlocks, _ := storageUnit.NewCache(cacherCfg.Type, cacherCfg.Size, cacherCfg.Shards)
-
-	dPool, _ := dataPool.NewShardedDataPool(
-		txPool,
-		uTxPool,
-		rewardsTxPool,
-		hdrPool,
-		hdrNonces,
-		txBlockBody,
-		peerChangeBlockBody,
-		metaBlocks,
-	)
-
-	return dPool
-}
-
 func createAccountsDB(marshalizer marshal.Marshalizer) state.AccountsAdapter {
-	marsh := &marshal.JsonMarshalizer{}
+	marsh := &marshal.GogoProtoMarshalizer{}
 	hasher := sha256.Sha256{}
 	store := createMemUnit()
+	evictionWaitListSize := uint(100)
+	ewl, _ := evictionWaitingList.NewEvictionWaitingList(evictionWaitListSize, memorydb.New(), marsh)
 
-	tr, _ := trie.NewTrie(store, marsh, hasher)
+	// TODO change this implementation with a factory
+	tempDir, _ := ioutil.TempDir("", "integrationTests")
+	cfg := config.DBConfig{
+		FilePath:          tempDir,
+		Type:              string(storageUnit.LvlDBSerial),
+		BatchDelaySeconds: 4,
+		MaxBatchSize:      10000,
+		MaxOpenFiles:      10,
+	}
+	generalCfg := config.TrieStorageManagerConfig{
+		PruningBufferLen:   1000,
+		SnapshotsBufferLen: 10,
+		MaxSnapshots:       2,
+	}
+	trieStorage, _ := trie.NewTrieStorageManager(store, marshalizer, hasher, cfg, ewl, generalCfg)
+
+	maxTrieLevelInMemory := uint(5)
+	tr, _ := trie.NewTrie(trieStorage, marsh, hasher, maxTrieLevelInMemory)
 	adb, _ := state.NewAccountsDB(tr, sha256.Sha256{}, marshalizer, &mock.AccountsFactoryStub{
-		CreateAccountCalled: func(address state.AddressContainer, tracker state.AccountTracker) (wrapper state.AccountHandler, e error) {
-			return state.NewAccount(address, tracker)
+		CreateAccountCalled: func(address []byte) (wrapper state.AccountHandler, e error) {
+			return state.NewUserAccount(address)
 		},
 	})
 	return adb
 }
 
 func createCryptoParams(nodesPerShard int, nbMetaNodes int, nbShards int) *cryptoParams {
-	suite := kyber.NewSuitePairingBn256()
-	singleSigner := &singlesig.SchnorrSigner{}
+	suite := mcl.NewSuiteBLS12()
+	txSingleSigner := &ed25519SingleSig.Ed25519Signer{}
+	singleSigner := &mclsinglesig.BlsSingleSigner{}
 	keyGen := signing.NewKeyGenerator(suite)
 
 	keysMap := make(map[uint32][]*keyPair)
@@ -259,12 +215,13 @@ func createCryptoParams(nodesPerShard int, nbMetaNodes int, nbShards int) *crypt
 		kp.sk, kp.pk = keyGen.GeneratePair()
 		keyPairs[n] = kp
 	}
-	keysMap[sharding.MetachainShardId] = keyPairs
+	keysMap[core.MetachainShardId] = keyPairs
 
 	params := &cryptoParams{
-		keys:         keysMap,
-		keyGen:       keyGen,
-		singleSigner: singleSigner,
+		keys:           keysMap,
+		keyGen:         keyGen,
+		txSingleSigner: txSingleSigner,
+		singleSigner:   singleSigner,
 	}
 
 	return params
@@ -272,9 +229,9 @@ func createCryptoParams(nodesPerShard int, nbMetaNodes int, nbShards int) *crypt
 
 func createHasher(consensusType string) hashing.Hasher {
 	if consensusType == blsConsensusType {
-		return blake2b.Blake2b{HashSize: 16}
+		return &blake2b.Blake2b{HashSize: 32}
 	}
-	return blake2b.Blake2b{}
+	return &blake2b.Blake2b{}
 }
 
 func createConsensusOnlyNode(
@@ -289,6 +246,7 @@ func createConsensusOnlyNode(
 	pubKeys []crypto.PublicKey,
 	testKeyGen crypto.KeyGenerator,
 	consensusType string,
+	epochStartRegistrationHandler epochStart.RegistrationHandler,
 ) (
 	*node.Node,
 	p2p.Messenger,
@@ -296,52 +254,46 @@ func createConsensusOnlyNode(
 	data.ChainHandler) {
 
 	testHasher := createHasher(consensusType)
-	testMarshalizer := &marshal.JsonMarshalizer{}
-	testAddressConverter, _ := addressConverters.NewPlainAddressConverter(32, "0x")
+	testMarshalizer := &marshal.GogoProtoMarshalizer{}
 
-	messenger := createMessengerWithKadDht(context.Background(), initialAddr)
+	messenger := integrationTests.CreateMessengerWithKadDht(initialAddr)
 	rootHash := []byte("roothash")
 
+	blockChain := createTestBlockChain()
 	blockProcessor := &mock.BlockProcessorMock{
-		ProcessBlockCalled: func(blockChain data.ChainHandler, header data.HeaderHandler, body data.BodyHandler, haveTime func() time.Duration) error {
+		ProcessBlockCalled: func(header data.HeaderHandler, body data.BodyHandler, haveTime func() time.Duration) error {
 			_ = blockChain.SetCurrentBlockHeader(header)
-			_ = blockChain.SetCurrentBlockBody(body)
 			return nil
 		},
-		RevertAccountStateCalled: func() {
+		RevertAccountStateCalled: func(header data.HeaderHandler) {
 		},
-		CreateBlockCalled: func(round uint64, haveTime func() bool) (handler data.BodyHandler, e error) {
-			return &dataBlock.Body{}, nil
-		},
-		CreateBlockHeaderCalled: func(body data.BodyHandler, round uint64, haveTime func() bool) (handler data.HeaderHandler, e error) {
-			return &dataBlock.Header{Round: uint64(round)}, nil
+		CreateBlockCalled: func(header data.HeaderHandler, haveTime func() bool) (data.HeaderHandler, data.BodyHandler, error) {
+			return header, &dataBlock.Body{}, nil
 		},
 		MarshalizedDataToBroadcastCalled: func(header data.HeaderHandler, body data.BodyHandler) (map[uint32][]byte, map[string][][]byte, error) {
 			mrsData := make(map[uint32][]byte)
 			mrsTxs := make(map[string][][]byte)
 			return mrsData, mrsTxs, nil
 		},
+		CreateNewHeaderCalled: func(round uint64, nonce uint64) data.HeaderHandler {
+			return &dataBlock.Header{
+				Round:           round,
+				Nonce:           nonce,
+				SoftwareVersion: []byte("version"),
+			}
+		},
 	}
 
-	blockProcessor.CommitBlockCalled = func(blockChain data.ChainHandler, header data.HeaderHandler, body data.BodyHandler) error {
+	blockProcessor.CommitBlockCalled = func(header data.HeaderHandler, body data.BodyHandler) error {
 		blockProcessor.NrCommitBlockCalled++
 		_ = blockChain.SetCurrentBlockHeader(header)
-		_ = blockChain.SetCurrentBlockBody(body)
 		return nil
 	}
 	blockProcessor.Marshalizer = testMarshalizer
-	blockTracker := &mock.BlocksTrackerMock{
-		UnnotarisedBlocksCalled: func() []data.HeaderHandler {
-			return make([]data.HeaderHandler, 0)
-		},
-		SetBlockBroadcastRoundCalled: func(nonce uint64, round int64) {
-		},
-	}
-	blockChain := createTestBlockChain()
 
 	header := &dataBlock.Header{
 		Nonce:         0,
-		ShardId:       shardId,
+		ShardID:       shardId,
 		BlockBodyType: dataBlock.StateBlock,
 		Signature:     rootHash,
 		RootHash:      rootHash,
@@ -355,31 +307,54 @@ func createConsensusOnlyNode(
 
 	startTime := int64(0)
 
-	singlesigner := &singlesig.SchnorrSigner{}
-	singleBlsSigner := &singlesig.BlsSingleSigner{}
+	singlesigner := &ed25519SingleSig.Ed25519Signer{}
+	singleBlsSigner := &mclsinglesig.BlsSingleSigner{}
 
-	syncer := ntp.NewSyncTime(ntp.NewNTPGoogleConfig(), time.Hour, nil)
-	go syncer.StartSync()
+	syncer := ntp.NewSyncTime(ntp.NewNTPGoogleConfig(), nil)
+	syncer.StartSyncingTime()
 
-	rounder, err := round.NewRound(
+	rounder, _ := round.NewRound(
 		time.Unix(startTime, 0),
 		syncer.CurrentTime(),
-		time.Millisecond*time.Duration(uint64(roundTime)),
-		syncer)
+		time.Millisecond*time.Duration(roundTime),
+		syncer,
+		0)
 
-	forkDetector, _ := syncFork.NewShardForkDetector(rounder)
+	argsNewMetaEpochStart := &metachain.ArgsNewMetaEpochStartTrigger{
+		GenesisTime:        time.Unix(startTime, 0),
+		EpochStartNotifier: notifier.NewEpochStartSubscriptionHandler(),
+		Settings: &config.EpochStartConfig{
+			MinRoundsBetweenEpochs: 1,
+			RoundsPerEpoch:         3,
+		},
+		Epoch:       0,
+		Storage:     createTestStore(),
+		Marshalizer: testMarshalizer,
+		Hasher:      testHasher,
+	}
+	epochStartTrigger, _ := metachain.NewEpochStartTrigger(argsNewMetaEpochStart)
+
+	forkDetector, _ := syncFork.NewShardForkDetector(
+		rounder,
+		timecache.NewTimeCache(time.Second),
+		&mock.BlockTrackerStub{},
+		0,
+	)
 
 	hdrResolver := &mock.HeaderResolverMock{}
 	mbResolver := &mock.MiniBlocksResolverMock{}
 	resolverFinder := &mock.ResolversFinderStub{
 		IntraShardResolverCalled: func(baseTopic string) (resolver dataRetriever.Resolver, e error) {
-			if baseTopic == factory.HeadersTopic {
-				return hdrResolver, nil
-			}
 			if baseTopic == factory.MiniBlocksTopic {
 				return mbResolver, nil
 			}
-			return hdrResolver, nil
+			return nil, nil
+		},
+		CrossShardResolverCalled: func(baseTopic string, crossShard uint32) (resolver dataRetriever.Resolver, err error) {
+			if baseTopic == factory.ShardBlocksTopic {
+				return hdrResolver, nil
+			}
+			return nil, nil
 		},
 	}
 
@@ -389,14 +364,16 @@ func createConsensusOnlyNode(
 		inPubKeys[shardId] = append(inPubKeys[shardId], string(sPubKey))
 	}
 
-	testMultiSig := mock.NewMultiSigner(uint32(consensusSize))
+	testMultiSig := mock.NewMultiSigner(consensusSize)
 	_ = testMultiSig.Reset(inPubKeys[shardId], uint16(selfId))
 
-	accntAdapter := createAccountsDB(testMarshalizer)
+	peerSigCache, _ := storageUnit.NewCache(storageUnit.CacheConfig{Type: storageUnit.LRUCache, Capacity: 1000})
+	peerSigHandler, _ := peerSignatureHandler.NewPeerSignatureHandler(peerSigCache, singleBlsSigner, testKeyGen)
 
+	accntAdapter := createAccountsDB(testMarshalizer)
 	n, err := node.NewNode(
 		node.WithInitialNodesPubKeys(inPubKeys),
-		node.WithRoundDuration(uint64(roundTime)),
+		node.WithRoundDuration(roundTime),
 		node.WithConsensusGroupSize(int(consensusSize)),
 		node.WithSyncer(syncer),
 		node.WithGenesisTime(time.Unix(startTime, 0)),
@@ -405,9 +382,11 @@ func createConsensusOnlyNode(
 		node.WithPrivKey(privKey),
 		node.WithForkDetector(forkDetector),
 		node.WithMessenger(messenger),
-		node.WithMarshalizer(testMarshalizer),
+		node.WithInternalMarshalizer(testMarshalizer, 0),
+		node.WithVmMarshalizer(&marshal.JsonMarshalizer{}),
+		node.WithTxSignMarshalizer(&marshal.JsonMarshalizer{}),
 		node.WithHasher(testHasher),
-		node.WithAddressConverter(testAddressConverter),
+		node.WithAddressPubkeyConverter(testPubkeyConverter),
 		node.WithAccountsAdapter(accntAdapter),
 		node.WithKeyGen(testKeyGen),
 		node.WithShardCoordinator(shardCoordinator),
@@ -415,14 +394,36 @@ func createConsensusOnlyNode(
 		node.WithBlockChain(blockChain),
 		node.WithMultiSigner(testMultiSig),
 		node.WithTxSingleSigner(singlesigner),
-		node.WithTxSignPrivKey(privKey),
 		node.WithPubKey(privKey.GeneratePublic()),
 		node.WithBlockProcessor(blockProcessor),
-		node.WithDataPool(createTestShardDataPool()),
+		node.WithDataPool(testscommon.CreatePoolsHolder(1, 0)),
 		node.WithDataStore(createTestStore()),
 		node.WithResolversFinder(resolverFinder),
 		node.WithConsensusType(consensusType),
-		node.WithBlockTracker(blockTracker),
+		node.WithBlockBlackListHandler(&mock.TimeCacheStub{}),
+		node.WithPeerDenialEvaluator(&mock.PeerDenialEvaluatorStub{}),
+		node.WithEpochStartTrigger(epochStartTrigger),
+		node.WithEpochStartEventNotifier(epochStartRegistrationHandler),
+		node.WithNetworkShardingCollector(mock.NewNetworkShardingCollectorMock()),
+		node.WithBootStorer(&mock.BoostrapStorerMock{}),
+		node.WithRequestedItemsHandler(&mock.RequestedItemsHandlerStub{}),
+		node.WithHeaderSigVerifier(&mock.HeaderSigVerifierStub{}),
+		node.WithHeaderIntegrityVerifier(&mock.HeaderIntegrityVerifierStub{}),
+		node.WithChainID(integrationTests.ChainID),
+		node.WithRequestHandler(&mock.RequestHandlerStub{}),
+		node.WithUint64ByteSliceConverter(&mock.Uint64ByteSliceConverterMock{}),
+		node.WithBlockTracker(&mock.BlockTrackerStub{}),
+		node.WithInputAntifloodHandler(&mock.NilAntifloodHandler{}),
+		node.WithValidatorSignatureSize(signatureSize),
+		node.WithPublicKeySize(publicKeySize),
+		node.WithPeerHonestyHandler(&mock.PeerHonestyHandlerStub{}),
+		node.WithFallbackHeaderValidator(&testscommon.FallBackHeaderValidatorStub{}),
+		node.WithInterceptorsContainer(&mock.InterceptorsContainerStub{}),
+		node.WithHardforkTrigger(&mock.HardforkTriggerStub{}),
+		node.WithWatchdogTimer(&mock.WatchdogMock{}),
+		node.WithPeerSignatureHandler(peerSigHandler),
+		node.WithIndexer(indexer.NewNilIndexer()),
+		node.WithNodeRedundancyHandler(&mock.RedundancyHandlerStub{}),
 	)
 
 	if err != nil {
@@ -443,8 +444,11 @@ func createNodes(
 	nodes := make(map[uint32][]*testNode)
 	cp := createCryptoParams(nodesPerShard, 1, 1)
 	keysMap := pubKeysMapFromKeysMap(cp.keys)
-	validatorsMap := genValidatorsFromPubKeys(keysMap)
+	eligibleMap := genValidatorsFromPubKeys(keysMap)
+	waitingMap := make(map[uint32][]sharding.Validator)
 	nodesList := make([]*testNode, nodesPerShard)
+
+	nodeShuffler := &mock.NodeShufflerMock{}
 
 	pubKeys := make([]crypto.PublicKey, len(cp.keys[0]))
 	for idx, keyPairShard := range cp.keys[0] {
@@ -452,25 +456,37 @@ func createNodes(
 	}
 
 	for i := 0; i < nodesPerShard; i++ {
-		testNode := &testNode{
+		testNodeObject := &testNode{
 			shardId: uint32(0),
 		}
 
 		kp := cp.keys[0][i]
 		shardCoordinator, _ := sharding.NewMultiShardCoordinator(uint32(1), uint32(0))
-		nodesCoordinator, _ := sharding.NewIndexHashedNodesCoordinator(
-			consensusSize,
-			1,
-			createHasher(consensusType),
-			0,
-			1,
-			validatorsMap,
-		)
+		epochStartRegistrationHandler := notifier.NewEpochStartSubscriptionHandler()
+		bootStorer := integrationTests.CreateMemUnit()
+		consensusCache, _ := lrucache.NewCache(10000)
+
+		argumentsNodesCoordinator := sharding.ArgNodesCoordinator{
+			ShardConsensusGroupSize: consensusSize,
+			MetaConsensusGroupSize:  1,
+			Marshalizer:             integrationTests.TestMarshalizer,
+			Hasher:                  createHasher(consensusType),
+			Shuffler:                nodeShuffler,
+			EpochStartNotifier:      epochStartRegistrationHandler,
+			BootStorer:              bootStorer,
+			NbShards:                1,
+			EligibleNodes:           eligibleMap,
+			WaitingNodes:            waitingMap,
+			SelfPublicKey:           []byte(strconv.Itoa(i)),
+			ConsensusGroupCache:     consensusCache,
+			ShuffledOutHandler:      &mock.ShuffledOutHandlerStub{},
+		}
+		nodesCoordinator, _ := sharding.NewIndexHashedNodesCoordinator(argumentsNodesCoordinator)
 
 		n, mes, blkProcessor, blkc := createConsensusOnlyNode(
 			shardCoordinator,
 			nodesCoordinator,
-			testNode.shardId,
+			testNodeObject.shardId,
 			uint32(i),
 			serviceID,
 			uint32(consensusSize),
@@ -479,17 +495,16 @@ func createNodes(
 			pubKeys,
 			cp.keyGen,
 			consensusType,
+			epochStartRegistrationHandler,
 		)
 
-		testNode.node = n
-		testNode.node = n
-		testNode.sk = kp.sk
-		testNode.mesenger = mes
-		testNode.pk = kp.pk
-		testNode.blkProcessor = blkProcessor
-		testNode.blkc = blkc
-
-		nodesList[i] = testNode
+		testNodeObject.node = n
+		testNodeObject.sk = kp.sk
+		testNodeObject.mesenger = mes
+		testNodeObject.pk = kp.pk
+		testNodeObject.blkProcessor = blkProcessor
+		testNodeObject.blkc = blkc
+		nodesList[i] = testNodeObject
 	}
 	nodes[0] = nodesList
 

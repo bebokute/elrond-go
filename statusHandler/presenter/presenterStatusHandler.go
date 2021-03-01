@@ -1,6 +1,7 @@
 package presenter
 
 import (
+	"math/big"
 	"strings"
 	"sync"
 )
@@ -13,8 +14,9 @@ type PresenterStatusHandler struct {
 	presenterMetrics            *sync.Map
 	logLines                    []string
 	mutLogLineWrite             sync.RWMutex
-	oldNonce                    uint64
+	oldRound                    uint64
 	synchronizationSpeedHistory []uint64
+	totalRewardsOld             *big.Float
 }
 
 // NewPresenterStatusHandler will return an instance of the struct
@@ -22,16 +24,14 @@ func NewPresenterStatusHandler() *PresenterStatusHandler {
 	psh := &PresenterStatusHandler{
 		presenterMetrics:            &sync.Map{},
 		synchronizationSpeedHistory: make([]uint64, 0),
+		totalRewardsOld:             big.NewFloat(0),
 	}
 	return psh
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (psh *PresenterStatusHandler) IsInterfaceNil() bool {
-	if psh == nil {
-		return true
-	}
-	return false
+	return psh == nil
 }
 
 // SetInt64Value method - will update the value for a key
@@ -65,8 +65,39 @@ func (psh *PresenterStatusHandler) Increment(key string) {
 	psh.presenterMetrics.Store(key, keyValue)
 }
 
+// AddUint64 - will increase the value of a key with a value
+func (psh *PresenterStatusHandler) AddUint64(key string, value uint64) {
+	keyValueI, ok := psh.presenterMetrics.Load(key)
+	if !ok {
+		return
+	}
+
+	keyValue, ok := keyValueI.(uint64)
+	if !ok {
+		return
+	}
+
+	keyValue += value
+	psh.presenterMetrics.Store(key, keyValue)
+}
+
 // Decrement - will decrement the value of a key
 func (psh *PresenterStatusHandler) Decrement(key string) {
+	keyValueI, ok := psh.presenterMetrics.Load(key)
+	if !ok {
+		return
+	}
+
+	keyValue, ok := keyValueI.(uint64)
+	if !ok {
+		return
+	}
+	if keyValue == 0 {
+		return
+	}
+
+	keyValue--
+	psh.presenterMetrics.Store(key, keyValue)
 }
 
 // Close method - won't do anything

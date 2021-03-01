@@ -2,7 +2,11 @@ package sha256
 
 import (
 	"crypto/sha256"
+
+	"github.com/ElrondNetwork/elrond-go/hashing"
 )
+
+var _ hashing.Hasher = (*Sha256)(nil)
 
 var sha256EmptyHash []byte
 
@@ -16,7 +20,7 @@ func (sha Sha256) Compute(s string) []byte {
 		return sha.EmptyHash()
 	}
 	h := sha256.New()
-	h.Write([]byte(s))
+	_, _ = h.Write([]byte(s))
 	return h.Sum(nil)
 }
 
@@ -35,8 +39,5 @@ func (Sha256) Size() int {
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (sha Sha256) IsInterfaceNil() bool {
-	if &sha == nil {
-		return true
-	}
 	return false
 }

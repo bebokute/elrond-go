@@ -1,109 +1,14 @@
 package block_test
 
 import (
-	"bytes"
+	"reflect"
 	"testing"
 
 	"github.com/ElrondNetwork/elrond-go/data"
 	"github.com/ElrondNetwork/elrond-go/data/block"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
-
-func TestHeader_SaveLoad(t *testing.T) {
-	t.Parallel()
-
-	mb := block.MiniBlockHeader{
-		Hash:            []byte("mini block hash"),
-		ReceiverShardID: uint32(0),
-		SenderShardID:   uint32(10),
-		TxCount:         uint32(10),
-	}
-
-	pc := block.PeerChange{
-		PubKey:      []byte("peer1"),
-		ShardIdDest: uint32(0),
-	}
-
-	h := block.Header{
-		Nonce:            uint64(1),
-		PrevHash:         []byte("previous hash"),
-		PrevRandSeed:     []byte("prev random seed"),
-		RandSeed:         []byte("current random seed"),
-		PubKeysBitmap:    []byte("pub key bitmap"),
-		ShardId:          uint32(10),
-		TimeStamp:        uint64(1234),
-		Round:            uint64(1),
-		Epoch:            uint32(1),
-		BlockBodyType:    block.TxBlock,
-		Signature:        []byte("signature"),
-		MiniBlockHeaders: []block.MiniBlockHeader{mb},
-		PeerChanges:      []block.PeerChange{pc},
-		RootHash:         []byte("root hash"),
-		MetaBlockHashes:  make([][]byte, 0),
-		TxCount:          uint32(10),
-	}
-
-	var b bytes.Buffer
-	h.Save(&b)
-
-	loadHeader := block.Header{}
-	loadHeader.Load(&b)
-
-	assert.Equal(t, loadHeader, h)
-}
-
-func TestPeerChange_SaveLoad(t *testing.T) {
-	t.Parallel()
-
-	pc := block.PeerChange{
-		PubKey:      []byte("pubKey"),
-		ShardIdDest: uint32(1),
-	}
-
-	var b bytes.Buffer
-	pc.Save(&b)
-
-	loadPc := block.PeerChange{}
-	loadPc.Load(&b)
-
-	assert.Equal(t, loadPc, pc)
-}
-
-func TestMiniBlockHeader_SaveLoad(t *testing.T) {
-	t.Parallel()
-
-	mbh := block.MiniBlockHeader{
-		Hash:            []byte("mini block hash"),
-		SenderShardID:   uint32(1),
-		ReceiverShardID: uint32(0),
-	}
-
-	var b bytes.Buffer
-	mbh.Save(&b)
-
-	loadMbh := block.MiniBlockHeader{}
-	loadMbh.Load(&b)
-
-	assert.Equal(t, loadMbh, mbh)
-}
-
-func TestMiniBlock_SaveLoad(t *testing.T) {
-	t.Parallel()
-
-	mb := block.MiniBlock{
-		TxHashes:        [][]byte{[]byte("tx hash1"), []byte("tx hash2")},
-		ReceiverShardID: uint32(0),
-		SenderShardID:   uint32(0),
-	}
-
-	var b bytes.Buffer
-	mb.Save(&b)
-
-	loadMb := block.MiniBlock{}
-	loadMb.Load(&b)
-
-	assert.Equal(t, loadMb, mb)
-}
 
 func TestHeader_GetEpoch(t *testing.T) {
 	t.Parallel()
@@ -121,7 +26,7 @@ func TestHeader_GetShard(t *testing.T) {
 
 	shardId := uint32(2)
 	h := block.Header{
-		ShardId: shardId,
+		ShardID: shardId,
 	}
 
 	assert.Equal(t, shardId, h.GetShardID())
@@ -339,8 +244,7 @@ func TestHeader_SetTxCount(t *testing.T) {
 func TestBody_IntegrityAndValidityNil(t *testing.T) {
 	t.Parallel()
 
-	body := block.Body{}
-	body = nil
+	var body *block.Body = nil
 	assert.Equal(t, data.ErrNilBlockBody, body.IntegrityAndValidity())
 }
 
@@ -351,14 +255,14 @@ func TestBody_IntegrityAndValidityEmptyMiniblockShouldThrowException(t *testing.
 	mb0 := block.MiniBlock{
 		ReceiverShardID: 0,
 		SenderShardID:   0,
-		TxHashes:        [][]byte{[]byte(txHash0)},
+		TxHashes:        [][]byte{txHash0},
 	}
 
 	mb1 := block.MiniBlock{}
 
-	body := make(block.Body, 0)
-	body = append(body, &mb0)
-	body = append(body, &mb1)
+	body := &block.Body{}
+	body.MiniBlocks = append(body.MiniBlocks, &mb0)
+	body.MiniBlocks = append(body.MiniBlocks, &mb1)
 
 	assert.Equal(t, data.ErrMiniBlockEmpty, body.IntegrityAndValidity())
 }
@@ -370,48 +274,108 @@ func TestBody_IntegrityAndValidityOK(t *testing.T) {
 	mb0 := block.MiniBlock{
 		ReceiverShardID: 0,
 		SenderShardID:   0,
-		TxHashes:        [][]byte{[]byte(txHash0)},
+		TxHashes:        [][]byte{txHash0},
 	}
 
-	body := make(block.Body, 0)
-	body = append(body, &mb0)
+	body := &block.Body{}
+	body.MiniBlocks = append(body.MiniBlocks, &mb0)
 
 	assert.Equal(t, nil, body.IntegrityAndValidity())
 }
 
 func TestHeader_GetMiniBlockHeadersWithDstShouldWork(t *testing.T) {
-	hash_0_0 := []byte("hash_0_0")
-	hash_0_1 := []byte("hash_0_1")
-	hash1_0_2 := []byte("hash_0_2")
-	hash2_0_2 := []byte("hash2_0_2")
+	t.Parallel()
+
+	hashS0R0 := []byte("hash_0_0")
+	hashS0R1 := []byte("hash_0_1")
+	hash1S0R2 := []byte("hash_0_2")
+	hash2S0R2 := []byte("hash2_0_2")
 
 	hdr := &block.Header{
 		MiniBlockHeaders: []block.MiniBlockHeader{
 			{
 				SenderShardID:   0,
 				ReceiverShardID: 0,
-				Hash:            hash_0_0,
+				Hash:            hashS0R0,
 			},
 			{
 				SenderShardID:   0,
 				ReceiverShardID: 1,
-				Hash:            hash_0_1,
+				Hash:            hashS0R1,
 			},
 			{
 				SenderShardID:   0,
 				ReceiverShardID: 2,
-				Hash:            hash1_0_2,
+				Hash:            hash1S0R2,
 			},
 			{
 				SenderShardID:   0,
 				ReceiverShardID: 2,
-				Hash:            hash2_0_2,
+				Hash:            hash2S0R2,
 			},
 		},
 	}
 
 	hashesWithDest2 := hdr.GetMiniBlockHeadersWithDst(2)
 
-	assert.Equal(t, uint32(0), hashesWithDest2[string(hash1_0_2)])
-	assert.Equal(t, uint32(0), hashesWithDest2[string(hash2_0_2)])
+	assert.Equal(t, uint32(0), hashesWithDest2[string(hash1S0R2)])
+	assert.Equal(t, uint32(0), hashesWithDest2[string(hash2S0R2)])
+}
+
+func TestHeader_GetOrderedCrossMiniblocksWithDstShouldWork(t *testing.T) {
+	t.Parallel()
+
+	hashSh0ToSh0 := []byte("hash_0_0")
+	hashSh0ToSh1 := []byte("hash_0_1")
+	hash1Sh0ToSh2 := []byte("hash1_0_2")
+	hash2Sh0ToSh2 := []byte("hash2_0_2")
+
+	hdr := &block.Header{
+		Round: 10,
+		MiniBlockHeaders: []block.MiniBlockHeader{
+			{
+				SenderShardID:   0,
+				ReceiverShardID: 0,
+				Hash:            hashSh0ToSh0,
+			},
+			{
+				SenderShardID:   0,
+				ReceiverShardID: 1,
+				Hash:            hashSh0ToSh1,
+			},
+			{
+				SenderShardID:   0,
+				ReceiverShardID: 2,
+				Hash:            hash1Sh0ToSh2,
+			},
+			{
+				SenderShardID:   0,
+				ReceiverShardID: 2,
+				Hash:            hash2Sh0ToSh2,
+			},
+		},
+	}
+
+	miniBlocksInfo := hdr.GetOrderedCrossMiniblocksWithDst(2)
+
+	require.Equal(t, 2, len(miniBlocksInfo))
+	assert.Equal(t, hash1Sh0ToSh2, miniBlocksInfo[0].Hash)
+	assert.Equal(t, hdr.Round, miniBlocksInfo[0].Round)
+	assert.Equal(t, hash2Sh0ToSh2, miniBlocksInfo[1].Hash)
+	assert.Equal(t, hdr.Round, miniBlocksInfo[1].Round)
+}
+
+func TestMiniBlock_Clone(t *testing.T) {
+	t.Parallel()
+
+	miniBlock := &block.MiniBlock{
+		TxHashes:        [][]byte{[]byte("something"), []byte("something2")},
+		ReceiverShardID: 1,
+		SenderShardID:   2,
+		Type:            0,
+	}
+
+	clonedMB := miniBlock.Clone()
+
+	assert.True(t, reflect.DeepEqual(miniBlock, clonedMB))
 }

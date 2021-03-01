@@ -1,28 +1,34 @@
 package unsigned
 
 import (
+	"fmt"
 	"math/big"
 
+	logger "github.com/ElrondNetwork/elrond-go-logger"
+	"github.com/ElrondNetwork/elrond-go/core"
+	"github.com/ElrondNetwork/elrond-go/core/check"
 	"github.com/ElrondNetwork/elrond-go/data"
 	"github.com/ElrondNetwork/elrond-go/data/smartContractResult"
-	"github.com/ElrondNetwork/elrond-go/data/state"
 	"github.com/ElrondNetwork/elrond-go/hashing"
 	"github.com/ElrondNetwork/elrond-go/marshal"
 	"github.com/ElrondNetwork/elrond-go/process"
 	"github.com/ElrondNetwork/elrond-go/sharding"
 )
 
+var _ process.TxValidatorHandler = (*InterceptedUnsignedTransaction)(nil)
+var _ process.InterceptedData = (*InterceptedUnsignedTransaction)(nil)
+
 // InterceptedUnsignedTransaction holds and manages a transaction based struct with extended functionality
 type InterceptedUnsignedTransaction struct {
-	uTx                      *smartContractResult.SmartContractResult
-	marshalizer              marshal.Marshalizer
-	hasher                   hashing.Hasher
-	addrConv                 state.AddressConverter
-	coordinator              sharding.Coordinator
-	hash                     []byte
-	rcvShard                 uint32
-	sndShard                 uint32
-	isAddressedToOtherShards bool
+	uTx               *smartContractResult.SmartContractResult
+	marshalizer       marshal.Marshalizer
+	hasher            hashing.Hasher
+	pubkeyConv        core.PubkeyConverter
+	coordinator       sharding.Coordinator
+	hash              []byte
+	rcvShard          uint32
+	sndShard          uint32
+	isForCurrentShard bool
 }
 
 // NewInterceptedUnsignedTransaction returns a new instance of InterceptedUnsignedTransaction
@@ -30,28 +36,26 @@ func NewInterceptedUnsignedTransaction(
 	uTxBuff []byte,
 	marshalizer marshal.Marshalizer,
 	hasher hashing.Hasher,
-	addrConv state.AddressConverter,
+	pubkeyConv core.PubkeyConverter,
 	coordinator sharding.Coordinator,
 ) (*InterceptedUnsignedTransaction, error) {
-
 	if uTxBuff == nil {
 		return nil, process.ErrNilBuffer
 	}
-	if marshalizer == nil || marshalizer.IsInterfaceNil() {
+	if check.IfNil(marshalizer) {
 		return nil, process.ErrNilMarshalizer
 	}
-	if hasher == nil || hasher.IsInterfaceNil() {
+	if check.IfNil(hasher) {
 		return nil, process.ErrNilHasher
 	}
-	if addrConv == nil || addrConv.IsInterfaceNil() {
-		return nil, process.ErrNilAddressConverter
+	if check.IfNil(pubkeyConv) {
+		return nil, process.ErrNilPubkeyConverter
 	}
-	if coordinator == nil || coordinator.IsInterfaceNil() {
+	if check.IfNil(coordinator) {
 		return nil, process.ErrNilShardCoordinator
 	}
 
-	uTx := &smartContractResult.SmartContractResult{}
-	err := marshalizer.Unmarshal(uTx, uTxBuff)
+	uTx, err := createUtx(marshalizer, uTxBuff)
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +64,7 @@ func NewInterceptedUnsignedTransaction(
 		uTx:         uTx,
 		marshalizer: marshalizer,
 		hasher:      hasher,
-		addrConv:    addrConv,
+		pubkeyConv:  pubkeyConv,
 		coordinator: coordinator,
 	}
 
@@ -69,93 +73,103 @@ func NewInterceptedUnsignedTransaction(
 		return nil, err
 	}
 
-	err = inUTx.integrity()
-	if err != nil {
-		return nil, err
-	}
-
-	err = inUTx.verifyIfNotarized(inUTx.hash)
-	if err != nil {
-		return nil, err
-	}
-
 	return inUTx, nil
+}
+
+func createUtx(marshalizer marshal.Marshalizer, uTxBuff []byte) (*smartContractResult.SmartContractResult, error) {
+	uTx := &smartContractResult.SmartContractResult{}
+	err := marshalizer.Unmarshal(uTx, uTxBuff)
+	if err != nil {
+		return nil, err
+	}
+
+	return uTx, nil
+}
+
+// CheckValidity checks if the received transaction is valid (not nil fields, valid sig and so on)
+func (inUTx *InterceptedUnsignedTransaction) CheckValidity() error {
+	err := inUTx.uTx.CheckIntegrity()
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (inUTx *InterceptedUnsignedTransaction) processFields(uTxBuffWithSig []byte) error {
 	inUTx.hash = inUTx.hasher.Compute(string(uTxBuffWithSig))
 
-	sndAddr, err := inUTx.addrConv.CreateAddressFromPublicKeyBytes(inUTx.uTx.SndAddr)
-	if err != nil {
-		return process.ErrInvalidSndAddr
-	}
+	inUTx.rcvShard = inUTx.coordinator.ComputeId(inUTx.uTx.RcvAddr)
+	inUTx.sndShard = inUTx.coordinator.ComputeId(inUTx.uTx.SndAddr)
 
-	rcvAddr, err := inUTx.addrConv.CreateAddressFromPublicKeyBytes(inUTx.uTx.RcvAddr)
-	if err != nil {
-		return process.ErrInvalidRcvAddr
-	}
-
-	inUTx.rcvShard = inUTx.coordinator.ComputeId(rcvAddr)
-	inUTx.sndShard = inUTx.coordinator.ComputeId(sndAddr)
-
-	inUTx.isAddressedToOtherShards = inUTx.rcvShard != inUTx.coordinator.SelfId() &&
-		inUTx.sndShard != inUTx.coordinator.SelfId()
+	isForCurrentShardRecv := inUTx.rcvShard == inUTx.coordinator.SelfId()
+	isForCurrentShardSender := inUTx.sndShard == inUTx.coordinator.SelfId()
+	inUTx.isForCurrentShard = isForCurrentShardRecv || isForCurrentShardSender
 
 	return nil
 }
 
-// integrity checks for not nil fields and negative value
-func (inUTx *InterceptedUnsignedTransaction) integrity() error {
-	if len(inUTx.uTx.RcvAddr) == 0 {
-		return process.ErrNilRcvAddr
-	}
-
-	if len(inUTx.uTx.SndAddr) == 0 {
-		return process.ErrNilSndAddr
-	}
-
-	if inUTx.uTx.Value == nil {
-		return process.ErrNilValue
-	}
-
-	if inUTx.uTx.Value.Cmp(big.NewInt(0)) < 0 {
-		return process.ErrNegativeValue
-	}
-
-	if len(inUTx.uTx.TxHash) == 0 {
-		return process.ErrNilTxHash
-	}
-
-	return nil
+// Nonce returns the transaction nonce
+func (inUTx *InterceptedUnsignedTransaction) Nonce() uint64 {
+	return inUTx.uTx.Nonce
 }
 
-// verifyIfNotarized checks if the uTx was already notarized
-func (inUTx *InterceptedUnsignedTransaction) verifyIfNotarized(uTxBuff []byte) error {
-	// TODO: implement this for flood protection purposes
-	return nil
+// SenderAddress returns the transaction sender address
+func (inUTx *InterceptedUnsignedTransaction) SenderAddress() []byte {
+	return inUTx.uTx.SndAddr
 }
 
-// RcvShard returns the receiver shard
-func (inUTx *InterceptedUnsignedTransaction) RcvShard() uint32 {
+// ReceiverShardId returns the receiver shard
+func (inUTx *InterceptedUnsignedTransaction) ReceiverShardId() uint32 {
 	return inUTx.rcvShard
 }
 
-// SndShard returns the sender shard
-func (inUTx *InterceptedUnsignedTransaction) SndShard() uint32 {
+// SenderShardId returns the sender shard
+func (inUTx *InterceptedUnsignedTransaction) SenderShardId() uint32 {
 	return inUTx.sndShard
 }
 
-// IsAddressedToOtherShards returns true if this transaction is not meant to be processed by the node from this shard
-func (inUTx *InterceptedUnsignedTransaction) IsAddressedToOtherShards() bool {
-	return inUTx.isAddressedToOtherShards
+// IsForCurrentShard returns true if this transaction is meant to be processed by the node from this shard
+func (inUTx *InterceptedUnsignedTransaction) IsForCurrentShard() bool {
+	return inUTx.isForCurrentShard
 }
 
-// UnsignedTransaction returns the unsigned transaction pointer that actually holds the data
-func (inUTx *InterceptedUnsignedTransaction) UnsignedTransaction() data.TransactionHandler {
+// Transaction returns the transaction pointer that actually holds the data
+func (inUTx *InterceptedUnsignedTransaction) Transaction() data.TransactionHandler {
 	return inUTx.uTx
+}
+
+// Fee represents the unsigned transaction fee. It is always 0
+func (inUTx *InterceptedUnsignedTransaction) Fee() *big.Int {
+	return big.NewInt(0)
 }
 
 // Hash gets the hash of this transaction
 func (inUTx *InterceptedUnsignedTransaction) Hash() []byte {
 	return inUTx.hash
+}
+
+// Type returns the type of this intercepted data
+func (inUTx *InterceptedUnsignedTransaction) Type() string {
+	return "intercepted unsigned tx"
+}
+
+// String returns the unsigned transaction's most important fields as string
+func (inUTx *InterceptedUnsignedTransaction) String() string {
+	return fmt.Sprintf("sender=%s, nonce=%d, value=%s, recv=%s",
+		logger.DisplayByteSlice(inUTx.uTx.SndAddr),
+		inUTx.uTx.Nonce,
+		inUTx.uTx.Value.String(),
+		logger.DisplayByteSlice(inUTx.uTx.RcvAddr),
+	)
+}
+
+// Identifiers returns the identifiers used in requests
+func (inUTx *InterceptedUnsignedTransaction) Identifiers() [][]byte {
+	return [][]byte{inUTx.hash}
+}
+
+// IsInterfaceNil returns true if there is no value under the interface
+func (inUTx *InterceptedUnsignedTransaction) IsInterfaceNil() bool {
+	return inUTx == nil
 }

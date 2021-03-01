@@ -1,15 +1,36 @@
 package machine
 
 import (
+	"errors"
 	"sync/atomic"
 	"time"
+
+	"github.com/shirou/gopsutil/cpu"
 )
 
 var durationSecond = time.Second
+var errCpuCount = errors.New("cpu count is zero")
 
 // CpuStatistics can compute the cpu usage percent
 type CpuStatistics struct {
-	cpuPercentUsage uint64
+	numCpu          int
+	cpuUsagePercent uint64
+}
+
+// NewCpuStatistics will create a CpuStatistics object
+func NewCpuStatistics() (*CpuStatistics, error) {
+	numCpu, err := cpu.Counts(true)
+	if err != nil {
+		return nil, err
+	}
+	if numCpu == 0 {
+		return nil, errCpuCount
+	}
+
+	return &CpuStatistics{
+		cpuUsagePercent: 0,
+		numCpu:          numCpu,
+	}, nil
 }
 
 // ComputeStatistics computes the current cpu usage. It should be called on a go routine as it is a blocking
@@ -17,26 +38,20 @@ type CpuStatistics struct {
 func (cs *CpuStatistics) ComputeStatistics() {
 	currentProcess, err := GetCurrentProcess()
 	if err != nil {
-		cs.setZeroStatsAndWait()
 		return
 	}
 
-	cpuUsagePercent, err := currentProcess.Percent(durationSecond)
+	percent, err := currentProcess.Percent(time.Second)
 	if err != nil {
-		cs.setZeroStatsAndWait()
 		return
 	}
 
-	atomic.StoreUint64(&cs.cpuPercentUsage, uint64(cpuUsagePercent))
-	time.Sleep(durationSecond)
-}
+	cpuUsagePercent := percent / float64(cs.numCpu)
 
-func (cs *CpuStatistics) setZeroStatsAndWait() {
-	atomic.StoreUint64(&cs.cpuPercentUsage, 0)
-	time.Sleep(durationSecond)
+	atomic.StoreUint64(&cs.cpuUsagePercent, uint64(cpuUsagePercent))
 }
 
 // CpuPercentUsage will return the cpu percent usage. Concurrent safe.
 func (cs *CpuStatistics) CpuPercentUsage() uint64 {
-	return atomic.LoadUint64(&cs.cpuPercentUsage)
+	return atomic.LoadUint64(&cs.cpuUsagePercent)
 }

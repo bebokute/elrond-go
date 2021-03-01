@@ -6,6 +6,8 @@ import (
 	"github.com/ElrondNetwork/elrond-go/storage"
 )
 
+var _ StorageService = (*ChainStorer)(nil)
+
 // ChainStorer is a StorageService implementation that can hold multiple storages
 //  grouped by storage unit type
 type ChainStorer struct {
@@ -81,6 +83,20 @@ func (bc *ChainStorer) Put(unitType UnitType, key []byte, value []byte) error {
 	return storer.Put(key, value)
 }
 
+// SetEpochForPutOperation will set the epoch to be used in all persisters for the put operation
+func (bc *ChainStorer) SetEpochForPutOperation(epoch uint32) {
+	bc.lock.Lock()
+	for _, storer := range bc.chain {
+		storerWithPutInEpoch, ok := storer.(storage.StorerWithPutInEpoch)
+		if !ok {
+			continue
+		}
+
+		storerWithPutInEpoch.SetEpochForPutOperation(epoch)
+	}
+	bc.lock.Unlock()
+}
+
 // GetAll gets all the elements with keys in the keys array, from the selected storage unit
 // It can report an error if the provided unit type is not supported, if there is a missing
 // key in the unit, or if the underlying implementation of the storage unit reports an error.
@@ -125,10 +141,27 @@ func (bc *ChainStorer) Destroy() error {
 	return nil
 }
 
+// CloseAll will close all the active units
+func (bc *ChainStorer) CloseAll() error {
+	bc.lock.Lock()
+	defer bc.lock.Unlock()
+
+	closedSuccessfully := true
+	for _, unit := range bc.chain {
+		err := unit.Close()
+		if err != nil {
+			closedSuccessfully = false
+		}
+	}
+
+	if closedSuccessfully {
+		return nil
+	}
+
+	return storage.ErrClosingPersisters
+}
+
 // IsInterfaceNil returns true if there is no value under the interface
 func (bc *ChainStorer) IsInterfaceNil() bool {
-	if bc == nil {
-		return true
-	}
-	return false
+	return bc == nil
 }

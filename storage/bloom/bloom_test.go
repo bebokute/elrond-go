@@ -15,13 +15,13 @@ import (
 )
 
 func TestNewFilter(t *testing.T) {
-	_, err := bloom.NewFilter(200, []hashing.Hasher{keccak.Keccak{}, blake2b.Blake2b{}, fnv.Fnv{}})
+	_, err := bloom.NewFilter(200, []hashing.Hasher{keccak.Keccak{}, &blake2b.Blake2b{}, fnv.Fnv{}})
 
 	assert.Nil(t, err, "Error creating new bloom filter")
 }
 
 func TestNewFilterWithSmallSize(t *testing.T) {
-	_, err := bloom.NewFilter(1, []hashing.Hasher{keccak.Keccak{}, blake2b.Blake2b{}})
+	_, err := bloom.NewFilter(1, []hashing.Hasher{keccak.Keccak{}, &blake2b.Blake2b{}})
 
 	assert.NotNil(t, err, "Expected nil")
 }
@@ -66,7 +66,7 @@ func TestConcurrency(t *testing.T) {
 	wg := sync.WaitGroup{}
 	wg.Add(2)
 
-	maxIterations := 10000
+	maxIterations := 1000
 
 	addValues := func(base string) {
 		for i := 0; i < maxIterations; i++ {

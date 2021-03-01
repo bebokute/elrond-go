@@ -1,6 +1,9 @@
 package containers
 
-import "github.com/ElrondNetwork/elrond-go/data/block"
+import (
+	"github.com/ElrondNetwork/elrond-go/core/container"
+	"github.com/ElrondNetwork/elrond-go/data/block"
+)
 
 func (ic *interceptorsContainer) Insert(key string, value interface{}) bool {
 	return ic.objects.Insert(key, value)
@@ -15,5 +18,9 @@ func (ppc *intermediateTransactionHandlersContainer) Insert(key block.Type, valu
 }
 
 func (vmc *virtualMachinesContainer) Insert(key []byte, value interface{}) bool {
-	return vmc.objects.Insert(key, value)
+	return vmc.objects.Insert(string(key), value)
+}
+
+func (ic *interceptorsContainer) Objects() *container.MutexMap {
+	return ic.objects
 }

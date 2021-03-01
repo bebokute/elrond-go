@@ -1,21 +1,31 @@
 package chronology
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/ElrondNetwork/elrond-go-logger"
 	"github.com/ElrondNetwork/elrond-go/consensus"
 	"github.com/ElrondNetwork/elrond-go/core"
-	"github.com/ElrondNetwork/elrond-go/core/logger"
+	"github.com/ElrondNetwork/elrond-go/core/check"
+	"github.com/ElrondNetwork/elrond-go/core/closing"
+	"github.com/ElrondNetwork/elrond-go/display"
 	"github.com/ElrondNetwork/elrond-go/ntp"
 	"github.com/ElrondNetwork/elrond-go/statusHandler"
 )
 
-var log = logger.DefaultLogger()
+var _ consensus.ChronologyHandler = (*chronology)(nil)
+var _ closing.Closer = (*chronology)(nil)
+
+var log = logger.GetOrCreate("consensus/chronology")
 
 // srBeforeStartRound defines the state which exist before the start of the round
 const srBeforeStartRound = -1
+
+const numRoundsToWaitBeforeSignalingChronologyStuck = 10
+const chronologyAlarmID = "chronology"
 
 // chronology defines the data needed by the chronology
 type chronology struct {
@@ -30,6 +40,9 @@ type chronology struct {
 	subroundHandlers []consensus.SubroundHandler
 	mutSubrounds     sync.RWMutex
 	appStatusHandler core.AppStatusHandler
+	cancelFunc       func()
+
+	watchdog core.WatchdogTimer
 }
 
 // NewChronology creates a new chronology object
@@ -37,13 +50,14 @@ func NewChronology(
 	genesisTime time.Time,
 	rounder consensus.Rounder,
 	syncTimer ntp.SyncTimer,
+	watchdog core.WatchdogTimer,
 ) (*chronology, error) {
 
 	err := checkNewChronologyParams(
 		rounder,
 		syncTimer,
+		watchdog,
 	)
-
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +66,9 @@ func NewChronology(
 		genesisTime:      genesisTime,
 		rounder:          rounder,
 		syncTimer:        syncTimer,
-		appStatusHandler: statusHandler.NewNilStatusHandler()}
+		appStatusHandler: statusHandler.NewNilStatusHandler(),
+		watchdog:         watchdog,
+	}
 
 	chr.subroundId = srBeforeStartRound
 
@@ -65,14 +81,17 @@ func NewChronology(
 func checkNewChronologyParams(
 	rounder consensus.Rounder,
 	syncTimer ntp.SyncTimer,
+	watchdog core.WatchdogTimer,
 ) error {
 
-	if rounder == nil || rounder.IsInterfaceNil() {
+	if check.IfNil(rounder) {
 		return ErrNilRounder
 	}
-
-	if syncTimer == nil || syncTimer.IsInterfaceNil() {
+	if check.IfNil(syncTimer) {
 		return ErrNilSyncTimer
+	}
+	if check.IfNil(watchdog) {
+		return ErrNilWatchdog
 	}
 
 	return nil
@@ -110,8 +129,23 @@ func (chr *chronology) RemoveAllSubrounds() {
 
 // StartRounds actually starts the chronology and calls the DoWork() method of the subroundHandlers loaded
 func (chr *chronology) StartRounds() {
+	watchdogAlarmDuration := chr.rounder.TimeDuration() * numRoundsToWaitBeforeSignalingChronologyStuck
+	chr.watchdog.SetDefault(watchdogAlarmDuration, chronologyAlarmID)
+
+	var ctx context.Context
+	ctx, chr.cancelFunc = context.WithCancel(context.Background())
+	go chr.startRounds(ctx)
+}
+
+func (chr *chronology) startRounds(ctx context.Context) {
 	for {
-		time.Sleep(time.Millisecond)
+		select {
+		case <-ctx.Done():
+			log.Debug("chronology's go routine is stopping...")
+			return
+		case <-time.After(time.Millisecond):
+		}
+
 		chr.startRound()
 	}
 }
@@ -122,18 +156,18 @@ func (chr *chronology) startRound() {
 		chr.updateRound()
 	}
 
-	if chr.rounder.Index() <= 0 {
+	if chr.rounder.BeforeGenesis() {
 		return
 	}
 
 	sr := chr.loadSubroundHandler(chr.subroundId)
-
 	if sr == nil {
 		return
 	}
 
 	msg := fmt.Sprintf("SUBROUND %s BEGINS", sr.Name())
-	log.Info(log.Headline(msg, chr.syncTimer.FormattedCurrentTime(), "."))
+	log.Debug(display.Headline(msg, chr.syncTimer.FormattedCurrentTime(), "."))
+	logger.SetCorrelationSubround(sr.Name())
 
 	if !sr.DoWork(chr.rounder) {
 		chr.subroundId = srBeforeStartRound
@@ -149,8 +183,10 @@ func (chr *chronology) updateRound() {
 	chr.rounder.UpdateRound(chr.genesisTime, chr.syncTimer.CurrentTime())
 
 	if oldRoundIndex != chr.rounder.Index() {
+		chr.watchdog.Reset(chronologyAlarmID)
 		msg := fmt.Sprintf("ROUND %d BEGINS (%d)", chr.rounder.Index(), chr.rounder.TimeStamp().Unix())
-		log.Info(log.Headline(msg, chr.syncTimer.FormattedCurrentTime(), "#"))
+		log.Debug(display.Headline(msg, chr.syncTimer.FormattedCurrentTime(), "#"))
+		logger.SetCorrelationRound(chr.rounder.Index())
 
 		chr.initRound()
 	}
@@ -162,7 +198,7 @@ func (chr *chronology) initRound() {
 
 	chr.mutSubrounds.RLock()
 
-	hasSubroundsAndGenesisTimePassed := chr.rounder.Index() > 0 && len(chr.subroundHandlers) > 0
+	hasSubroundsAndGenesisTimePassed := !chr.rounder.BeforeGenesis() && len(chr.subroundHandlers) > 0
 
 	if hasSubroundsAndGenesisTimePassed {
 		chr.subroundId = chr.subroundHandlers[0].Current()
@@ -193,10 +229,18 @@ func (chr *chronology) loadSubroundHandler(subroundId int) consensus.SubroundHan
 	return chr.subroundHandlers[index]
 }
 
+// Close will close the endless running go routine
+func (chr *chronology) Close() error {
+	if chr.cancelFunc != nil {
+		chr.cancelFunc()
+	}
+
+	chr.watchdog.Stop(chronologyAlarmID)
+
+	return nil
+}
+
 // IsInterfaceNil returns true if there is no value under the interface
 func (chr *chronology) IsInterfaceNil() bool {
-	if chr == nil {
-		return true
-	}
-	return false
+	return chr == nil
 }

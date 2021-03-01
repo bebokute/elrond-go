@@ -1,11 +1,15 @@
 package node
 
-import "github.com/ElrondNetwork/elrond-go/node/heartbeat"
+import (
+	"github.com/ElrondNetwork/elrond-go/core/dblookupext"
+	"github.com/ElrondNetwork/elrond-go/data/transaction"
+	"github.com/ElrondNetwork/elrond-go/p2p"
+)
 
-func (n *Node) HeartbeatMonitor() *heartbeat.Monitor {
-	return n.heartbeatMonitor
+func (n *Node) CreateConsensusTopic(messageProcessor p2p.MessageProcessor) error {
+	return n.createConsensusTopic(messageProcessor)
 }
 
-func (n *Node) HeartbeatSender() *heartbeat.Sender {
-	return n.heartbeatSender
+func PutMiniblockFieldsInTransaction(tx *transaction.ApiTransactionResult, miniblockMetadata *dblookupext.MiniblockMetadata) *transaction.ApiTransactionResult {
+	return putMiniblockFieldsInTransaction(tx, miniblockMetadata)
 }

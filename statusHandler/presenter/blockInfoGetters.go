@@ -1,6 +1,8 @@
 package presenter
 
-import "github.com/ElrondNetwork/elrond-go/core"
+import (
+	"github.com/ElrondNetwork/elrond-go/core"
+)
 
 // GetNumTxInBlock will return how many transactions are in block
 func (psh *PresenterStatusHandler) GetNumTxInBlock() uint64 {
@@ -32,6 +34,11 @@ func (psh *PresenterStatusHandler) GetCurrentBlockHash() string {
 	return psh.getFromCacheAsString(core.MetricCurrentBlockHash)
 }
 
+// GetEpochNumber will return current epoch
+func (psh *PresenterStatusHandler) GetEpochNumber() uint64 {
+	return psh.getFromCacheAsUint64(core.MetricEpochNumber)
+}
+
 // GetCurrentRoundTimestamp will return current round timestamp
 func (psh *PresenterStatusHandler) GetCurrentRoundTimestamp() uint64 {
 	return psh.getFromCacheAsUint64(core.MetricCurrentRoundTimestamp)
@@ -43,4 +50,9 @@ func (psh *PresenterStatusHandler) GetBlockSize() uint64 {
 	headerSize := psh.getFromCacheAsUint64(core.MetricHeaderSize)
 
 	return miniBlocksSize + headerSize
+}
+
+// GetHighestFinalBlock will return highest nonce block notarized by metachain for current shard
+func (psh *PresenterStatusHandler) GetHighestFinalBlock() uint64 {
+	return psh.getFromCacheAsUint64(core.MetricHighestFinalBlock)
 }

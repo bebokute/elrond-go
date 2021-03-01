@@ -1,6 +1,8 @@
 package shard
 
 import (
+	"github.com/ElrondNetwork/elrond-go/core"
+	"github.com/ElrondNetwork/elrond-go/core/check"
 	"github.com/ElrondNetwork/elrond-go/data/block"
 	"github.com/ElrondNetwork/elrond-go/data/state"
 	"github.com/ElrondNetwork/elrond-go/dataRetriever"
@@ -12,20 +14,26 @@ import (
 	"github.com/ElrondNetwork/elrond-go/sharding"
 )
 
+var _ process.PreProcessorsContainerFactory = (*preProcessorsContainerFactory)(nil)
+
 type preProcessorsContainerFactory struct {
-	shardCoordinator   sharding.Coordinator
-	store              dataRetriever.StorageService
-	marshalizer        marshal.Marshalizer
-	hasher             hashing.Hasher
-	dataPool           dataRetriever.PoolsHolder
-	addrConverter      state.AddressConverter
-	txProcessor        process.TransactionProcessor
-	scProcessor        process.SmartContractProcessor
-	scResultProcessor  process.SmartContractResultProcessor
-	rewardsTxProcessor process.RewardTransactionProcessor
-	accounts           state.AccountsAdapter
-	requestHandler     process.RequestHandler
-	rewardsProducer    process.InternalTransactionProducer
+	shardCoordinator     sharding.Coordinator
+	store                dataRetriever.StorageService
+	marshalizer          marshal.Marshalizer
+	hasher               hashing.Hasher
+	dataPool             dataRetriever.PoolsHolder
+	pubkeyConverter      core.PubkeyConverter
+	txProcessor          process.TransactionProcessor
+	scProcessor          process.SmartContractProcessor
+	scResultProcessor    process.SmartContractResultProcessor
+	rewardsTxProcessor   process.RewardTransactionProcessor
+	accounts             state.AccountsAdapter
+	requestHandler       process.RequestHandler
+	economicsFee         process.FeeHandler
+	gasHandler           process.GasHandler
+	blockTracker         preprocess.BlockTracker
+	blockSizeComputation preprocess.BlockSizeComputationHandler
+	balanceComputation   preprocess.BalanceComputationHandler
 }
 
 // NewPreProcessorsContainerFactory is responsible for creating a new preProcessors factory object
@@ -35,70 +43,90 @@ func NewPreProcessorsContainerFactory(
 	marshalizer marshal.Marshalizer,
 	hasher hashing.Hasher,
 	dataPool dataRetriever.PoolsHolder,
-	addrConverter state.AddressConverter,
+	pubkeyConverter core.PubkeyConverter,
 	accounts state.AccountsAdapter,
 	requestHandler process.RequestHandler,
 	txProcessor process.TransactionProcessor,
 	scProcessor process.SmartContractProcessor,
 	scResultProcessor process.SmartContractResultProcessor,
 	rewardsTxProcessor process.RewardTransactionProcessor,
-	rewardsProducer process.InternalTransactionProducer,
+	economicsFee process.FeeHandler,
+	gasHandler process.GasHandler,
+	blockTracker preprocess.BlockTracker,
+	blockSizeComputation preprocess.BlockSizeComputationHandler,
+	balanceComputation preprocess.BalanceComputationHandler,
 ) (*preProcessorsContainerFactory, error) {
 
-	if shardCoordinator == nil || shardCoordinator.IsInterfaceNil() {
+	if check.IfNil(shardCoordinator) {
 		return nil, process.ErrNilShardCoordinator
 	}
-	if store == nil || store.IsInterfaceNil() {
+	if check.IfNil(store) {
 		return nil, process.ErrNilStore
 	}
-	if marshalizer == nil || marshalizer.IsInterfaceNil() {
+	if check.IfNil(marshalizer) {
 		return nil, process.ErrNilMarshalizer
 	}
-	if hasher == nil || hasher.IsInterfaceNil() {
+	if check.IfNil(hasher) {
 		return nil, process.ErrNilHasher
 	}
-	if dataPool == nil || dataPool.IsInterfaceNil() {
+	if check.IfNil(dataPool) {
 		return nil, process.ErrNilDataPoolHolder
 	}
-	if addrConverter == nil || addrConverter.IsInterfaceNil() {
-		return nil, process.ErrNilAddressConverter
+	if check.IfNil(pubkeyConverter) {
+		return nil, process.ErrNilPubkeyConverter
 	}
-	if txProcessor == nil || txProcessor.IsInterfaceNil() {
+	if check.IfNil(txProcessor) {
 		return nil, process.ErrNilTxProcessor
 	}
-	if accounts == nil || accounts.IsInterfaceNil() {
+	if check.IfNil(accounts) {
 		return nil, process.ErrNilAccountsAdapter
 	}
-	if scProcessor == nil || scProcessor.IsInterfaceNil() {
+	if check.IfNil(scProcessor) {
 		return nil, process.ErrNilSmartContractProcessor
 	}
-	if scResultProcessor == nil || scResultProcessor.IsInterfaceNil() {
+	if check.IfNil(scResultProcessor) {
 		return nil, process.ErrNilSmartContractResultProcessor
 	}
-	if rewardsTxProcessor == nil || rewardsTxProcessor.IsInterfaceNil() {
+	if check.IfNil(rewardsTxProcessor) {
 		return nil, process.ErrNilRewardsTxProcessor
 	}
-	if requestHandler == nil || requestHandler.IsInterfaceNil() {
+	if check.IfNil(requestHandler) {
 		return nil, process.ErrNilRequestHandler
 	}
-	if rewardsProducer == nil || rewardsProducer.IsInterfaceNil() {
-		return nil, process.ErrNilInternalTransactionProducer
+	if check.IfNil(economicsFee) {
+		return nil, process.ErrNilEconomicsFeeHandler
+	}
+	if check.IfNil(gasHandler) {
+		return nil, process.ErrNilGasHandler
+	}
+	if check.IfNil(blockTracker) {
+		return nil, process.ErrNilBlockTracker
+	}
+	if check.IfNil(blockSizeComputation) {
+		return nil, process.ErrNilBlockSizeComputationHandler
+	}
+	if check.IfNil(balanceComputation) {
+		return nil, process.ErrNilBalanceComputationHandler
 	}
 
 	return &preProcessorsContainerFactory{
-		shardCoordinator:   shardCoordinator,
-		store:              store,
-		marshalizer:        marshalizer,
-		hasher:             hasher,
-		dataPool:           dataPool,
-		addrConverter:      addrConverter,
-		txProcessor:        txProcessor,
-		accounts:           accounts,
-		scProcessor:        scProcessor,
-		scResultProcessor:  scResultProcessor,
-		rewardsTxProcessor: rewardsTxProcessor,
-		requestHandler:     requestHandler,
-		rewardsProducer:    rewardsProducer,
+		shardCoordinator:     shardCoordinator,
+		store:                store,
+		marshalizer:          marshalizer,
+		hasher:               hasher,
+		dataPool:             dataPool,
+		pubkeyConverter:      pubkeyConverter,
+		txProcessor:          txProcessor,
+		accounts:             accounts,
+		scProcessor:          scProcessor,
+		scResultProcessor:    scResultProcessor,
+		rewardsTxProcessor:   rewardsTxProcessor,
+		requestHandler:       requestHandler,
+		economicsFee:         economicsFee,
+		gasHandler:           gasHandler,
+		blockTracker:         blockTracker,
+		blockSizeComputation: blockSizeComputation,
+		balanceComputation:   balanceComputation,
 	}, nil
 }
 
@@ -136,6 +164,16 @@ func (ppcm *preProcessorsContainerFactory) Create() (process.PreProcessorsContai
 		return nil, err
 	}
 
+	preproc, err = ppcm.createValidatorInfoPreProcessor()
+	if err != nil {
+		return nil, err
+	}
+
+	err = container.Add(block.PeerBlock, preproc)
+	if err != nil {
+		return nil, err
+	}
+
 	return container, nil
 }
 
@@ -149,6 +187,13 @@ func (ppcm *preProcessorsContainerFactory) createTxPreProcessor() (process.PrePr
 		ppcm.shardCoordinator,
 		ppcm.accounts,
 		ppcm.requestHandler.RequestTransaction,
+		ppcm.economicsFee,
+		ppcm.gasHandler,
+		ppcm.blockTracker,
+		block.TxBlock,
+		ppcm.pubkeyConverter,
+		ppcm.blockSizeComputation,
+		ppcm.balanceComputation,
 	)
 
 	return txPreprocessor, err
@@ -164,6 +209,11 @@ func (ppcm *preProcessorsContainerFactory) createSmartContractResultPreProcessor
 		ppcm.shardCoordinator,
 		ppcm.accounts,
 		ppcm.requestHandler.RequestUnsignedTransactions,
+		ppcm.gasHandler,
+		ppcm.economicsFee,
+		ppcm.pubkeyConverter,
+		ppcm.blockSizeComputation,
+		ppcm.balanceComputation,
 	)
 
 	return scrPreprocessor, err
@@ -176,19 +226,29 @@ func (ppcm *preProcessorsContainerFactory) createRewardsTransactionPreProcessor(
 		ppcm.hasher,
 		ppcm.marshalizer,
 		ppcm.rewardsTxProcessor,
-		ppcm.rewardsProducer,
 		ppcm.shardCoordinator,
 		ppcm.accounts,
 		ppcm.requestHandler.RequestRewardTransactions,
+		ppcm.gasHandler,
+		ppcm.pubkeyConverter,
+		ppcm.blockSizeComputation,
+		ppcm.balanceComputation,
 	)
 
 	return rewardTxPreprocessor, err
 }
 
+func (ppcm *preProcessorsContainerFactory) createValidatorInfoPreProcessor() (process.PreProcessor, error) {
+	validatorInfoPreprocessor, err := preprocess.NewValidatorInfoPreprocessor(
+		ppcm.hasher,
+		ppcm.marshalizer,
+		ppcm.blockSizeComputation,
+	)
+
+	return validatorInfoPreprocessor, err
+}
+
 // IsInterfaceNil returns true if there is no value under the interface
 func (ppcm *preProcessorsContainerFactory) IsInterfaceNil() bool {
-	if ppcm == nil {
-		return true
-	}
-	return false
+	return ppcm == nil
 }

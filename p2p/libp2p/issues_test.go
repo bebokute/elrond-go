@@ -2,39 +2,39 @@ package libp2p_test
 
 import (
 	"bytes"
-	"context"
-	"crypto/ecdsa"
 	"fmt"
-	"math/rand"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ElrondNetwork/elrond-go/config"
+	"github.com/ElrondNetwork/elrond-go/core"
 	"github.com/ElrondNetwork/elrond-go/p2p"
 	"github.com/ElrondNetwork/elrond-go/p2p/libp2p"
-	"github.com/ElrondNetwork/elrond-go/p2p/libp2p/discovery"
-	"github.com/ElrondNetwork/elrond-go/p2p/loadBalancer"
 	"github.com/ElrondNetwork/elrond-go/p2p/mock"
-	"github.com/btcsuite/btcd/btcec"
-	libp2pCrypto "github.com/libp2p/go-libp2p-core/crypto"
+	"github.com/ElrondNetwork/elrond-go/testscommon"
 	"github.com/stretchr/testify/assert"
 )
 
-func createMessenger(port int) p2p.Messenger {
-	r := rand.New(rand.NewSource(int64(port)))
-	prvKey, _ := ecdsa.GenerateKey(btcec.S256(), r)
-	sk := (*libp2pCrypto.Secp256k1PrivateKey)(prvKey)
+func createMessenger() p2p.Messenger {
+	args := libp2p.ArgsNetworkMessenger{
+		Marshalizer:   &testscommon.ProtoMarshalizerMock{},
+		ListenAddress: libp2p.ListenLocalhostAddrWithIp4AndTcp,
+		P2pConfig: config.P2PConfig{
+			Node: config.NodeConfig{
+				Port: "0",
+			},
+			KadDhtPeerDiscovery: config.KadDhtPeerDiscoveryConfig{
+				Enabled: false,
+			},
+			Sharding: config.ShardingConfig{
+				Type: p2p.NilListSharder,
+			},
+		},
+		SyncTimer: &libp2p.LocalSyncTimer{},
+	}
 
-	libP2PMes, err := libp2p.NewNetworkMessenger(
-		context.Background(),
-		port,
-		sk,
-		nil,
-		loadBalancer.NewOutgoingChannelLoadBalancer(),
-		discovery.NewNullDiscoverer(),
-		libp2p.ListenLocalhostAddrWithIp4AndTcp,
-	)
-
+	libP2PMes, err := libp2p.NewNetworkMessenger(args)
 	if err != nil {
 		fmt.Println(err.Error())
 	}
@@ -48,15 +48,19 @@ func createMessenger(port int) p2p.Messenger {
 // Next message that the sender tries to send will cause a new error to be logged and no data to be sent
 // The fix consists in the full stream closing when an error occurs during writing.
 func TestIssueEN898_StreamResetError(t *testing.T) {
-	mes1 := createMessenger(23100)
-	mes2 := createMessenger(23101)
+	if testing.Short() {
+		t.Skip("this is not a short test")
+	}
+
+	mes1 := createMessenger()
+	mes2 := createMessenger()
 
 	defer func() {
-		mes1.Close()
-		mes2.Close()
+		_ = mes1.Close()
+		_ = mes2.Close()
 	}()
 
-	mes1.ConnectToPeer(getConnectableAddress(mes2))
+	_ = mes1.ConnectToPeer(getConnectableAddress(mes2))
 
 	topic := "test topic"
 
@@ -74,9 +78,9 @@ func TestIssueEN898_StreamResetError(t *testing.T) {
 	smallPacketReceived := &atomic.Value{}
 	smallPacketReceived.Store(false)
 
-	mes2.CreateTopic(topic, false)
-	mes2.RegisterMessageProcessor(topic, &mock.MessageProcessorStub{
-		ProcessMessageCalled: func(message p2p.MessageP2P) error {
+	_ = mes2.CreateTopic(topic, false)
+	_ = mes2.RegisterMessageProcessor(topic, &mock.MessageProcessorStub{
+		ProcessMessageCalled: func(message p2p.MessageP2P, _ core.PeerID) error {
 			if bytes.Equal(message.Data(), largePacket) {
 				largePacketReceived.Store(true)
 			}
@@ -90,12 +94,12 @@ func TestIssueEN898_StreamResetError(t *testing.T) {
 	})
 
 	fmt.Println("sending the large packet...")
-	mes1.SendToConnectedPeer(topic, largePacket, mes2.ID())
+	_ = mes1.SendToConnectedPeer(topic, largePacket, mes2.ID())
 
 	time.Sleep(time.Second)
 
 	fmt.Println("sending the small packet...")
-	mes1.SendToConnectedPeer(topic, smallPacket, mes2.ID())
+	_ = mes1.SendToConnectedPeer(topic, smallPacket, mes2.ID())
 
 	time.Sleep(time.Second)
 

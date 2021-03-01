@@ -1,23 +1,25 @@
 <div style="text-align:center">
-  <img src="https://github.com/ElrondNetwork/elrond-go/blob/master/elrond_logo_01.svg"></img>
-</div>  
-
+  <img
+  src="https://raw.githubusercontent.com/ElrondNetwork/elrond-go/master/elrond_logo_01.svg"
+  alt="Elrond Network">
+</div>
 <br>
 
 [![](https://img.shields.io/badge/made%20by-Elrond%20Network-blue.svg)](http://elrond.com/)
-[![](https://img.shields.io/badge/project-Elrond%20Network%20Testnet-blue.svg)](https://testnet.elrond.com/)
+[![](https://img.shields.io/badge/project-Elrond%20Network%20Mainnet-blue.svg)](https://explorer.elrond.com/)
 [![Go Report Card](https://goreportcard.com/badge/github.com/ElrondNetwork/elrond-go)](https://goreportcard.com/report/github.com/ElrondNetwork/elrond-go)
 [![LoC](https://tokei.rs/b1/github/ElrondNetwork/elrond-go?category=code)](https://github.com/ElrondNetwork/elrond-go)
 [![API Reference](https://godoc.org/github.com/ElrondNetwork/elrond-go?status.svg)](https://godoc.org/github.com/ElrondNetwork/elrond-go)
-[![riot.im](https://img.shields.io/badge/riot.im-JOIN%20CHAT-green.svg)](https://riot.im/app/#/room/#elrond:matrix.org)
+[![codecov](https://codecov.io/gh/ElrondNetwork/elrond-go/branch/master/graph/badge.svg?token=MYS5EDASOJ)](https://codecov.io/gh/ElrondNetwork/elrond-go)
 
 # Elrond go
 
-The go implementation for the Elrond Network testnet
+The go implementation for the Elrond Network protocol
 
 ## Installation and running
 
-In order to join the network as an observer or as a validator, the required steps are explained below:
+In order to join the network as an observer or as a validator, the required steps to **build from source and setup explicitly** are explained below. 
+Alternatively, in order to use the Docker Image, jump to [Using the Docker Image](#using-the-docker-image).
 
 ### Step 1: install & configure go:
 The installation of go should proceed as shown in official golang installation guide https://golang.org/doc/install . In order to run the node, minimum golang version should be 1.12.4.
@@ -26,6 +28,8 @@ The installation of go should proceed as shown in official golang installation g
 The main branch that will be used is the master branch. Alternatively, an older release tag can be used.
 
 ```
+# set $GOPATH if not set and export to ~/.profile along with Go binary path
+$ if [[ $GOPATH=="" ]]; then GOPATH="$HOME/go" fi
 $ mkdir -p $GOPATH/src/github.com/ElrondNetwork
 $ cd $GOPATH/src/github.com/ElrondNetwork
 $ git clone https://github.com/ElrondNetwork/elrond-go
@@ -33,28 +37,50 @@ $ cd elrond-go && git checkout master
 $ GO111MODULE=on go mod vendor
 $ cd cmd/node && go build
 ```
+The Node depends on the Arwen Virtual Machine, which is a separate binary. Depending on the preferred setup, there are two slightly different options to build Arwen.
+
+<b>Option A</b>: for development, which also implies running tests:
+
+First, create a persistent environment variable named `$ARWEN_PATH`. For example, place it in `~/.profile`, then restart the user session:
+```
+export ARWEN_PATH="$HOME/Arwen/arwen"
+``` 
+
+Note that the path includes the name of the binary, `arwen`.
+Secondly, run `make arwen`
+```
+$ cd $GOPATH/src/github.com/ElrondNetwork/elrond-go
+$ make arwen
+````
+The binary will be generated at `$ARWEN_PATH`. Whether you run the Node itself or the tests, this path wil be used to start Arwen.
+
+<b>Option B</b>: no development needed, just running the node
+```
+$ cd $GOPATH/src/github.com/ElrondNetwork/elrond-go
+$ ARWEN_PATH=./cmd/node make arwen
+```
+The Arwen binary will be built and placed near the node
 
 ### Step 3: creating the node’s identity:
 In order to be registered in the Elrond Network, a node must possess 2 types of (secret key, public key) pairs. One is used to identify the node’s credential used to generate transactions (having the sender field its account address) and the other is used in the process of the block signing. Please note that this is a preliminary mechanism, in the next releases the first (private, public key) pair will be dropped when the staking mechanism will be fully implemented. To build and run the keygenerator, the following commands will need to be run:
 
 ```
-$ cd ../keygenerator
+$ cd $GOPATH/src/github.com/ElrondNetwork/elrond-go/cmd/keygenerator
 $ go build
 $ ./keygenerator
 ```
 
 ### Start the node 
 #### Step 4a: Join Elrond testnet:
-Follow the steps outlined [here](https://docs.elrond.com/start-a-validator-node/start-the-network). This is because in order to join the testnet you need a specific node configuration.
+Follow the steps outlined [here](https://docs.elrond.com/validators/install). This is because in order to join the testnet you need a specific node configuration.
 ______
 OR
 ______
 #### Step 4b: copying credentials and starting a node in a separate network:
-The previous generated .pem files needs to be copied in the same directory where the node binary resides in order to start the node.
+The previous generated .pem file needs to be copied in the same directory where the node binary resides in order to start the node.
 
 ```
-$  cp initialBalancesSk.pem ./../node/config/
-$  cp initialNodesSk.pem ./../node/config/
+$  cp validatorKey.pem ./../node/config/
 $  cd ../node && ./node
 ```
 
@@ -64,6 +90,39 @@ The node binary has some flags defined (for a brief description, the user can us
 ```	
 $ go test ./...	
 ```
+
+## Compiling new fields in .proto files (should be updated when required PR will be merged in gogo protobuf master branch):
+1. Download protoc compiler: https://github.com/protocolbuffers/protobuf/releases 
+ (if you are running under linux on a x64 you might want to download protoc-3.11.4-linux-x86_64.zip)
+2. Expand archive, copy the /include/google folder in /usr/include using <br>
+`sudo cp -r google /usr/include`
+3. Copy bin/protoc using <br>
+`sudo cp protoc  /usr/bin` 
+4. Fetch the repo github.com/ElrondNetwork/protobuf
+5. Compile gogo slick & copy binary using
+```
+cd protoc-gen-gogoslick
+go build
+sudo cp protoc-gen-gogoslick /usr/bin/
+```
+
+Done
+
+## Using the Docker Image
+
+The following command runs a Node using the **latest** [Docker image](https://hub.docker.com/r/elrondnetwork/elrond-go-node) and maps a container folder to a local one that holds the necessary configuration:
+
+```
+docker run -d -v /absolute/path/to/config/:/data/ elrondnetwork/elrond-go-node:latest \
+ --nodes-setup-file="/data/nodesSetup.json" \
+ --p2p-config="/data/config/p2p.toml" \
+ --validator-key-pem-file="/data/keys/validatorKey.pem"
+ ```
+
+ In the snippet above, make sure you adjust the path to a valid configuration folder and also provide the appropriate command line arguments to the Node. For more details go to [Node CLI](https://docs.elrond.com/validators/node-cli).
+
+ In order to run a container using the latest **development** version instead, use the image **`elrondnetwork/elrond-go-node:devlatest`**. Furthermore, in order to use a specific release or tagged branch, use the image **`elrondnetwork/elrond-go-node:<tag>`**.
+
 
 ## Progress
 
@@ -119,21 +178,26 @@ $ go test ./...
   - [x] Integration tests
   - [x] TeamCity continuous integration
   - [x] Manual testing
+- [x] Epochs
+  - [x] Nodes dispatcher (shuffling)
+- [x] Network sharding
+  - [x] Optimized wiring protocol
+- [x] VM
+  - [x] EVM Core
+  - [x] EVM Core tests
+  - [x] EVM Adapter
+- [x] Fee structure
+- [x] Smart Contracts on a Sharded Architecture
+  - [x] Async callbacks
+- [x] Testing
+  - [x] Automate tests with AWS
+  - [x] Nodes Monitoring
 
 ### In progress
-- [ ] Epochs
-  - [ ] Nodes dispatcher (shuffling)
-- [ ] Network sharding
-  - [ ] Optimized wiring protocol
-- [ ] VM - K-Framework
-  - [ ] EVM Core
-  - [ ] EVM Core tests
-  - [ ] EVM Adapter
+
 - [ ] Smart Contracts on a Sharded Architecture
   - [ ] Dependency checker + SC migration
   - [ ] Storage rent + SC backup & restore
-  - [ ] Request-response fallback
-- [ ] Fee structure
 - [ ] Adaptive State Sharding
   - [ ] Splitting
   - [ ] Merging 
@@ -146,8 +210,6 @@ $ go test ./...
 - [ ] Governance
   - [ ] SC for ERD IP
   - [ ] Enforced Upgrade mechanism for voted ERD IP
-- [ ] Testing
-  - [ ] Automate tests with AWS 
 - [ ] Bugfixing
 
 
@@ -165,3 +227,4 @@ Please make sure your contributions adhere to our coding guidelines:
     - E.g. "core/indexer: fixed a typo"
 
 Please see the [documentation](https://docs.elrond.com/) for more details on the Elrond project.
+

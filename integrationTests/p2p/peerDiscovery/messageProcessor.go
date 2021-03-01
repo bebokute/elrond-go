@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"sync"
 
+	"github.com/ElrondNetwork/elrond-go/core"
 	"github.com/ElrondNetwork/elrond-go/p2p"
 )
 
+// MessageProcesssor -
 type MessageProcesssor struct {
 	RequiredValue   []byte
 	chanDone        chan struct{}
@@ -14,6 +16,7 @@ type MessageProcesssor struct {
 	wasDataReceived bool
 }
 
+// NewMessageProcessor -
 func NewMessageProcessor(chanDone chan struct{}, requiredVal []byte) *MessageProcesssor {
 	return &MessageProcesssor{
 		RequiredValue: requiredVal,
@@ -21,7 +24,8 @@ func NewMessageProcessor(chanDone chan struct{}, requiredVal []byte) *MessagePro
 	}
 }
 
-func (mp *MessageProcesssor) ProcessReceivedMessage(message p2p.MessageP2P) error {
+// ProcessReceivedMessage -
+func (mp *MessageProcesssor) ProcessReceivedMessage(message p2p.MessageP2P, _ core.PeerID) error {
 	if bytes.Equal(mp.RequiredValue, message.Data()) {
 		mp.mutDataReceived.Lock()
 		mp.wasDataReceived = true
@@ -33,6 +37,7 @@ func (mp *MessageProcesssor) ProcessReceivedMessage(message p2p.MessageP2P) erro
 	return nil
 }
 
+// WasDataReceived -
 func (mp *MessageProcesssor) WasDataReceived() bool {
 	mp.mutDataReceived.Lock()
 	defer mp.mutDataReceived.Unlock()
@@ -42,8 +47,5 @@ func (mp *MessageProcesssor) WasDataReceived() bool {
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (mp *MessageProcesssor) IsInterfaceNil() bool {
-	if mp == nil {
-		return true
-	}
-	return false
+	return mp == nil
 }

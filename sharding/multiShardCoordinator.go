@@ -2,11 +2,12 @@ package sharding
 
 import (
 	"bytes"
-	"fmt"
 	"math"
 
-	"github.com/ElrondNetwork/elrond-go/data/state"
+	"github.com/ElrondNetwork/elrond-go/core"
 )
+
+var _ Coordinator = (*multiShardCoordinator)(nil)
 
 // multiShardCoordinator struct defines the functionality for handling transaction dispatching to
 // the corresponding shards. The number of shards is currently passed as a constructor
@@ -23,7 +24,7 @@ func NewMultiShardCoordinator(numberOfShards, selfId uint32) (*multiShardCoordin
 	if numberOfShards < 1 {
 		return nil, ErrInvalidNumberOfShards
 	}
-	if selfId >= numberOfShards && selfId != MetachainShardId {
+	if selfId >= numberOfShards && selfId != core.MetachainShardId {
 		return nil, ErrInvalidShardId
 	}
 
@@ -44,15 +45,34 @@ func (msc *multiShardCoordinator) calculateMasks() (uint32, uint32) {
 	return (1 << uint(n)) - 1, (1 << uint(n-1)) - 1
 }
 
-// ComputeId calculates the shard for a given address used for transaction dispatching
-func (msc *multiShardCoordinator) ComputeId(address state.AddressContainer) uint32 {
-	bytesNeed := int(msc.numberOfShards/256) + 1
-	startingIndex := 0
-	if len(address.Bytes()) > bytesNeed {
-		startingIndex = len(address.Bytes()) - bytesNeed
+// ComputeId calculates the shard for a given address container
+func (msc *multiShardCoordinator) ComputeId(address []byte) uint32 {
+	return msc.ComputeIdFromBytes(address)
+}
+
+// ComputeIdFromBytes calculates the shard for a given address
+func (msc *multiShardCoordinator) ComputeIdFromBytes(address []byte) uint32 {
+
+	var bytesNeed int
+	if msc.numberOfShards <= 256 {
+		bytesNeed = 1
+	} else if msc.numberOfShards <= 65536 {
+		bytesNeed = 2
+	} else if msc.numberOfShards <= 16777216 {
+		bytesNeed = 3
+	} else {
+		bytesNeed = 4
 	}
 
-	buffNeeded := address.Bytes()[startingIndex:]
+	startingIndex := 0
+	if len(address) > bytesNeed {
+		startingIndex = len(address) - bytesNeed
+	}
+
+	buffNeeded := address[startingIndex:]
+	if core.IsSmartContractOnMetachain(buffNeeded, address) {
+		return core.MetachainShardId
+	}
 
 	addr := uint32(0)
 	for i := 0; i < len(buffNeeded); i++ {
@@ -78,8 +98,8 @@ func (msc *multiShardCoordinator) SelfId() uint32 {
 }
 
 // SameShard returns weather two addresses belong to the same shard
-func (msc *multiShardCoordinator) SameShard(firstAddress, secondAddress state.AddressContainer) bool {
-	if bytes.Equal(firstAddress.Bytes(), secondAddress.Bytes()) {
+func (msc *multiShardCoordinator) SameShard(firstAddress, secondAddress []byte) bool {
+	if bytes.Equal(firstAddress, secondAddress) {
 		return true
 	}
 
@@ -89,35 +109,10 @@ func (msc *multiShardCoordinator) SameShard(firstAddress, secondAddress state.Ad
 // CommunicationIdentifier returns the identifier between current shard ID and destination shard ID
 // identifier is generated such as the first shard from identifier is always smaller or equal than the last
 func (msc *multiShardCoordinator) CommunicationIdentifier(destShardID uint32) string {
-	return communicationIdentifierBetweenShards(msc.selfId, destShardID)
+	return core.CommunicationIdentifierBetweenShards(msc.selfId, destShardID)
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (msc *multiShardCoordinator) IsInterfaceNil() bool {
-	if msc == nil {
-		return true
-	}
-	return false
-}
-
-// communicationIdentifierBetweenShards is used to generate the identifier between shardID1 and shardID2
-// identifier is generated such as the first shard from identifier is always smaller or equal than the last
-func communicationIdentifierBetweenShards(shardId1 uint32, shardId2 uint32) string {
-	if shardId1 == shardId2 {
-		return shardIdToString(shardId1)
-	}
-
-	if shardId1 < shardId2 {
-		return shardIdToString(shardId1) + shardIdToString(shardId2)
-	}
-
-	return shardIdToString(shardId2) + shardIdToString(shardId1)
-}
-
-func shardIdToString(shardId uint32) string {
-	if shardId == MetachainShardId {
-		return "_META"
-	}
-
-	return fmt.Sprintf("_%d", shardId)
+	return msc == nil
 }

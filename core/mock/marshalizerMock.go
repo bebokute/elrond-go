@@ -5,7 +5,10 @@ import (
 	"errors"
 )
 
+// ErrMockMarshalizer -
 var ErrMockMarshalizer = errors.New("MarshalizerMock generic error")
+
+// ErrNilObjectToMarshal -
 var ErrNilObjectToMarshal = errors.New("nil object to serialize from")
 
 // MarshalizerMock that will be used for testing
@@ -49,8 +52,5 @@ func (mm *MarshalizerMock) Unmarshal(obj interface{}, buff []byte) error {
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (mm *MarshalizerMock) IsInterfaceNil() bool {
-	if mm == nil {
-		return true
-	}
-	return false
+	return mm == nil
 }

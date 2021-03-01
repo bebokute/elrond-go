@@ -3,17 +3,16 @@ package sync
 import (
 	"bytes"
 	"math"
-	"strings"
 	"sync"
 
 	"github.com/ElrondNetwork/elrond-go/consensus"
+	"github.com/ElrondNetwork/elrond-go/core/check"
 	"github.com/ElrondNetwork/elrond-go/data"
 	"github.com/ElrondNetwork/elrond-go/process"
 )
 
-const MinForkRound = uint64(0)
-
 type headerInfo struct {
+	epoch uint32
 	nonce uint64
 	round uint64
 	hash  []byte
@@ -23,13 +22,16 @@ type headerInfo struct {
 type checkpointInfo struct {
 	nonce uint64
 	round uint64
+	hash  []byte
 }
 
 type forkInfo struct {
-	checkpoint           []*checkpointInfo
-	finalCheckpoint      *checkpointInfo
-	probableHighestNonce uint64
-	lastBlockRound       uint64
+	checkpoint              []*checkpointInfo
+	finalCheckpoint         *checkpointInfo
+	probableHighestNonce    uint64
+	highestNonceReceived    uint64
+	rollBackNonce           uint64
+	lastRoundWithForcedFork int64
 }
 
 // baseForkDetector defines a struct with necessary data needed for fork detection
@@ -40,6 +42,44 @@ type baseForkDetector struct {
 	mutHeaders sync.RWMutex
 	fork       forkInfo
 	mutFork    sync.RWMutex
+
+	blackListHandler   process.TimeCacher
+	genesisTime        int64
+	blockTracker       process.BlockTracker
+	forkDetector       forkDetector
+	genesisNonce       uint64
+	genesisRound       uint64
+	maxForkHeaderEpoch uint32
+	genesisEpoch       uint32
+}
+
+// SetRollBackNonce sets the nonce where the chain should roll back
+func (bfd *baseForkDetector) SetRollBackNonce(nonce uint64) {
+	bfd.mutFork.Lock()
+	bfd.fork.rollBackNonce = nonce
+	bfd.mutFork.Unlock()
+}
+
+func (bfd *baseForkDetector) getRollBackNonce() uint64 {
+	bfd.mutFork.RLock()
+	nonce := bfd.fork.rollBackNonce
+	bfd.mutFork.RUnlock()
+
+	return nonce
+}
+
+func (bfd *baseForkDetector) setLastRoundWithForcedFork(round int64) {
+	bfd.mutFork.Lock()
+	bfd.fork.lastRoundWithForcedFork = round
+	bfd.mutFork.Unlock()
+}
+
+func (bfd *baseForkDetector) lastRoundWithForcedFork() int64 {
+	bfd.mutFork.RLock()
+	round := bfd.fork.lastRoundWithForcedFork
+	bfd.mutFork.RUnlock()
+
+	return round
 }
 
 func (bfd *baseForkDetector) removePastOrInvalidRecords() {
@@ -48,16 +88,38 @@ func (bfd *baseForkDetector) removePastOrInvalidRecords() {
 	bfd.removePastCheckpoints()
 }
 
-func (bfd *baseForkDetector) checkBlockBasicValidity(header data.HeaderHandler, state process.BlockHeaderState) error {
+func (bfd *baseForkDetector) checkBlockBasicValidity(
+	header data.HeaderHandler,
+	headerHash []byte,
+) error {
+
+	if check.IfNil(header) {
+		return ErrNilHeader
+	}
+	if headerHash == nil {
+		return ErrNilHash
+	}
+
 	roundDif := int64(header.GetRound()) - int64(bfd.finalCheckpoint().round)
 	nonceDif := int64(header.GetNonce()) - int64(bfd.finalCheckpoint().nonce)
 	//TODO: Analyze if the acceptance of some headers which came for the next round could generate some attack vectors
 	nextRound := bfd.rounder.Index() + 1
+	genesisTimeFromHeader := bfd.computeGenesisTimeFromHeader(header)
 
-	if roundDif <= 0 {
+	bfd.blackListHandler.Sweep()
+	if bfd.blackListHandler.Has(string(header.GetPrevHash())) {
+		process.AddHeaderToBlackList(bfd.blackListHandler, headerHash)
+		return process.ErrHeaderIsBlackListed
+	}
+	//TODO: This check could be removed when this protection mechanism would be implemented on interceptors side
+	if genesisTimeFromHeader != bfd.genesisTime {
+		process.AddHeaderToBlackList(bfd.blackListHandler, headerHash)
+		return ErrGenesisTimeMissmatch
+	}
+	if roundDif < 0 {
 		return ErrLowerRoundInBlock
 	}
-	if nonceDif <= 0 {
+	if nonceDif < 0 {
 		return ErrLowerNonceInBlock
 	}
 	if int64(header.GetRound()) > nextRound {
@@ -65,16 +127,6 @@ func (bfd *baseForkDetector) checkBlockBasicValidity(header data.HeaderHandler, 
 	}
 	if roundDif < nonceDif {
 		return ErrHigherNonceInBlock
-	}
-	if state == process.BHProposed {
-		if !isRandomSeedValid(header) {
-			return ErrRandomSeedNotValid
-		}
-	}
-	if state == process.BHReceived || state == process.BHProcessed {
-		if !isSigned(header) {
-			return ErrBlockIsNotSigned
-		}
 	}
 
 	return nil
@@ -96,22 +148,21 @@ func (bfd *baseForkDetector) removeInvalidReceivedHeaders() {
 	finalCheckpointRound := bfd.finalCheckpoint().round
 	finalCheckpointNonce := bfd.finalCheckpoint().nonce
 
-	var validHdrInfos []*headerInfo
-
 	bfd.mutHeaders.Lock()
 	for nonce, hdrInfos := range bfd.headers {
-		validHdrInfos = nil
+		validHdrInfos := make([]*headerInfo, 0)
 		for i := 0; i < len(hdrInfos); i++ {
 			roundDif := int64(hdrInfos[i].round) - int64(finalCheckpointRound)
 			nonceDif := int64(hdrInfos[i].nonce) - int64(finalCheckpointNonce)
-			isReceivedHeaderInvalid := hdrInfos[i].state == process.BHReceived && roundDif < nonceDif
+			hasStateReceived := hdrInfos[i].state == process.BHReceived || hdrInfos[i].state == process.BHReceivedTooLate
+			isReceivedHeaderInvalid := hasStateReceived && roundDif < nonceDif
 			if isReceivedHeaderInvalid {
 				continue
 			}
 
 			validHdrInfos = append(validHdrInfos, hdrInfos[i])
 		}
-		if validHdrInfos == nil {
+		if len(validHdrInfos) == 0 {
 			delete(bfd.headers, nonce)
 			continue
 		}
@@ -127,7 +178,7 @@ func (bfd *baseForkDetector) removePastCheckpoints() {
 
 func (bfd *baseForkDetector) removeCheckpointsBehindNonce(nonce uint64) {
 	bfd.mutFork.Lock()
-	var preservedCheckpoint []*checkpointInfo
+	preservedCheckpoint := make([]*checkpointInfo, 0)
 
 	for i := 0; i < len(bfd.fork.checkpoint); i++ {
 		if bfd.fork.checkpoint[i].nonce < nonce {
@@ -146,8 +197,7 @@ func (bfd *baseForkDetector) computeProbableHighestNonce() uint64 {
 	probableHighestNonce := bfd.finalCheckpoint().nonce
 
 	bfd.mutHeaders.RLock()
-	for _, headersInfo := range bfd.headers {
-		nonce := bfd.getProbableHighestNonce(headersInfo)
+	for nonce := range bfd.headers {
 		if nonce <= probableHighestNonce {
 			continue
 		}
@@ -158,57 +208,46 @@ func (bfd *baseForkDetector) computeProbableHighestNonce() uint64 {
 	return probableHighestNonce
 }
 
-func (bfd *baseForkDetector) getProbableHighestNonce(headersInfo []*headerInfo) uint64 {
-	maxNonce := uint64(0)
-
-	for _, headerInfo := range headersInfo {
-		nonce := headerInfo.nonce
-		// if header stored state is BHProposed, then the probable highest nonce should be set to its nonce-1, because
-		// at that point the consensus was not achieved on this block and the only certainty is that the probable
-		// highest nonce is nonce-1 on which this proposed block is constructed. This approach would avoid a situation
-		// in which a proposed block on which the consensus would not be achieved would set all the nodes in sync mode,
-		// because of the probable highest nonce set with its nonce instead of nonce-1.
-		if headerInfo.state == process.BHProposed {
-			nonce--
-		}
-		if nonce > maxNonce {
-			maxNonce = nonce
-		}
-	}
-
-	return maxNonce
-}
-
-// RemoveHeaders removes all the stored headers with a given nonce
-func (bfd *baseForkDetector) RemoveHeaders(nonce uint64, hash []byte) {
+// RemoveHeader removes the stored header with the given nonce and hash
+func (bfd *baseForkDetector) RemoveHeader(nonce uint64, hash []byte) {
 	bfd.removeCheckpointWithNonce(nonce)
 
-	var preservedHdrInfos []*headerInfo
+	preservedHdrsInfo := make([]*headerInfo, 0)
 
-	bfd.mutHeaders.RLock()
-	hdrInfos := bfd.headers[nonce]
-	bfd.mutHeaders.RUnlock()
+	bfd.mutHeaders.Lock()
 
-	for _, hdrInfoStored := range hdrInfos {
-		if bytes.Equal(hdrInfoStored.hash, hash) {
+	hdrsInfo := bfd.headers[nonce]
+	for _, hdrInfo := range hdrsInfo {
+		if hdrInfo.state != process.BHNotarized && bytes.Equal(hash, hdrInfo.hash) {
 			continue
 		}
 
-		preservedHdrInfos = append(preservedHdrInfos, hdrInfoStored)
+		preservedHdrsInfo = append(preservedHdrsInfo, hdrInfo)
 	}
 
-	bfd.mutHeaders.Lock()
-	if preservedHdrInfos == nil {
+	if len(preservedHdrsInfo) == 0 {
 		delete(bfd.headers, nonce)
 	} else {
-		bfd.headers[nonce] = preservedHdrInfos
+		bfd.headers[nonce] = preservedHdrsInfo
 	}
+
 	bfd.mutHeaders.Unlock()
+
+	bfd.forkDetector.computeFinalCheckpoint()
+
+	probableHighestNonce := bfd.computeProbableHighestNonce()
+	bfd.setProbableHighestNonce(probableHighestNonce)
+
+	log.Debug("forkDetector.RemoveHeader",
+		"nonce", nonce,
+		"hash", hash,
+		"probable highest nonce", probableHighestNonce,
+		"final check point nonce", bfd.finalCheckpoint().nonce)
 }
 
 func (bfd *baseForkDetector) removeCheckpointWithNonce(nonce uint64) {
 	bfd.mutFork.Lock()
-	var preservedCheckpoint []*checkpointInfo
+	preservedCheckpoint := make([]*checkpointInfo, 0)
 
 	for i := 0; i < len(bfd.fork.checkpoint); i++ {
 		if bfd.fork.checkpoint[i].nonce == nonce {
@@ -220,38 +259,33 @@ func (bfd *baseForkDetector) removeCheckpointWithNonce(nonce uint64) {
 
 	bfd.fork.checkpoint = preservedCheckpoint
 	bfd.mutFork.Unlock()
+
+	log.Debug("forkDetector.removeCheckpointWithNonce",
+		"nonce", nonce,
+		"last check point nonce", bfd.lastCheckpoint().nonce)
 }
 
 // append adds a new header in the slice found in nonce position
 // it not adds the header if its hash is already stored in the slice
-func (bfd *baseForkDetector) append(hdrInfo *headerInfo) {
+func (bfd *baseForkDetector) append(hdrInfo *headerInfo) bool {
 	bfd.mutHeaders.Lock()
 	defer bfd.mutHeaders.Unlock()
 
 	hdrInfos := bfd.headers[hdrInfo.nonce]
-	isHdrInfosNilOrEmpty := hdrInfos == nil || len(hdrInfos) == 0
+	isHdrInfosNilOrEmpty := len(hdrInfos) == 0 // no need for nil check, len() for nil returns 0
 	if isHdrInfosNilOrEmpty {
 		bfd.headers[hdrInfo.nonce] = []*headerInfo{hdrInfo}
-		return
+		return true
 	}
 
 	for _, hdrInfoStored := range hdrInfos {
-		if bytes.Equal(hdrInfoStored.hash, hdrInfo.hash) {
-			if hdrInfoStored.state != process.BHProcessed {
-				// If the old appended header has the same hash with the new one received, than the state of the old
-				// record will be replaced if the new one is more important. Below is the hierarchy, from low to high,
-				// of the record state importance: (BHProposed, BHReceived, BHNotarized, BHProcessed)
-				if hdrInfo.state == process.BHNotarized {
-					hdrInfoStored.state = process.BHNotarized
-				} else if hdrInfo.state == process.BHProcessed {
-					hdrInfoStored.state = process.BHProcessed
-				}
-			}
-			return
+		if bytes.Equal(hdrInfoStored.hash, hdrInfo.hash) && hdrInfoStored.state == hdrInfo.state {
+			return false
 		}
 	}
 
 	bfd.headers[hdrInfo.nonce] = append(bfd.headers[hdrInfo.nonce], hdrInfo)
+	return true
 }
 
 // GetHighestFinalBlockNonce gets the highest nonce of the block which is final and it can not be reverted anymore
@@ -259,25 +293,33 @@ func (bfd *baseForkDetector) GetHighestFinalBlockNonce() uint64 {
 	return bfd.finalCheckpoint().nonce
 }
 
+// GetHighestFinalBlockHash gets the hash of the block which is final and it can not be reverted anymore
+func (bfd *baseForkDetector) GetHighestFinalBlockHash() []byte {
+	return bfd.finalCheckpoint().hash
+}
+
 // ProbableHighestNonce gets the probable highest nonce
 func (bfd *baseForkDetector) ProbableHighestNonce() uint64 {
 	return bfd.probableHighestNonce()
 }
 
-// ResetProbableHighestNonceIfNeeded resets the probableHighestNonce to checkpoint if after maxRoundsToWait nothing
-// is received so the node will act as synchronized
-func (bfd *baseForkDetector) ResetProbableHighestNonceIfNeeded() {
-	//TODO: This mechanism should be improved to avoid the situation when a malicious group of 2/3 + 1 from a
-	// consensus group size, could keep all the shard in sync mode, by creating fake blocks higher than current
-	// committed block + 1, which could not be verified by hash -> prev hash and only by rand seed -> prev random seed
-	roundsWithoutReceivedBlock := bfd.rounder.Index() - int64(bfd.lastBlockRound())
-	if roundsWithoutReceivedBlock > maxRoundsToWait {
-		probableHighestNonce := bfd.ProbableHighestNonce()
-		checkpointNonce := bfd.lastCheckpoint().nonce
-		if probableHighestNonce > checkpointNonce {
-			bfd.setProbableHighestNonce(checkpointNonce)
-		}
-	}
+// ResetFork resets the forced fork
+func (bfd *baseForkDetector) ResetFork() {
+	bfd.ResetProbableHighestNonce()
+	bfd.setLastRoundWithForcedFork(bfd.rounder.Index())
+
+	log.Debug("forkDetector.ResetFork",
+		"last round with forced fork", bfd.lastRoundWithForcedFork())
+}
+
+// ResetProbableHighestNonce resets the probable highest nonce to the last checkpoint nonce / highest notarized nonce
+func (bfd *baseForkDetector) ResetProbableHighestNonce() {
+	bfd.cleanupReceivedHeadersHigherThanNonce(bfd.lastCheckpoint().nonce)
+	probableHighestNonce := bfd.computeProbableHighestNonce()
+	bfd.setProbableHighestNonce(probableHighestNonce)
+
+	log.Debug("forkDetector.ResetProbableHighestNonce",
+		"probable highest nonce", bfd.probableHighestNonce())
 }
 
 func (bfd *baseForkDetector) addCheckpoint(checkpoint *checkpointInfo) {
@@ -291,7 +333,10 @@ func (bfd *baseForkDetector) lastCheckpoint() *checkpointInfo {
 	lastIndex := len(bfd.fork.checkpoint) - 1
 	if lastIndex < 0 {
 		bfd.mutFork.RUnlock()
-		return &checkpointInfo{}
+		return &checkpointInfo{
+			nonce: bfd.genesisNonce,
+			round: bfd.genesisRound,
+		}
 	}
 	lastCheckpoint := bfd.fork.checkpoint[lastIndex]
 	bfd.mutFork.RUnlock()
@@ -302,6 +347,25 @@ func (bfd *baseForkDetector) lastCheckpoint() *checkpointInfo {
 func (bfd *baseForkDetector) setFinalCheckpoint(finalCheckpoint *checkpointInfo) {
 	bfd.mutFork.Lock()
 	bfd.fork.finalCheckpoint = finalCheckpoint
+	bfd.mutFork.Unlock()
+}
+
+// RestoreToGenesis sets class variables to theirs initial values
+func (bfd *baseForkDetector) RestoreToGenesis() {
+	bfd.mutHeaders.Lock()
+	bfd.headers = make(map[uint64][]*headerInfo)
+	bfd.mutHeaders.Unlock()
+
+	bfd.mutFork.Lock()
+
+	checkpoint := &checkpointInfo{
+		nonce: bfd.genesisNonce,
+		round: bfd.genesisRound,
+	}
+	bfd.fork.checkpoint = []*checkpointInfo{checkpoint}
+	bfd.fork.finalCheckpoint = checkpoint
+	bfd.fork.probableHighestNonce = bfd.genesisNonce
+	bfd.fork.highestNonceReceived = bfd.genesisNonce
 	bfd.mutFork.Unlock()
 }
 
@@ -327,68 +391,85 @@ func (bfd *baseForkDetector) probableHighestNonce() uint64 {
 	return probableHighestNonce
 }
 
-func (bfd *baseForkDetector) setLastBlockRound(round uint64) {
+func (bfd *baseForkDetector) setHighestNonceReceived(nonce uint64) {
+	if nonce <= bfd.highestNonceReceived() {
+		return
+	}
+
 	bfd.mutFork.Lock()
-	bfd.fork.lastBlockRound = round
+	bfd.fork.highestNonceReceived = nonce
 	bfd.mutFork.Unlock()
+
+	log.Debug("forkDetector.setHighestNonceReceived",
+		"highest nonce received", nonce)
 }
 
-func (bfd *baseForkDetector) lastBlockRound() uint64 {
+func (bfd *baseForkDetector) highestNonceReceived() uint64 {
 	bfd.mutFork.RLock()
-	lastBlockRound := bfd.fork.lastBlockRound
+	highestNonceReceived := bfd.fork.highestNonceReceived
 	bfd.mutFork.RUnlock()
 
-	return lastBlockRound
+	return highestNonceReceived
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (bfd *baseForkDetector) IsInterfaceNil() bool {
-	if bfd == nil {
-		return true
-	}
-	return false
+	return bfd == nil
 }
 
 // CheckFork method checks if the node could be on the fork
-func (bfd *baseForkDetector) CheckFork() (bool, uint64, []byte) {
+func (bfd *baseForkDetector) CheckFork() *process.ForkInfo {
 	var (
-		lowestForkNonce        uint64
-		hashOfLowestForkNonce  []byte
-		lowestRoundInForkNonce uint64
-		forkHeaderHash         []byte
-		selfHdrInfo            *headerInfo
+		forkHeaderRound uint64
+		forkHeaderHash  []byte
+		selfHdrInfo     *headerInfo
+		forkHeaderEpoch uint32
 	)
 
-	lowestForkNonce = math.MaxUint64
-	hashOfLowestForkNonce = nil
-	forkDetected := false
+	forkInfoObject := process.NewForkInfo()
+
+	if bfd.isConsensusStuck() {
+		forkInfoObject.IsDetected = true
+		return forkInfoObject
+	}
+
+	rollBackNonce := bfd.getRollBackNonce()
+	if rollBackNonce < math.MaxUint64 {
+		forkInfoObject.IsDetected = true
+		forkInfoObject.Nonce = rollBackNonce
+		bfd.SetRollBackNonce(math.MaxUint64)
+		return forkInfoObject
+	}
+
+	finalCheckpointNonce := bfd.finalCheckpoint().nonce
 
 	bfd.mutHeaders.Lock()
-	for nonce, hdrInfos := range bfd.headers {
-		if len(hdrInfos) == 1 {
+	for nonce, hdrsInfo := range bfd.headers {
+		if len(hdrsInfo) == 1 {
+			continue
+		}
+		if nonce <= finalCheckpointNonce {
 			continue
 		}
 
 		selfHdrInfo = nil
-		lowestRoundInForkNonce = math.MaxUint64
+		forkHeaderRound = math.MaxUint64
 		forkHeaderHash = nil
+		forkHeaderEpoch = 0
+		bfd.maxForkHeaderEpoch = getMaxEpochFromHdrsInfo(hdrsInfo)
 
-		for i := 0; i < len(hdrInfos); i++ {
-			// Proposed blocks received do not count for fork choice, as they are not valid until the consensus
-			// is achieved. They should be received afterwards through sync mechanism.
-			if hdrInfos[i].state == process.BHProposed {
+		for i := 0; i < len(hdrsInfo); i++ {
+			if hdrsInfo[i].state == process.BHProcessed {
+				selfHdrInfo = hdrsInfo[i]
 				continue
 			}
 
-			if hdrInfos[i].state == process.BHProcessed {
-				selfHdrInfo = hdrInfos[i]
-				continue
-			}
-
-			forkHeaderHash, lowestRoundInForkNonce = bfd.computeForkInfo(
-				hdrInfos[i],
+			forkHeaderHash, forkHeaderRound, forkHeaderEpoch = bfd.computeForkInfo(
+				hdrsInfo[i],
 				forkHeaderHash,
-				lowestRoundInForkNonce)
+				forkHeaderRound,
+				forkHeaderEpoch,
+			)
 		}
 
 		if selfHdrInfo == nil {
@@ -396,57 +477,251 @@ func (bfd *baseForkDetector) CheckFork() (bool, uint64, []byte) {
 			continue
 		}
 
-		if bfd.shouldSignalFork(selfHdrInfo, forkHeaderHash, lowestRoundInForkNonce) {
-			forkDetected = true
-			if nonce < lowestForkNonce {
-				lowestForkNonce = nonce
-				hashOfLowestForkNonce = forkHeaderHash
+		if bfd.shouldSignalFork(selfHdrInfo, forkHeaderHash, forkHeaderRound, forkHeaderEpoch) {
+			forkInfoObject.IsDetected = true
+			if nonce < forkInfoObject.Nonce {
+				forkInfoObject.Nonce = nonce
+				forkInfoObject.Round = forkHeaderRound
+				forkInfoObject.Hash = forkHeaderHash
 			}
-			continue
 		}
-
-		// keep it clean so next time this position will be processed faster
-		delete(bfd.headers, nonce)
-		bfd.headers[nonce] = []*headerInfo{selfHdrInfo}
 	}
 	bfd.mutHeaders.Unlock()
 
-	return forkDetected, lowestForkNonce, hashOfLowestForkNonce
+	return forkInfoObject
+}
+
+func getMaxEpochFromHdrsInfo(hdrInfos []*headerInfo) uint32 {
+	maxEpoch := uint32(0)
+	for _, hdrInfo := range hdrInfos {
+		if hdrInfo.epoch > maxEpoch {
+			maxEpoch = hdrInfo.epoch
+		}
+	}
+	return maxEpoch
 }
 
 func (bfd *baseForkDetector) computeForkInfo(
-	headerInfo *headerInfo,
+	hdrInfo *headerInfo,
 	lastForkHash []byte,
 	lastForkRound uint64,
-) ([]byte, uint64) {
+	lastForkEpoch uint32,
+) ([]byte, uint64, uint32) {
 
-	currentForkRound := headerInfo.round
-	if headerInfo.state == process.BHNotarized {
-		currentForkRound = MinForkRound
+	if hdrInfo.state == process.BHReceivedTooLate && bfd.highestNonceReceived() > hdrInfo.nonce {
+		return lastForkHash, lastForkRound, lastForkEpoch
+	}
+
+	currentForkRound := hdrInfo.round
+	if hdrInfo.state == process.BHNotarized {
+		currentForkRound = process.MinForkRound
+	} else {
+		if hdrInfo.epoch < bfd.maxForkHeaderEpoch {
+			return lastForkHash, lastForkRound, lastForkEpoch
+		}
 	}
 
 	if currentForkRound < lastForkRound {
-		return headerInfo.hash, currentForkRound
+		return hdrInfo.hash, currentForkRound, hdrInfo.epoch
 	}
 
 	lowerHashForSameRound := currentForkRound == lastForkRound &&
-		bytes.Compare(headerInfo.hash, lastForkHash) < 0
+		bytes.Compare(hdrInfo.hash, lastForkHash) < 0
 	if lowerHashForSameRound {
-		return headerInfo.hash, currentForkRound
+		return hdrInfo.hash, currentForkRound, hdrInfo.epoch
 	}
 
-	return lastForkHash, lastForkRound
+	return lastForkHash, lastForkRound, lastForkEpoch
 }
 
 func (bfd *baseForkDetector) shouldSignalFork(
 	headerInfo *headerInfo,
 	lastForkHash []byte,
 	lastForkRound uint64,
+	lastForkEpoch uint32,
 ) bool {
+	sameHash := bytes.Equal(headerInfo.hash, lastForkHash)
+	if sameHash {
+		return false
+	}
+
+	if lastForkRound != process.MinForkRound {
+		if headerInfo.epoch > lastForkEpoch {
+			log.Trace("shouldSignalFork epoch change false")
+			return false
+		}
+
+		if headerInfo.epoch < lastForkEpoch {
+			log.Trace("shouldSignalFork epoch change true")
+			return true
+		}
+	}
 
 	higherHashForSameRound := headerInfo.round == lastForkRound &&
-		strings.Compare(string(headerInfo.hash), string(lastForkHash)) > 0
-	shouldSignalFork := headerInfo.round > lastForkRound || higherHashForSameRound
+		bytes.Compare(headerInfo.hash, lastForkHash) > 0
+	higherNonceReceived := bfd.highestNonceReceived() > headerInfo.nonce
+	shouldSignalFork := headerInfo.round > lastForkRound || (higherHashForSameRound && !higherNonceReceived)
 
 	return shouldSignalFork
+}
+
+func (bfd *baseForkDetector) isHeaderReceivedTooLate(
+	header data.HeaderHandler,
+	state process.BlockHeaderState,
+	finality int64,
+) bool {
+	if state == process.BHProcessed {
+		return false
+	}
+
+	// This condition would avoid a stuck situation, when shards would set as final, block with nonce n received from
+	// meta-chain, because they also received n+1. In the same time meta-chain would be reverted to an older block with
+	// nonce n received it with latency but before n+1. Actually this condition would reject these older blocks.
+	isHeaderReceivedTooLate := int64(header.GetRound()) < bfd.rounder.Index()-finality
+
+	return isHeaderReceivedTooLate
+}
+
+func (bfd *baseForkDetector) isConsensusStuck() bool {
+	if bfd.lastRoundWithForcedFork() == bfd.rounder.Index() {
+		return false
+	}
+
+	if bfd.isSyncing() {
+		return false
+	}
+
+	roundsDifference := bfd.rounder.Index() - int64(bfd.lastCheckpoint().round)
+	if roundsDifference <= process.MaxRoundsWithoutCommittedBlock {
+		return false
+	}
+
+	if !process.IsInProperRound(bfd.rounder.Index()) {
+		return false
+	}
+
+	return true
+}
+
+func (bfd *baseForkDetector) isSyncing() bool {
+	noncesDifference := int64(bfd.ProbableHighestNonce()) - int64(bfd.lastCheckpoint().nonce)
+	isSyncing := noncesDifference > process.NonceDifferenceWhenSynced
+	return isSyncing
+}
+
+// GetNotarizedHeaderHash returns the hash of the header with a given nonce, if it has been received with state notarized
+func (bfd *baseForkDetector) GetNotarizedHeaderHash(nonce uint64) []byte {
+	bfd.mutHeaders.RLock()
+	defer bfd.mutHeaders.RUnlock()
+
+	hdrInfos := bfd.headers[nonce]
+	for _, hdrInfo := range hdrInfos {
+		if hdrInfo.state == process.BHNotarized {
+			return hdrInfo.hash
+		}
+	}
+
+	return nil
+}
+
+func (bfd *baseForkDetector) cleanupReceivedHeadersHigherThanNonce(nonce uint64) {
+	bfd.mutHeaders.Lock()
+	for hdrsNonce, hdrsInfo := range bfd.headers {
+		if hdrsNonce <= nonce {
+			continue
+		}
+
+		preservedHdrsInfo := make([]*headerInfo, 0)
+
+		for _, hdrInfo := range hdrsInfo {
+			if hdrInfo.state != process.BHNotarized {
+				continue
+			}
+
+			preservedHdrsInfo = append(preservedHdrsInfo, hdrInfo)
+		}
+
+		if len(preservedHdrsInfo) == 0 {
+			delete(bfd.headers, hdrsNonce)
+			continue
+		}
+
+		bfd.headers[hdrsNonce] = preservedHdrsInfo
+	}
+	bfd.mutHeaders.Unlock()
+}
+
+func (bfd *baseForkDetector) computeGenesisTimeFromHeader(headerHandler data.HeaderHandler) int64 {
+	genesisTime := int64(headerHandler.GetTimeStamp() - (headerHandler.GetRound()-bfd.genesisRound)*uint64(bfd.rounder.TimeDuration().Seconds()))
+	return genesisTime
+}
+
+func (bfd *baseForkDetector) addHeader(
+	header data.HeaderHandler,
+	headerHash []byte,
+	state process.BlockHeaderState,
+	selfNotarizedHeaders []data.HeaderHandler,
+	selfNotarizedHeadersHashes [][]byte,
+	doJobOnBHProcessed func(data.HeaderHandler, []byte, []data.HeaderHandler, [][]byte),
+) error {
+
+	err := bfd.checkBlockBasicValidity(header, headerHash)
+	if err != nil {
+		return err
+	}
+
+	bfd.processReceivedBlock(header, headerHash, state, selfNotarizedHeaders, selfNotarizedHeadersHashes, doJobOnBHProcessed)
+	return nil
+}
+
+func (bfd *baseForkDetector) processReceivedBlock(
+	header data.HeaderHandler,
+	headerHash []byte,
+	state process.BlockHeaderState,
+	selfNotarizedHeaders []data.HeaderHandler,
+	selfNotarizedHeadersHashes [][]byte,
+	doJobOnBHProcessed func(data.HeaderHandler, []byte, []data.HeaderHandler, [][]byte),
+) {
+	bfd.setHighestNonceReceived(header.GetNonce())
+
+	if state == process.BHProposed {
+		return
+	}
+
+	isHeaderReceivedTooLate := bfd.isHeaderReceivedTooLate(header, state, process.BlockFinality)
+	if isHeaderReceivedTooLate {
+		state = process.BHReceivedTooLate
+	}
+
+	appended := bfd.append(&headerInfo{
+		epoch: header.GetEpoch(),
+		nonce: header.GetNonce(),
+		round: header.GetRound(),
+		hash:  headerHash,
+		state: state,
+	})
+	if !appended {
+		return
+	}
+
+	if state == process.BHProcessed {
+		doJobOnBHProcessed(header, headerHash, selfNotarizedHeaders, selfNotarizedHeadersHashes)
+	}
+
+	probableHighestNonce := bfd.computeProbableHighestNonce()
+	bfd.setProbableHighestNonce(probableHighestNonce)
+
+	log.Debug("forkDetector.AddHeader",
+		"round", header.GetRound(),
+		"nonce", header.GetNonce(),
+		"hash", headerHash,
+		"state", state,
+		"probable highest nonce", bfd.probableHighestNonce(),
+		"last check point nonce", bfd.lastCheckpoint().nonce,
+		"final check point nonce", bfd.finalCheckpoint().nonce)
+}
+
+// SetFinalToLastCheckpoint sets the final checkpoint to the last checkpoint added in list
+func (bfd *baseForkDetector) SetFinalToLastCheckpoint() {
+	bfd.setFinalCheckpoint(bfd.lastCheckpoint())
 }

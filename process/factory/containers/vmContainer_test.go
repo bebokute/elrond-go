@@ -1,12 +1,13 @@
 package containers_test
 
 import (
+	"errors"
 	"testing"
 
+	"github.com/ElrondNetwork/elrond-go/core/vmcommon"
 	"github.com/ElrondNetwork/elrond-go/process"
 	"github.com/ElrondNetwork/elrond-go/process/factory/containers"
 	"github.com/ElrondNetwork/elrond-go/process/mock"
-	"github.com/ElrondNetwork/elrond-vm-common"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -16,6 +17,7 @@ func TestNewVirtualMachinesContainer_ShouldWork(t *testing.T) {
 	c := containers.NewVirtualMachinesContainer()
 
 	assert.NotNil(t, c)
+	assert.False(t, c.IsInterfaceNil())
 }
 
 //------- Add
@@ -109,7 +111,7 @@ func TestVirtualMachinesContainer_GetNotFoundShouldErr(t *testing.T) {
 	valRecovered, err := c.Get(keyNotFound)
 
 	assert.Nil(t, valRecovered)
-	assert.Equal(t, process.ErrInvalidContainerKey, err)
+	assert.True(t, errors.Is(err, process.ErrInvalidContainerKey))
 }
 
 func TestVirtualMachinesContainer_GetWrongTypeShouldErr(t *testing.T) {
@@ -194,7 +196,7 @@ func TestVirtualMachinesContainer_RemoveShouldWork(t *testing.T) {
 	valRecovered, err := c.Get(key)
 
 	assert.Nil(t, valRecovered)
-	assert.Equal(t, process.ErrInvalidContainerKey, err)
+	assert.True(t, errors.Is(err, process.ErrInvalidContainerKey))
 }
 
 //------- Len

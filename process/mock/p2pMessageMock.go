@@ -1,51 +1,68 @@
 package mock
 
 import (
-	"github.com/ElrondNetwork/elrond-go/p2p"
+	"github.com/ElrondNetwork/elrond-go/core"
 )
 
+// P2PMessageMock -
 type P2PMessageMock struct {
 	FromField      []byte
 	DataField      []byte
 	SeqNoField     []byte
-	TopicIDsField  []string
+	TopicField     string
 	SignatureField []byte
 	KeyField       []byte
-	PeerField      p2p.PeerID
+	PeerField      core.PeerID
+	PayloadField   []byte
+	TimestampField int64
 }
 
+// From -
 func (msg *P2PMessageMock) From() []byte {
 	return msg.FromField
 }
 
+// Data -
 func (msg *P2PMessageMock) Data() []byte {
 	return msg.DataField
 }
 
+// SeqNo -
 func (msg *P2PMessageMock) SeqNo() []byte {
-	return msg.SeqNo()
+	return msg.SeqNoField
 }
 
-func (msg *P2PMessageMock) TopicIDs() []string {
-	return msg.TopicIDsField
+// Topic -
+func (msg *P2PMessageMock) Topic() string {
+	return msg.TopicField
 }
 
+// Signature -
 func (msg *P2PMessageMock) Signature() []byte {
 	return msg.SignatureField
 }
 
+// Key -
 func (msg *P2PMessageMock) Key() []byte {
 	return msg.KeyField
 }
 
-func (msg *P2PMessageMock) Peer() p2p.PeerID {
+// Peer -
+func (msg *P2PMessageMock) Peer() core.PeerID {
 	return msg.PeerField
+}
+
+// Timestamp -
+func (msg *P2PMessageMock) Timestamp() int64 {
+	return msg.TimestampField
+}
+
+// Payload -
+func (msg *P2PMessageMock) Payload() []byte {
+	return msg.PayloadField
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (msg *P2PMessageMock) IsInterfaceNil() bool {
-	if msg == nil {
-		return true
-	}
-	return false
+	return msg == nil
 }

@@ -1,88 +1,110 @@
 package mock
 
 import (
+	"crypto/rand"
+
 	"github.com/ElrondNetwork/elrond-go/crypto"
+	"github.com/ElrondNetwork/elrond-go/hashing/sha256"
 )
 
+// PublicKeyMock -
 type PublicKeyMock struct {
+	pubKey []byte
 }
 
+// PrivateKeyMock -
 type PrivateKeyMock struct {
+	privKey []byte
 }
 
+// KeyGenMock -
 type KeyGenMock struct {
 }
 
-//------- PublicKeyMock
-
+// ToByteArray -
 func (sspk *PublicKeyMock) ToByteArray() ([]byte, error) {
-	return []byte("pubKey"), nil
+	return sspk.pubKey, nil
 }
 
+// Suite -
 func (sspk *PublicKeyMock) Suite() crypto.Suite {
 	return nil
 }
 
+// Point -
 func (sspk *PublicKeyMock) Point() crypto.Point {
 	return nil
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (sspk *PublicKeyMock) IsInterfaceNil() bool {
-	if sspk == nil {
-		return true
-	}
-	return false
+	return sspk == nil
 }
 
-//------- PrivateKeyMock
-
+// ToByteArray -
 func (sk *PrivateKeyMock) ToByteArray() ([]byte, error) {
-	return []byte("privKey"), nil
+	return sk.privKey, nil
 }
 
+// GeneratePublic -
 func (sk *PrivateKeyMock) GeneratePublic() crypto.PublicKey {
-	return &PublicKeyMock{}
+	return &PublicKeyMock{
+		pubKey: sha256.Sha256{}.Compute(string(sk.privKey)),
+	}
 }
 
+// Suite -
 func (sk *PrivateKeyMock) Suite() crypto.Suite {
 	return nil
 }
 
+// Scalar -
 func (sk *PrivateKeyMock) Scalar() crypto.Scalar {
 	return nil
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (sk *PrivateKeyMock) IsInterfaceNil() bool {
-	if sk == nil {
-		return true
-	}
-	return false
+	return sk == nil
 }
 
-//------KeyGenMock
-
+// GeneratePair -
 func (keyGen *KeyGenMock) GeneratePair() (crypto.PrivateKey, crypto.PublicKey) {
-	return &PrivateKeyMock{}, &PublicKeyMock{}
+	buff := make([]byte, 32)
+	_, _ = rand.Read(buff)
+
+	sk := &PrivateKeyMock{
+		privKey: buff,
+	}
+
+	return sk, sk.GeneratePublic()
 }
 
-func (keyGen *KeyGenMock) PrivateKeyFromByteArray(b []byte) (crypto.PrivateKey, error) {
-	return &PrivateKeyMock{}, nil
+// PrivateKeyFromByteArray -
+func (keyGen *KeyGenMock) PrivateKeyFromByteArray(buff []byte) (crypto.PrivateKey, error) {
+	return &PrivateKeyMock{
+		privKey: buff,
+	}, nil
 }
 
-func (keyGen *KeyGenMock) PublicKeyFromByteArray(b []byte) (crypto.PublicKey, error) {
-	return &PublicKeyMock{}, nil
+// PublicKeyFromByteArray -
+func (keyGen *KeyGenMock) PublicKeyFromByteArray(buff []byte) (crypto.PublicKey, error) {
+	return &PublicKeyMock{
+		pubKey: buff,
+	}, nil
 }
 
+// CheckPublicKeyValid -
+func (keyGen *KeyGenMock) CheckPublicKeyValid(_ []byte) error {
+	return nil
+}
+
+// Suite -
 func (keyGen *KeyGenMock) Suite() crypto.Suite {
 	return nil
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (keyGen *KeyGenMock) IsInterfaceNil() bool {
-	if keyGen == nil {
-		return true
-	}
-	return false
+	return keyGen == nil
 }

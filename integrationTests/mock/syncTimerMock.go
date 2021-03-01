@@ -10,8 +10,8 @@ type SyncTimerMock struct {
 	CurrentTimeCalled func() time.Time
 }
 
-// StartSync method does the time synchronization at every syncPeriod time elapsed. This should be started as a go routine
-func (stm *SyncTimerMock) StartSync() {
+// StartSyncingTime method does the time synchronization at every syncPeriod time elapsed. This should be started as a go routine
+func (stm *SyncTimerMock) StartSyncingTime() {
 	panic("implement me")
 }
 
@@ -38,10 +38,12 @@ func (stm *SyncTimerMock) CurrentTime() time.Time {
 	return time.Unix(0, 0)
 }
 
+// Close -
+func (stm *SyncTimerMock) Close() error {
+	return nil
+}
+
 // IsInterfaceNil returns true if there is no value under the interface
 func (stm *SyncTimerMock) IsInterfaceNil() bool {
-	if stm == nil {
-		return true
-	}
-	return false
+	return stm == nil
 }

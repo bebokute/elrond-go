@@ -1,24 +1,46 @@
 package libp2p
 
 import (
-	"github.com/ElrondNetwork/elrond-go/storage/lrucache"
-	"github.com/libp2p/go-libp2p-core/connmgr"
+	"context"
+
+	"github.com/ElrondNetwork/elrond-go/p2p"
+	"github.com/ElrondNetwork/elrond-go/storage"
+	"github.com/libp2p/go-libp2p-core/network"
+	"github.com/libp2p/go-libp2p-core/peer"
+	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p-pubsub/pb"
 	"github.com/whyrusleeping/timecache"
 )
 
 var MaxSendBuffSize = maxSendBuffSize
+var BroadcastGoRoutines = broadcastGoRoutines
+var PubsubTimeCacheDuration = pubsubTimeCacheDuration
+var AcceptMessagesInAdvanceDuration = acceptMessagesInAdvanceDuration
 
-func (netMes *networkMessenger) ConnManager() connmgr.ConnManager {
-	return netMes.ctxProvider.connHost.ConnManager()
-}
+const CurrentTopicMessageVersion = currentTopicMessageVersion
 
 func (netMes *networkMessenger) SetHost(newHost ConnectableHost) {
-	netMes.ctxProvider.connHost = newHost
+	netMes.p2pHost = newHost
 }
 
-func (ds *directSender) ProcessReceivedDirectMessage(message *pubsub_pb.Message) error {
-	return ds.processReceivedDirectMessage(message)
+func (netMes *networkMessenger) SetLoadBalancer(outgoingPLB p2p.ChannelLoadBalancer) {
+	netMes.outgoingPLB = outgoingPLB
+}
+
+func (netMes *networkMessenger) SetPeerDiscoverer(discoverer p2p.PeerDiscoverer) {
+	netMes.peerDiscoverer = discoverer
+}
+
+func (netMes *networkMessenger) PubsubCallback(handler p2p.MessageProcessor, topic string) func(ctx context.Context, pid peer.ID, message *pubsub.Message) bool {
+	return netMes.pubsubCallback(handler, topic)
+}
+
+func (netMes *networkMessenger) ValidMessageByTimestamp(msg p2p.MessageP2P) error {
+	return netMes.validMessageByTimestamp(msg)
+}
+
+func (ds *directSender) ProcessReceivedDirectMessage(message *pubsub_pb.Message, fromConnectedPeer peer.ID) error {
+	return ds.processReceivedDirectMessage(message, fromConnectedPeer)
 }
 
 func (ds *directSender) SeenMessages() *timecache.TimeCache {
@@ -29,6 +51,14 @@ func (ds *directSender) Counter() uint64 {
 	return ds.counter
 }
 
-func (mh *MutexHolder) Mutexes() *lrucache.LRUCache {
+func (mh *MutexHolder) Mutexes() storage.Cacher {
 	return mh.mutexes
+}
+
+func (ip *identityProvider) HandleStreams(s network.Stream) {
+	ip.handleStreams(s)
+}
+
+func (ip *identityProvider) ProcessReceivedData(recvBuff []byte) error {
+	return ip.processReceivedData(recvBuff)
 }

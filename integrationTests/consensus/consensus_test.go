@@ -1,7 +1,6 @@
 package consensus
 
 import (
-	"context"
 	"encoding/hex"
 	"fmt"
 	"sync"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/ElrondNetwork/elrond-go/crypto"
 	"github.com/ElrondNetwork/elrond-go/data"
+	"github.com/ElrondNetwork/elrond-go/integrationTests"
 	"github.com/ElrondNetwork/elrond-go/p2p"
 	"github.com/ElrondNetwork/elrond-go/process"
 	"github.com/stretchr/testify/assert"
@@ -38,7 +38,7 @@ func initNodesAndTest(
 
 	fmt.Println("Step 1. Setup nodes...")
 
-	advertiser := createMessengerWithKadDht(context.Background(), "")
+	advertiser := integrationTests.CreateMessengerWithKadDht("")
 	_ = advertiser.Bootstrap()
 
 	concMap := &sync.Map{}
@@ -55,35 +55,29 @@ func initNodesAndTest(
 		displayAndStartNodes(nodesList)
 	}
 
+	time.Sleep(p2pBootstrapDelay)
+
 	if numInvalid < numNodes {
 		for i := uint32(0); i < numInvalid; i++ {
+			iCopy := i
 			nodes[0][i].blkProcessor.ProcessBlockCalled = func(
-				blockChain data.ChainHandler,
 				header data.HeaderHandler,
 				body data.BodyHandler,
 				haveTime func() time.Duration,
 			) error {
-
 				fmt.Println(
 					"process block invalid ",
 					header.GetRound(),
 					header.GetNonce(),
-					getPkEncoded(nodes[0][i].pk),
+					getPkEncoded(nodes[0][iCopy].pk),
 				)
 				return process.ErrBlockHashDoesNotMatch
 			}
-			nodes[0][i].blkProcessor.CreateBlockHeaderCalled = func(
-				body data.BodyHandler,
-				round uint64,
-				haveTime func() bool,
-			) (handler data.HeaderHandler, e error) {
-				return nil, process.ErrAccountStateDirty
-			}
 			nodes[0][i].blkProcessor.CreateBlockCalled = func(
-				round uint64,
+				header data.HeaderHandler,
 				haveTime func() bool,
-			) (handler data.BodyHandler, e error) {
-				return nil, process.ErrWrongTypeAssertion
+			) (data.HeaderHandler, data.BodyHandler, error) {
+				return nil, nil, process.ErrWrongTypeAssertion
 			}
 		}
 	}
@@ -93,10 +87,10 @@ func initNodesAndTest(
 
 func startNodesWithCommitBlock(nodes []*testNode, mutex *sync.Mutex, nonceForRoundMap map[uint64]uint64, totalCalled *int) error {
 	for _, n := range nodes {
-		n.blkProcessor.CommitBlockCalled = func(blockChain data.ChainHandler, header data.HeaderHandler, body data.BodyHandler) error {
-			n.blkProcessor.NrCommitBlockCalled++
-			_ = blockChain.SetCurrentBlockHeader(header)
-			_ = blockChain.SetCurrentBlockBody(body)
+		nCopy := n
+		n.blkProcessor.CommitBlockCalled = func(header data.HeaderHandler, body data.BodyHandler) error {
+			nCopy.blkProcessor.NrCommitBlockCalled++
+			_ = nCopy.blkc.SetCurrentBlockHeader(header)
 
 			mutex.Lock()
 			nonceForRoundMap[header.GetRound()] = header.GetNonce()
@@ -146,7 +140,7 @@ func checkBlockProposedEveryRound(numCommBlock uint64, nonceForRoundMap map[uint
 
 		mutex.Unlock()
 
-		time.Sleep(time.Second * 2)
+		time.Sleep(integrationTests.StepDelay)
 	}
 }
 
@@ -154,28 +148,29 @@ func runFullConsensusTest(t *testing.T, consensusType string) {
 	numNodes := uint32(4)
 	consensusSize := uint32(4)
 	numInvalid := uint32(0)
-	roundTime := uint64(4000)
-	numCommBlock := uint64(10)
+	roundTime := uint64(1000)
+	numCommBlock := uint64(8)
+
 	nodes, advertiser, _ := initNodesAndTest(numNodes, consensusSize, numInvalid, roundTime, consensusType)
 
 	mutex := &sync.Mutex{}
 	defer func() {
 		_ = advertiser.Close()
 		for _, n := range nodes {
-			_ = n.node.Stop()
+			_ = n.mesenger.Close()
 		}
 	}()
 
 	// delay for bootstrapping and topic announcement
 	fmt.Println("Start consensus...")
-	time.Sleep(time.Second * 1)
+	time.Sleep(time.Second)
 
 	nonceForRoundMap := make(map[uint64]uint64)
 	totalCalled := 0
 	err := startNodesWithCommitBlock(nodes, mutex, nonceForRoundMap, &totalCalled)
 	assert.Nil(t, err)
 
-	chDone := make(chan bool, 0)
+	chDone := make(chan bool)
 	go checkBlockProposedEveryRound(numCommBlock, nonceForRoundMap, mutex, chDone, t)
 
 	extraTime := uint64(2)
@@ -191,14 +186,6 @@ func runFullConsensusTest(t *testing.T, consensusType string) {
 	}
 }
 
-func TestConsensusBNFullTest(t *testing.T) {
-	if testing.Short() {
-		t.Skip("this is not a short test")
-	}
-
-	runFullConsensusTest(t, bnConsensusType)
-}
-
 func TestConsensusBLSFullTest(t *testing.T) {
 	if testing.Short() {
 		t.Skip("this is not a short test")
@@ -211,41 +198,33 @@ func runConsensusWithNotEnoughValidators(t *testing.T, consensusType string) {
 	numNodes := uint32(4)
 	consensusSize := uint32(4)
 	numInvalid := uint32(2)
-	roundTime := uint64(4000)
+	roundTime := uint64(1000)
 	nodes, advertiser, _ := initNodesAndTest(numNodes, consensusSize, numInvalid, roundTime, consensusType)
 
 	mutex := &sync.Mutex{}
 	defer func() {
 		_ = advertiser.Close()
 		for _, n := range nodes {
-			_ = n.node.Stop()
+			_ = n.mesenger.Close()
 		}
 	}()
 
 	// delay for bootstrapping and topic announcement
 	fmt.Println("Start consensus...")
-	time.Sleep(time.Second * 1)
+	time.Sleep(time.Second)
 
 	nonceForRoundMap := make(map[uint64]uint64)
 	totalCalled := 0
 	err := startNodesWithCommitBlock(nodes, mutex, nonceForRoundMap, &totalCalled)
 	assert.Nil(t, err)
 
-	waitTime := time.Second * 60
-	fmt.Println("Run for 60 seconds...")
+	waitTime := time.Second * 30
+	fmt.Println("Run for 30 seconds...")
 	time.Sleep(waitTime)
 
 	mutex.Lock()
 	assert.Equal(t, 0, totalCalled)
 	mutex.Unlock()
-}
-
-func TestConsensusBNNotEnoughValidators(t *testing.T) {
-	if testing.Short() {
-		t.Skip("this is not a short test")
-	}
-
-	runConsensusWithNotEnoughValidators(t, bnConsensusType)
 }
 
 func TestConsensusBLSNotEnoughValidators(t *testing.T) {

@@ -5,25 +5,30 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ElrondNetwork/elrond-go-logger"
 	"github.com/ElrondNetwork/elrond-go/consensus"
-	"github.com/ElrondNetwork/elrond-go/core/logger"
 	"github.com/ElrondNetwork/elrond-go/data"
 	"github.com/ElrondNetwork/elrond-go/sharding"
 )
 
-var log = logger.DefaultLogger()
+var log = logger.GetOrCreate("consensus/spos")
 
 // ConsensusState defines the data needed by spos to do the consensus in each round
 type ConsensusState struct {
 	// hold the data on which validators do the consensus (could be for example a hash of the block header
 	// proposed by the leader)
-	Data      []byte
-	BlockBody data.BodyHandler
-	Header    data.HeaderHandler
+	Data   []byte
+	Body   data.BodyHandler
+	Header data.HeaderHandler
 
-	RoundIndex     int64
-	RoundTimeStamp time.Time
-	RoundCanceled  bool
+	receivedHeaders    []data.HeaderHandler
+	mutReceivedHeaders sync.RWMutex
+
+	RoundIndex                  int64
+	RoundTimeStamp              time.Time
+	RoundCanceled               bool
+	ExtendedCalled              bool
+	WaitingAllSignaturesTimeOut bool
 
 	processingBlock    bool
 	mutProcessingBlock sync.RWMutex
@@ -53,22 +58,47 @@ func NewConsensusState(
 
 // ResetConsensusState method resets all the consensus data
 func (cns *ConsensusState) ResetConsensusState() {
-	cns.BlockBody = nil
+	cns.Body = nil
 	cns.Header = nil
 	cns.Data = nil
 
+	cns.initReceivedHeaders()
+
 	cns.RoundCanceled = false
+	cns.ExtendedCalled = false
+	cns.WaitingAllSignaturesTimeOut = false
 
 	cns.ResetRoundStatus()
 	cns.ResetRoundState()
 }
 
+func (cns *ConsensusState) initReceivedHeaders() {
+	cns.mutReceivedHeaders.Lock()
+	cns.receivedHeaders = make([]data.HeaderHandler, 0)
+	cns.mutReceivedHeaders.Unlock()
+}
+
+// AddReceivedHeader append the provided header to the inner received headers list
+func (cns *ConsensusState) AddReceivedHeader(headerHandler data.HeaderHandler) {
+	cns.mutReceivedHeaders.Lock()
+	cns.receivedHeaders = append(cns.receivedHeaders, headerHandler)
+	cns.mutReceivedHeaders.Unlock()
+}
+
+// GetReceivedHeaders returns the received headers list
+func (cns *ConsensusState) GetReceivedHeaders() []data.HeaderHandler {
+	cns.mutReceivedHeaders.RLock()
+	receivedHeaders := cns.receivedHeaders
+	cns.mutReceivedHeaders.RUnlock()
+
+	return receivedHeaders
+}
+
 // IsNodeLeaderInCurrentRound method checks if the given node is leader in the current round
 func (cns *ConsensusState) IsNodeLeaderInCurrentRound(node string) bool {
 	leader, err := cns.GetLeader()
-
 	if err != nil {
-		log.Error(err.Error())
+		log.Debug("GetLeader", "error", err.Error())
 		return false
 	}
 
@@ -100,23 +130,29 @@ func (cns *ConsensusState) GetNextConsensusGroup(
 	round uint64,
 	shardId uint32,
 	nodesCoordinator sharding.NodesCoordinator,
-) ([]string, []string, error) {
-
-	validatorsGroup, err := nodesCoordinator.ComputeValidatorsGroup(randomSource, round, shardId)
+	epoch uint32,
+) ([]string, error) {
+	validatorsGroup, err := nodesCoordinator.ComputeConsensusGroup(randomSource, round, shardId, epoch)
 	if err != nil {
-		return nil, nil, err
+		log.Debug(
+			"compute consensus group",
+			"error", err.Error(),
+			"randomSource", randomSource,
+			"round", round,
+			"shardId", shardId,
+			"epoch", epoch,
+		)
+		return nil, err
 	}
 
 	consensusSize := len(validatorsGroup)
 	newConsensusGroup := make([]string, consensusSize)
-	consensusRewardAddresses := make([]string, consensusSize)
 
 	for i := 0; i < consensusSize; i++ {
 		newConsensusGroup[i] = string(validatorsGroup[i].PubKey())
-		consensusRewardAddresses[i] = string(validatorsGroup[i].Address())
 	}
 
-	return newConsensusGroup, consensusRewardAddresses, nil
+	return newConsensusGroup, nil
 }
 
 // IsConsensusDataSet method returns true if the consensus data for the current round is set and false otherwise
@@ -137,9 +173,8 @@ func (cns *ConsensusState) IsConsensusDataEqual(data []byte) bool {
 // IsJobDone method returns true if the node job for the current subround is done and false otherwise
 func (cns *ConsensusState) IsJobDone(node string, currentSubroundId int) bool {
 	jobDone, err := cns.JobDone(node, currentSubroundId)
-
 	if err != nil {
-		log.Error(err.Error())
+		log.Debug("JobDone", "error", err.Error())
 		return false
 	}
 
@@ -151,11 +186,11 @@ func (cns *ConsensusState) IsSelfJobDone(currentSubroundId int) bool {
 	return cns.IsJobDone(cns.selfPubKey, currentSubroundId)
 }
 
-// IsCurrentSubroundFinished method returns true if the current subround is finished and false otherwise
-func (cns *ConsensusState) IsCurrentSubroundFinished(currentSubroundId int) bool {
-	isCurrentSubroundFinished := cns.Status(currentSubroundId) == SsFinished
+// IsSubroundFinished method returns true if the current subround is finished and false otherwise
+func (cns *ConsensusState) IsSubroundFinished(subroundID int) bool {
+	isSubroundFinished := cns.Status(subroundID) == SsFinished
 
-	return isCurrentSubroundFinished
+	return isSubroundFinished
 }
 
 // IsNodeSelf method returns true if the message is received from itself and false otherwise
@@ -167,7 +202,7 @@ func (cns *ConsensusState) IsNodeSelf(node string) bool {
 
 // IsBlockBodyAlreadyReceived method returns true if block body is already received and false otherwise
 func (cns *ConsensusState) IsBlockBodyAlreadyReceived() bool {
-	isBlockBodyAlreadyReceived := cns.BlockBody != nil
+	isBlockBodyAlreadyReceived := cns.Body != nil
 
 	return isBlockBodyAlreadyReceived
 }
@@ -189,7 +224,7 @@ func (cns *ConsensusState) CanDoSubroundJob(currentSubroundId int) bool {
 		return false
 	}
 
-	if cns.IsCurrentSubroundFinished(currentSubroundId) {
+	if cns.IsSubroundFinished(currentSubroundId) {
 		return false
 	}
 
@@ -211,7 +246,7 @@ func (cns *ConsensusState) CanProcessReceivedMessage(cnsDta *consensus.Message, 
 		return false
 	}
 
-	if cns.IsCurrentSubroundFinished(currentSubroundId) {
+	if cns.IsSubroundFinished(currentSubroundId) {
 		return false
 	}
 
@@ -224,14 +259,17 @@ func (cns *ConsensusState) GenerateBitmap(subroundId int) []byte {
 	// generate bitmap according to set commitment hashes
 	sizeConsensus := len(cns.ConsensusGroup())
 
-	bitmap := make([]byte, sizeConsensus/8+1)
+	bitmapSize := sizeConsensus / 8
+	if sizeConsensus%8 != 0 {
+		bitmapSize++
+	}
+	bitmap := make([]byte, bitmapSize)
 
 	for i := 0; i < sizeConsensus; i++ {
 		pubKey := cns.ConsensusGroup()[i]
 		isJobDone, err := cns.JobDone(pubKey, subroundId)
-
 		if err != nil {
-			log.Error(err.Error())
+			log.Debug("JobDone", "error", err.Error())
 			continue
 		}
 

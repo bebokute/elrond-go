@@ -1,29 +1,53 @@
 package external
 
+import (
+	"math/big"
+
+	"github.com/ElrondNetwork/elrond-go/core/check"
+	"github.com/ElrondNetwork/elrond-go/core/vmcommon"
+	"github.com/ElrondNetwork/elrond-go/data/transaction"
+	"github.com/ElrondNetwork/elrond-go/process"
+)
+
 // NodeApiResolver can resolve API requests
 type NodeApiResolver struct {
-	scDataGetter         ScDataGetter
-	statusMetricsHandler StatusMetricsHandler
+	scQueryService          SCQueryService
+	statusMetricsHandler    StatusMetricsHandler
+	txCostHandler           TransactionCostHandler
+	totalStakedValueHandler TotalStakedValueHandler
 }
 
 // NewNodeApiResolver creates a new NodeApiResolver instance
-func NewNodeApiResolver(scDataGetter ScDataGetter, statusMetricsHandler StatusMetricsHandler) (*NodeApiResolver, error) {
-	if scDataGetter == nil || scDataGetter.IsInterfaceNil() {
-		return nil, ErrNilScDataGetter
+func NewNodeApiResolver(
+	scQueryService SCQueryService,
+	statusMetricsHandler StatusMetricsHandler,
+	txCostHandler TransactionCostHandler,
+	totalStakedValueHandler TotalStakedValueHandler,
+) (*NodeApiResolver, error) {
+	if check.IfNil(scQueryService) {
+		return nil, ErrNilSCQueryService
 	}
-	if statusMetricsHandler == nil || statusMetricsHandler.IsInterfaceNil() {
+	if check.IfNil(statusMetricsHandler) {
 		return nil, ErrNilStatusMetrics
+	}
+	if check.IfNil(txCostHandler) {
+		return nil, ErrNilTransactionCostHandler
+	}
+	if check.IfNil(totalStakedValueHandler) {
+		return nil, ErrNilTotalStakedValueHandler
 	}
 
 	return &NodeApiResolver{
-		scDataGetter:         scDataGetter,
-		statusMetricsHandler: statusMetricsHandler,
+		scQueryService:          scQueryService,
+		statusMetricsHandler:    statusMetricsHandler,
+		txCostHandler:           txCostHandler,
+		totalStakedValueHandler: totalStakedValueHandler,
 	}, nil
 }
 
-// GetVmValue retrieves data stored in a SC account through a VM
-func (nar *NodeApiResolver) GetVmValue(address string, funcName string, argsBuff ...[]byte) ([]byte, error) {
-	return nar.scDataGetter.Get([]byte(address), funcName, argsBuff...)
+// ExecuteSCQuery retrieves data stored in a SC account through a VM
+func (nar *NodeApiResolver) ExecuteSCQuery(query *process.SCQuery) (*vmcommon.VMOutput, error) {
+	return nar.scQueryService.ExecuteQuery(query)
 }
 
 // StatusMetrics returns an implementation of the StatusMetricsHandler interface
@@ -31,10 +55,17 @@ func (nar *NodeApiResolver) StatusMetrics() StatusMetricsHandler {
 	return nar.statusMetricsHandler
 }
 
+// ComputeTransactionGasLimit will calculate how many gas a transaction will consume
+func (nar *NodeApiResolver) ComputeTransactionGasLimit(tx *transaction.Transaction) (*transaction.CostResponse, error) {
+	return nar.txCostHandler.ComputeTransactionGasLimit(tx)
+}
+
+// GetTotalStakedValue will return total staked value
+func (nar *NodeApiResolver) GetTotalStakedValue() (*big.Int, error) {
+	return nar.totalStakedValueHandler.GetTotalStakedValue()
+}
+
 // IsInterfaceNil returns true if there is no value under the interface
 func (nar *NodeApiResolver) IsInterfaceNil() bool {
-	if nar == nil {
-		return true
-	}
-	return false
+	return nar == nil
 }

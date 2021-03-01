@@ -1,50 +1,31 @@
 package sharding
 
 import (
-	"math/big"
+	"encoding/hex"
+	"fmt"
 )
 
+const intSize = 8
+
+var _ Validator = (*validator)(nil)
+
 type validator struct {
-	stake   *big.Int
-	rating  int32
 	pubKey  []byte
-	address []byte
+	chances uint32
+	index   uint32
 }
 
 // NewValidator creates a new instance of a validator
-func NewValidator(stake *big.Int, rating int32, pubKey []byte, address []byte) (*validator, error) {
-	if stake == nil {
-		return nil, ErrNilStake
-	}
-
-	if stake.Cmp(big.NewInt(0)) < 0 {
-		return nil, ErrNegativeStake
-	}
-
+func NewValidator(pubKey []byte, chances uint32, index uint32) (*validator, error) {
 	if pubKey == nil {
 		return nil, ErrNilPubKey
 	}
 
-	if address == nil {
-		return nil, ErrNilAddress
-	}
-
 	return &validator{
-		stake:   stake,
-		rating:  rating,
 		pubKey:  pubKey,
-		address: address,
+		chances: chances,
+		index:   index,
 	}, nil
-}
-
-// Stake returns the validator's stake
-func (v *validator) Stake() *big.Int {
-	return v.stake
-}
-
-// Rating returns the validator's rating
-func (v *validator) Rating() int32 {
-	return v.rating
 }
 
 // PubKey returns the validator's public key
@@ -52,15 +33,27 @@ func (v *validator) PubKey() []byte {
 	return v.pubKey
 }
 
-// Address returns the validator's address
-func (v *validator) Address() []byte {
-	return v.address
+// Chances returns the validator's chances
+func (v *validator) Chances() uint32 {
+	return v.chances
+}
+
+// Index returns the validators index
+func (v *validator) Index() uint32 {
+	return v.index
+}
+
+// String returns the toString representation of the validator
+func (v *validator) String() string {
+	return fmt.Sprintf("%s %v %v", hex.EncodeToString(v.pubKey), v.index, v.chances)
+}
+
+// Size returns the size in bytes held by an instance of this struct
+func (v *validator) Size() int {
+	return len(v.pubKey) + intSize
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (v *validator) IsInterfaceNil() bool {
-	if v == nil {
-		return true
-	}
-	return false
+	return v == nil
 }

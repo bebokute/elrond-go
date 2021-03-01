@@ -5,6 +5,8 @@ import (
 	"github.com/ElrondNetwork/elrond-go/storage/lrucache"
 )
 
+var _ storage.Persister = (*lruDB)(nil)
+
 // lruDB represents the memory database storage. It holds a LRU of key value pairs
 // and a mutex to handle concurrent accesses to the map
 type lruDB struct {
@@ -23,7 +25,7 @@ func NewlruDB(size uint32) (*lruDB, error) {
 
 // Put adds the value to the (key, val) storage medium
 func (l *lruDB) Put(key, val []byte) error {
-	_ = l.cacher.Put(key, val)
+	_ = l.cacher.Put(key, val, len(val))
 	return nil
 }
 
@@ -74,10 +76,37 @@ func (l *lruDB) Destroy() error {
 	return nil
 }
 
+// DestroyClosed removes the already closed storage medium stored data
+func (l *lruDB) DestroyClosed() error {
+	return l.Destroy()
+}
+
+// RangeKeys will iterate over all contained (key, value) pairs calling the provided handler
+func (l *lruDB) RangeKeys(handler func(key []byte, value []byte) bool) {
+	if handler == nil {
+		return
+	}
+
+	keys := l.cacher.Keys()
+	for _, k := range keys {
+		v, ok := l.cacher.Get(k)
+		if !ok {
+			continue
+		}
+
+		vBuff, ok := v.([]byte)
+		if !ok {
+			continue
+		}
+
+		shouldContinue := handler(k, vBuff)
+		if !shouldContinue {
+			return
+		}
+	}
+}
+
 // IsInterfaceNil returns true if there is no value under the interface
 func (l *lruDB) IsInterfaceNil() bool {
-	if l == nil {
-		return true
-	}
-	return false
+	return l == nil
 }

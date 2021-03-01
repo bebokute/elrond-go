@@ -21,13 +21,7 @@ type serialQueryer interface {
 
 type getAct struct {
 	key     []byte
-	val     []byte
 	resChan chan<- *pairResult
-}
-
-type delAct struct {
-	key     []byte
-	resChan chan<- error
 }
 
 type hasAct struct {
@@ -52,12 +46,6 @@ func (g *getAct) request(s *SerialDB) {
 		err:   err,
 	}
 	g.resChan <- res
-}
-
-func (d *delAct) request(s *SerialDB) {
-	err := s.db.Delete(d.key, nil)
-
-	d.resChan <- err
 }
 
 func (h *hasAct) request(s *SerialDB) {

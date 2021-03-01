@@ -5,43 +5,92 @@ import (
 	"github.com/ElrondNetwork/elrond-go/process"
 )
 
+// ForkDetectorMock -
 type ForkDetectorMock struct {
-	AddHeaderCalled                         func(header data.HeaderHandler, hash []byte, state process.BlockHeaderState, finalHeaders []data.HeaderHandler, finalHeadersHashes [][]byte) error
-	RemoveHeadersCalled                     func(nonce uint64, hash []byte)
-	CheckForkCalled                         func() (bool, uint64, []byte)
-	GetHighestFinalBlockNonceCalled         func() uint64
-	ProbableHighestNonceCalled              func() uint64
-	ResetProbableHighestNonceIfNeededCalled func()
+	AddHeaderCalled                 func(header data.HeaderHandler, hash []byte, state process.BlockHeaderState, selfNotarizedHeaders []data.HeaderHandler, selfNotarizedHeadersHashes [][]byte) error
+	RemoveHeaderCalled              func(nonce uint64, hash []byte)
+	CheckForkCalled                 func() *process.ForkInfo
+	GetHighestFinalBlockNonceCalled func() uint64
+	GetHighestFinalBlockHashCalled  func() []byte
+	ProbableHighestNonceCalled      func() uint64
+	ResetForkCalled                 func()
+	GetNotarizedHeaderHashCalled    func(nonce uint64) []byte
+	SetRollBackNonceCalled          func(nonce uint64)
+	RestoreToGenesisCalled          func()
+	ResetProbableHighestNonceCalled func()
+	SetFinalToLastCheckpointCalled  func()
 }
 
-func (fdm *ForkDetectorMock) AddHeader(header data.HeaderHandler, hash []byte, state process.BlockHeaderState, finalHeaders []data.HeaderHandler, finalHeadersHashes [][]byte) error {
-	return fdm.AddHeaderCalled(header, hash, state, finalHeaders, finalHeadersHashes)
+// RestoreToGenesis -
+func (fdm *ForkDetectorMock) RestoreToGenesis() {
+	fdm.RestoreToGenesisCalled()
 }
 
-func (fdm *ForkDetectorMock) RemoveHeaders(nonce uint64, hash []byte) {
-	fdm.RemoveHeadersCalled(nonce, hash)
+// AddHeader -
+func (fdm *ForkDetectorMock) AddHeader(header data.HeaderHandler, hash []byte, state process.BlockHeaderState, selfNotarizedHeaders []data.HeaderHandler, selfNotarizedHeadersHashes [][]byte) error {
+	return fdm.AddHeaderCalled(header, hash, state, selfNotarizedHeaders, selfNotarizedHeadersHashes)
 }
 
-func (fdm *ForkDetectorMock) CheckFork() (bool, uint64, []byte) {
+// RemoveHeader -
+func (fdm *ForkDetectorMock) RemoveHeader(nonce uint64, hash []byte) {
+	fdm.RemoveHeaderCalled(nonce, hash)
+}
+
+// CheckFork -
+func (fdm *ForkDetectorMock) CheckFork() *process.ForkInfo {
 	return fdm.CheckForkCalled()
 }
 
+// GetHighestFinalBlockNonce -
 func (fdm *ForkDetectorMock) GetHighestFinalBlockNonce() uint64 {
-	return fdm.GetHighestFinalBlockNonceCalled()
+	if fdm.GetHighestFinalBlockNonceCalled != nil {
+		return fdm.GetHighestFinalBlockNonceCalled()
+	}
+	return 0
 }
 
+// GetHighestFinalBlockHash -
+func (fdm *ForkDetectorMock) GetHighestFinalBlockHash() []byte {
+	return fdm.GetHighestFinalBlockHashCalled()
+}
+
+// ProbableHighestNonce -
 func (fdm *ForkDetectorMock) ProbableHighestNonce() uint64 {
 	return fdm.ProbableHighestNonceCalled()
 }
 
-func (fdm *ForkDetectorMock) ResetProbableHighestNonceIfNeeded() {
-	fdm.ResetProbableHighestNonceIfNeededCalled()
+// SetRollBackNonce -
+func (fdm *ForkDetectorMock) SetRollBackNonce(nonce uint64) {
+	if fdm.SetRollBackNonceCalled != nil {
+		fdm.SetRollBackNonceCalled(nonce)
+	}
+}
+
+// ResetFork -
+func (fdm *ForkDetectorMock) ResetFork() {
+	fdm.ResetForkCalled()
+}
+
+// GetNotarizedHeaderHash -
+func (fdm *ForkDetectorMock) GetNotarizedHeaderHash(nonce uint64) []byte {
+	return fdm.GetNotarizedHeaderHashCalled(nonce)
+}
+
+// ResetProbableHighestNonce -
+func (fdm *ForkDetectorMock) ResetProbableHighestNonce() {
+	if fdm.ResetProbableHighestNonceCalled != nil {
+		fdm.ResetProbableHighestNonceCalled()
+	}
+}
+
+// SetFinalToLastCheckpoint -
+func (fdm *ForkDetectorMock) SetFinalToLastCheckpoint() {
+	if fdm.SetFinalToLastCheckpointCalled != nil {
+		fdm.SetFinalToLastCheckpointCalled()
+	}
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (fdm *ForkDetectorMock) IsInterfaceNil() bool {
-	if fdm == nil {
-		return true
-	}
-	return false
+	return fdm == nil
 }

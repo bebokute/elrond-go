@@ -1,8 +1,11 @@
 package keccak
 
 import (
+	"github.com/ElrondNetwork/elrond-go/hashing"
 	"golang.org/x/crypto/sha3"
 )
+
+var _ hashing.Hasher = (*Keccak)(nil)
 
 var keccakEmptyHash []byte
 
@@ -16,7 +19,7 @@ func (k Keccak) Compute(s string) []byte {
 		return k.EmptyHash()
 	}
 	h := sha3.NewLegacyKeccak256()
-	h.Write([]byte(s))
+	_, _ = h.Write([]byte(s))
 	return h.Sum(nil)
 }
 
@@ -35,8 +38,5 @@ func (Keccak) Size() int {
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (k Keccak) IsInterfaceNil() bool {
-	if &k == nil {
-		return true
-	}
 	return false
 }

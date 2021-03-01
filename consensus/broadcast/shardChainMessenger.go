@@ -1,79 +1,82 @@
 package broadcast
 
 import (
-	"fmt"
+	"time"
 
 	"github.com/ElrondNetwork/elrond-go/consensus"
 	"github.com/ElrondNetwork/elrond-go/consensus/spos"
 	"github.com/ElrondNetwork/elrond-go/core"
-	"github.com/ElrondNetwork/elrond-go/core/partitioning"
-	"github.com/ElrondNetwork/elrond-go/crypto"
+	"github.com/ElrondNetwork/elrond-go/core/check"
 	"github.com/ElrondNetwork/elrond-go/data"
-	"github.com/ElrondNetwork/elrond-go/marshal"
+	"github.com/ElrondNetwork/elrond-go/data/block"
 	"github.com/ElrondNetwork/elrond-go/process/factory"
-	"github.com/ElrondNetwork/elrond-go/sharding"
 )
+
+const validatorDelayPerOrder = time.Second
+
+var _ consensus.BroadcastMessenger = (*shardChainMessenger)(nil)
 
 type shardChainMessenger struct {
 	*commonMessenger
-	marshalizer      marshal.Marshalizer
-	messenger        consensus.P2PMessenger
-	shardCoordinator sharding.Coordinator
+}
+
+// ShardChainMessengerArgs holds the arguments for creating a shardChainMessenger instance
+type ShardChainMessengerArgs struct {
+	CommonMessengerArgs
 }
 
 // NewShardChainMessenger creates a new shardChainMessenger object
 func NewShardChainMessenger(
-	marshalizer marshal.Marshalizer,
-	messenger consensus.P2PMessenger,
-	privateKey crypto.PrivateKey,
-	shardCoordinator sharding.Coordinator,
-	singleSigner crypto.SingleSigner,
+	args ShardChainMessengerArgs,
 ) (*shardChainMessenger, error) {
 
-	err := checkShardChainNilParameters(marshalizer, messenger, shardCoordinator, privateKey, singleSigner)
+	err := checkShardChainNilParameters(args)
 	if err != nil {
 		return nil, err
 	}
 
 	cm := &commonMessenger{
-		marshalizer:      marshalizer,
-		messenger:        messenger,
-		privateKey:       privateKey,
-		shardCoordinator: shardCoordinator,
-		singleSigner:     singleSigner,
+		marshalizer:          args.Marshalizer,
+		hasher:               args.Hasher,
+		messenger:            args.Messenger,
+		privateKey:           args.PrivateKey,
+		shardCoordinator:     args.ShardCoordinator,
+		peerSignatureHandler: args.PeerSignatureHandler,
 	}
 
+	dbbArgs := &ArgsDelayedBlockBroadcaster{
+		InterceptorsContainer: args.InterceptorsContainer,
+		HeadersSubscriber:     args.HeadersSubscriber,
+		LeaderCacheSize:       args.MaxDelayCacheSize,
+		ValidatorCacheSize:    args.MaxValidatorDelayCacheSize,
+		ShardCoordinator:      args.ShardCoordinator,
+	}
+
+	dbb, err := NewDelayedBlockBroadcaster(dbbArgs)
+	if err != nil {
+		return nil, err
+	}
+
+	cm.delayedBlockBroadcaster = dbb
+
 	scm := &shardChainMessenger{
-		commonMessenger:  cm,
-		marshalizer:      marshalizer,
-		messenger:        messenger,
-		shardCoordinator: shardCoordinator,
+		commonMessenger: cm,
+	}
+
+	err = dbb.SetBroadcastHandlers(scm.BroadcastMiniBlocks, scm.BroadcastTransactions, scm.BroadcastHeader)
+	if err != nil {
+		return nil, err
 	}
 
 	return scm, nil
 }
 
 func checkShardChainNilParameters(
-	marshalizer marshal.Marshalizer,
-	messenger consensus.P2PMessenger,
-	shardCoordinator sharding.Coordinator,
-	privateKey crypto.PrivateKey,
-	singleSigner crypto.SingleSigner,
+	args ShardChainMessengerArgs,
 ) error {
-	if marshalizer == nil || marshalizer.IsInterfaceNil() {
-		return spos.ErrNilMarshalizer
-	}
-	if messenger == nil || messenger.IsInterfaceNil() {
-		return spos.ErrNilMessenger
-	}
-	if shardCoordinator == nil || shardCoordinator.IsInterfaceNil() {
-		return spos.ErrNilShardCoordinator
-	}
-	if privateKey == nil || privateKey.IsInterfaceNil() {
-		return spos.ErrNilPrivateKey
-	}
-	if singleSigner == nil || singleSigner.IsInterfaceNil() {
-		return spos.ErrNilSingleSigner
+	err := checkCommonMessengerNilParameters(args.CommonMessengerArgs)
+	if err != nil {
+		return err
 	}
 
 	return nil
@@ -81,7 +84,7 @@ func checkShardChainNilParameters(
 
 // BroadcastBlock will send on in-shard headers topic and on in-shard miniblocks topic the header and block body
 func (scm *shardChainMessenger) BroadcastBlock(blockBody data.BodyHandler, header data.HeaderHandler) error {
-	if blockBody == nil || blockBody.IsInterfaceNil() {
+	if check.IfNil(blockBody) {
 		return spos.ErrNilBody
 	}
 
@@ -90,7 +93,7 @@ func (scm *shardChainMessenger) BroadcastBlock(blockBody data.BodyHandler, heade
 		return err
 	}
 
-	if header == nil || header.IsInterfaceNil() {
+	if check.IfNil(header) {
 		return spos.ErrNilHeader
 	}
 
@@ -99,22 +102,24 @@ func (scm *shardChainMessenger) BroadcastBlock(blockBody data.BodyHandler, heade
 		return err
 	}
 
-	msgBlockBody, err := scm.marshalizer.Marshal(blockBody)
+	b := blockBody.(*block.Body)
+	msgBlockBody, err := scm.marshalizer.Marshal(b)
 	if err != nil {
 		return err
 	}
 
+	headerIdentifier := scm.shardCoordinator.CommunicationIdentifier(core.MetachainShardId)
 	selfIdentifier := scm.shardCoordinator.CommunicationIdentifier(scm.shardCoordinator.SelfId())
 
-	go scm.messenger.Broadcast(factory.HeadersTopic+selfIdentifier, msgHeader)
+	go scm.messenger.Broadcast(factory.ShardBlocksTopic+headerIdentifier, msgHeader)
 	go scm.messenger.Broadcast(factory.MiniBlocksTopic+selfIdentifier, msgBlockBody)
 
 	return nil
 }
 
-// BroadcastHeader will send on shard headers for metachain topic the header
+// BroadcastHeader will send on in-shard headers topic the header
 func (scm *shardChainMessenger) BroadcastHeader(header data.HeaderHandler) error {
-	if header == nil || header.IsInterfaceNil() {
+	if check.IfNil(header) {
 		return spos.ErrNilHeader
 	}
 
@@ -123,64 +128,120 @@ func (scm *shardChainMessenger) BroadcastHeader(header data.HeaderHandler) error
 		return err
 	}
 
-	shardHeaderForMetachainTopic := factory.ShardHeadersForMetachainTopic +
-		scm.shardCoordinator.CommunicationIdentifier(sharding.MetachainShardId)
-
-	go scm.messenger.Broadcast(shardHeaderForMetachainTopic, msgHeader)
+	shardIdentifier := scm.shardCoordinator.CommunicationIdentifier(core.MetachainShardId)
+	go scm.messenger.Broadcast(factory.ShardBlocksTopic+shardIdentifier, msgHeader)
 
 	return nil
 }
 
-// BroadcastMiniBlocks will send on miniblocks topic the cross-shard miniblocks
-func (scm *shardChainMessenger) BroadcastMiniBlocks(miniBlocks map[uint32][]byte) error {
-	mbs := 0
-	for k, v := range miniBlocks {
-		mbs++
-		miniBlocksTopic := factory.MiniBlocksTopic +
-			scm.shardCoordinator.CommunicationIdentifier(k)
-
-		go scm.messenger.Broadcast(miniBlocksTopic, v)
+// BroadcastBlockDataLeader broadcasts the block data as consensus group leader
+func (scm *shardChainMessenger) BroadcastBlockDataLeader(
+	header data.HeaderHandler,
+	miniBlocks map[uint32][]byte,
+	transactions map[string][][]byte,
+) error {
+	if check.IfNil(header) {
+		return spos.ErrNilHeader
+	}
+	if len(miniBlocks) == 0 {
+		return nil
 	}
 
-	if mbs > 0 {
-		log.Info(fmt.Sprintf("sent %d miniblocks\n", mbs))
-	}
-
-	return nil
-}
-
-// BroadcastTransactions will send on transaction topic the transactions
-func (scm *shardChainMessenger) BroadcastTransactions(transactions map[string][][]byte) error {
-	dataPacker, err := partitioning.NewSimpleDataPacker(scm.marshalizer)
+	headerHash, err := core.CalculateHash(scm.marshalizer, scm.hasher, header)
 	if err != nil {
 		return err
 	}
 
-	txs := 0
-	for topic, v := range transactions {
-		txs += len(v)
-		// forward txs to the destination shards in packets
-		packets, err := dataPacker.PackDataInChunks(v, core.MaxBulkTransactionSize)
-		if err != nil {
-			return err
-		}
+	metaMiniBlocks, metaTransactions := scm.extractMetaMiniBlocksAndTransactions(miniBlocks, transactions)
 
-		for _, buff := range packets {
-			go scm.messenger.Broadcast(topic, buff)
-		}
+	broadcastData := &delayedBroadcastData{
+		headerHash:     headerHash,
+		miniBlocksData: miniBlocks,
+		transactions:   transactions,
 	}
 
-	if txs > 0 {
-		log.Info(fmt.Sprintf("sent %d transactions\n", txs))
+	err = scm.delayedBlockBroadcaster.SetLeaderData(broadcastData)
+	if err != nil {
+		return err
 	}
 
+	go scm.BroadcastBlockData(metaMiniBlocks, metaTransactions, core.ExtraDelayForBroadcastBlockInfo)
 	return nil
+}
+
+// PrepareBroadcastHeaderValidator prepares the validator header broadcast in case leader broadcast fails
+func (scm *shardChainMessenger) PrepareBroadcastHeaderValidator(
+	header data.HeaderHandler,
+	_ map[uint32][]byte,
+	_ map[string][][]byte,
+	idx int,
+) {
+	if check.IfNil(header) {
+		log.Error("shardChainMessenger.PrepareBroadcastHeaderValidator", "error", spos.ErrNilHeader)
+		return
+	}
+
+	headerHash, err := core.CalculateHash(scm.marshalizer, scm.hasher, header)
+	if err != nil {
+		log.Error("shardChainMessenger.PrepareBroadcastHeaderValidator", "error", err)
+		return
+	}
+
+	vData := &validatorHeaderBroadcastData{
+		headerHash: headerHash,
+		header:     header,
+		order:      uint32(idx),
+	}
+
+	err = scm.delayedBlockBroadcaster.SetHeaderForValidator(vData)
+	if err != nil {
+		log.Error("shardChainMessenger.PrepareBroadcastHeaderValidator", "error", err)
+		return
+	}
+}
+
+// PrepareBroadcastBlockDataValidator prepares the validator block data broadcast in case leader broadcast fails
+func (scm *shardChainMessenger) PrepareBroadcastBlockDataValidator(
+	header data.HeaderHandler,
+	miniBlocks map[uint32][]byte,
+	transactions map[string][][]byte,
+	idx int,
+) {
+	if check.IfNil(header) {
+		log.Error("shardChainMessenger.PrepareBroadcastBlockDataValidator", "error", spos.ErrNilHeader)
+		return
+	}
+	if len(miniBlocks) == 0 {
+		return
+	}
+
+	headerHash, err := core.CalculateHash(scm.marshalizer, scm.hasher, header)
+	if err != nil {
+		log.Error("shardChainMessenger.PrepareBroadcastBlockDataValidator", "error", err)
+		return
+	}
+
+	broadcastData := &delayedBroadcastData{
+		headerHash:     headerHash,
+		header:         header,
+		miniBlocksData: miniBlocks,
+		transactions:   transactions,
+		order:          uint32(idx),
+	}
+
+	err = scm.delayedBlockBroadcaster.SetValidatorData(broadcastData)
+	if err != nil {
+		log.Error("shardChainMessenger.PrepareBroadcastBlockDataValidator", "error", err)
+		return
+	}
+}
+
+// Close closes all the started infinite looping goroutines and subcomponents
+func (scm *shardChainMessenger) Close() {
+	scm.delayedBlockBroadcaster.Close()
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (scm *shardChainMessenger) IsInterfaceNil() bool {
-	if scm == nil {
-		return true
-	}
-	return false
+	return scm == nil
 }

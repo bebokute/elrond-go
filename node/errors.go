@@ -16,8 +16,8 @@ var ErrNilHasher = errors.New("trying to set nil hasher")
 // ErrNilAccountsAdapter signals that a nil accounts adapter has been provided
 var ErrNilAccountsAdapter = errors.New("trying to set nil accounts adapter")
 
-// ErrNilAddressConverter signals that a nil address converter has been provided
-var ErrNilAddressConverter = errors.New("trying to set nil address converter")
+// ErrNilPubkeyConverter signals that a nil public key converter has been provided
+var ErrNilPubkeyConverter = errors.New("trying to use a nil pubkey converter")
 
 // ErrNilBlockchain signals that a nil blockchain structure has been provided
 var ErrNilBlockchain = errors.New("nil blockchain")
@@ -31,8 +31,17 @@ var ErrNilPrivateKey = errors.New("trying to set nil private key")
 // ErrNilSingleSignKeyGen signals that a nil single key generator has been provided
 var ErrNilSingleSignKeyGen = errors.New("trying to set nil single sign key generator")
 
+// ErrNilKeyGenForBalances signals that a nil keygen for balances has been provided
+var ErrNilKeyGenForBalances = errors.New("trying to set a nil key gen for signing")
+
+// ErrNilTxFeeHandler signals that a nil tx fee handler was provided
+var ErrNilTxFeeHandler = errors.New("trying to set a nil tx fee handler")
+
 // ErrNilPublicKey signals that a nil public key has been provided
 var ErrNilPublicKey = errors.New("trying to set nil public key")
+
+// ErrAccountNotFound signals that an account was not found in trie
+var ErrAccountNotFound = errors.New("account not found")
 
 // ErrZeroRoundDurationNotSupported signals that 0 seconds round duration is not supported
 var ErrZeroRoundDurationNotSupported = errors.New("0 round duration time is not supported")
@@ -49,9 +58,6 @@ var ErrNilRounder = errors.New("trying to set nil rounder")
 // ErrNilBlockProcessor signals that a nil block processor has been provided
 var ErrNilBlockProcessor = errors.New("trying to set nil block processor")
 
-// ErrNilBlockTracker signals that a nil block tracker has been provided
-var ErrNilBlockTracker = errors.New("trying to set nil block tracker")
-
 // ErrNilDataPool signals that a nil data pool has been provided
 var ErrNilDataPool = errors.New("trying to set nil data pool")
 
@@ -63,9 +69,6 @@ var ErrNilNodesCoordinator = errors.New("trying to set nil nodes coordinator")
 
 // ErrNilUint64ByteSliceConverter signals that a nil uint64 <-> byte slice converter has been provided
 var ErrNilUint64ByteSliceConverter = errors.New("trying to set nil uint64 - byte slice converter")
-
-// ErrNilBalances signals that a nil list of initial balances has been provided
-var ErrNilBalances = errors.New("trying to set nil balances")
 
 // ErrNilSingleSig signals that a nil singlesig object has been provided
 var ErrNilSingleSig = errors.New("trying to set nil singlesig")
@@ -85,38 +88,20 @@ var ErrNilInterceptorsContainer = errors.New("nil interceptors container")
 // ErrNilResolversFinder signals that a nil resolvers finder has been provided
 var ErrNilResolversFinder = errors.New("nil resolvers finder")
 
-// ErrNilBlockHeader is raised when a valid block header is expected but nil was used
-var ErrNilBlockHeader = errors.New("block header is nil")
-
-// ErrNilTxBlockBody is raised when a valid tx block body is expected but nil was used
-var ErrNilTxBlockBody = errors.New("tx block body is nil")
-
-// ErrWrongTypeAssertion is raised when a type assertion occurs
-var ErrWrongTypeAssertion = errors.New("wrong type assertion: expected *block.Header")
-
-// ErrNegativeDurationInSecToConsiderUnresponsive is raised when a value less than 1 has been provided
-var ErrNegativeDurationInSecToConsiderUnresponsive = errors.New("value DurationInSecToConsiderUnresponsive is less" +
-	" than 1")
-
-// ErrNegativeMaxTimeToWaitBetweenBroadcastsInSec is raised when a value less than 1 has been provided
-var ErrNegativeMaxTimeToWaitBetweenBroadcastsInSec = errors.New("value MaxTimeToWaitBetweenBroadcastsInSec is less " +
-	"than 1")
-
-// ErrNegativeMinTimeToWaitBetweenBroadcastsInSec is raised when a value less than 1 has been provided
-var ErrNegativeMinTimeToWaitBetweenBroadcastsInSec = errors.New("value MinTimeToWaitBetweenBroadcastsInSec is less " +
-	"than 1")
-
-// ErrWrongValues signals that wrong values were provided
-var ErrWrongValues = errors.New("wrong values for heartbeat parameters")
+// ErrNilEpochStartTrigger signals that a nil start of epoch trigger has been provided
+var ErrNilEpochStartTrigger = errors.New("nil start of epoch trigger")
 
 // ErrGenesisBlockNotInitialized signals that genesis block is not initialized
 var ErrGenesisBlockNotInitialized = errors.New("genesis block is not initialized")
 
-// ErrNilTransactionPool signals that a nil transaction pool was used
-var ErrNilTransactionPool = errors.New("nil transaction pool")
+// ErrNilPeerDenialEvaluator signals that a nil peer denial evaluator was provided
+var ErrNilPeerDenialEvaluator = errors.New("nil peer denial evaluator")
 
-// ErrTooManyTransactionsInPool signals that are too many transactions in pool
-var ErrTooManyTransactionsInPool = errors.New("too many transactions in pool")
+// ErrNilTimeCache signals that a nil time cache was provided
+var ErrNilTimeCache = errors.New("nil time cache")
+
+// ErrNilRequestedItemsHandler signals that a nil requested items handler was provided
+var ErrNilRequestedItemsHandler = errors.New("nil requested items handler")
 
 // ErrSystemBusyGeneratingTransactions signals that to many transactions are trying to get generated
 var ErrSystemBusyGeneratingTransactions = errors.New("system busy while generating bulk transactions")
@@ -126,3 +111,120 @@ var ErrNilStatusHandler = errors.New("nil AppStatusHandler")
 
 // ErrNoTxToProcess signals that no transaction were sent for processing
 var ErrNoTxToProcess = errors.New("no transaction to process")
+
+// ErrInvalidValue signals that an invalid value has been provided such as NaN to an integer field
+var ErrInvalidValue = errors.New("invalid value")
+
+// ErrInvalidSignatureLength signals that an invalid signature length has been provided
+var ErrInvalidSignatureLength = errors.New("invalid signature length")
+
+// ErrInvalidAddressLength signals that an invalid address length has been provided
+var ErrInvalidAddressLength = errors.New("invalid address length")
+
+// ErrInvalidChainIDInTransaction signals that an invalid chain id has been provided in transaction
+var ErrInvalidChainIDInTransaction = errors.New("invalid chain ID")
+
+// ErrInvalidSenderUsernameLength signals that the length of the sender username is invalid
+var ErrInvalidSenderUsernameLength = errors.New("invalid sender username length")
+
+// ErrInvalidReceiverUsernameLength signals that the length of the receiver username is invalid
+var ErrInvalidReceiverUsernameLength = errors.New("invalid receiver username length")
+
+// ErrDataFieldTooBig signals that the data field is too big
+var ErrDataFieldTooBig = errors.New("data field is too big")
+
+// ErrNilNetworkShardingCollector defines the error for setting a nil network sharding collector
+var ErrNilNetworkShardingCollector = errors.New("nil network sharding collector")
+
+// ErrNilBootStorer signals that a nil boot storer was provided
+var ErrNilBootStorer = errors.New("nil boot storer")
+
+// ErrNilHeaderSigVerifier signals that a nil header sig verifier has been provided
+var ErrNilHeaderSigVerifier = errors.New("nil header sig verifier")
+
+// ErrNilHeaderIntegrityVerifier signals that a nil header integrity verifier has been provided
+var ErrNilHeaderIntegrityVerifier = errors.New("nil header integrity verifier")
+
+// ErrNilValidatorStatistics signals that a nil validator statistics has been provided
+var ErrNilValidatorStatistics = errors.New("nil validator statistics")
+
+// ErrInvalidChainID signals that an invalid chain ID has been provided
+var ErrInvalidChainID = errors.New("invalid chain ID in Node")
+
+// ErrNilBlockTracker signals that a nil block tracker has been provided
+var ErrNilBlockTracker = errors.New("trying to set nil block tracker")
+
+// ErrNilPendingMiniBlocksHandler signals that a nil pending miniblocks handler has been provided
+var ErrNilPendingMiniBlocksHandler = errors.New("trying to set nil pending miniblocks handler")
+
+// ErrNilRequestHandler signals that a nil request handler has been provided
+var ErrNilRequestHandler = errors.New("trying to set nil request handler")
+
+// ErrNilAntifloodHandler signals that a nil antiflood handler has been provided
+var ErrNilAntifloodHandler = errors.New("nil antiflood handler")
+
+// ErrNilTxAccumulator signals that a nil Accumulator instance has been provided
+var ErrNilTxAccumulator = errors.New("nil tx accumulator")
+
+// ErrNilHardforkTrigger signals that a nil hardfork trigger has been provided
+var ErrNilHardforkTrigger = errors.New("nil hardfork trigger")
+
+// ErrNilWhiteListHandler signals that white list handler is nil
+var ErrNilWhiteListHandler = errors.New("nil whitelist handler")
+
+// ErrNilNodeStopChannel signals that a nil channel for node process stop has been provided
+var ErrNilNodeStopChannel = errors.New("nil node stop channel")
+
+// ErrNilQueryHandler signals that a nil query handler has been provided
+var ErrNilQueryHandler = errors.New("nil query handler")
+
+// ErrQueryHandlerAlreadyExists signals that the query handler is already registered
+var ErrQueryHandlerAlreadyExists = errors.New("query handler already exists")
+
+// ErrEmptyQueryHandlerName signals that an empty string can not be used to be used in the query handler container
+var ErrEmptyQueryHandlerName = errors.New("empty query handler name")
+
+// ErrUnknownPeerID signals that the provided peer is unknown by the current node
+var ErrUnknownPeerID = errors.New("unknown peer ID")
+
+// ErrNilPeerHonestyHandler signals that a nil peer honesty handler has been provided
+var ErrNilPeerHonestyHandler = errors.New("nil peer honesty handler")
+
+// ErrNilFallbackHeaderValidator signals that a nil fallback header validator has been provided
+var ErrNilFallbackHeaderValidator = errors.New("nil fallback header validator")
+
+// ErrNilWatchdog signals that a nil watchdog has been provided
+var ErrNilWatchdog = errors.New("nil watchdog")
+
+// ErrInvalidTransactionVersion signals that an invalid transaction version has been provided
+var ErrInvalidTransactionVersion = errors.New("invalid transaction version")
+
+// ErrTransactionValueLengthTooBig signals that a too big value has been given to a transaction
+var ErrTransactionValueLengthTooBig = errors.New("value length is too big")
+
+// ErrNilHistoryRepository signals that history repository is nil
+var ErrNilHistoryRepository = errors.New("history repository is nil")
+
+// ErrNilPeerSignatureHandler signals that a nil peerSignatureHandler object has been provided
+var ErrNilPeerSignatureHandler = errors.New("trying to set nil peerSignatureHandler")
+
+// ErrNilTxSimulatorProcessor signals that a nil transaction simulator processor has been provided
+var ErrNilTxSimulatorProcessor = errors.New("nil transaction simulator processor")
+
+// ErrNilIntermediateProcessorContainer signals that intermediate processors container is nil
+var ErrNilIntermediateProcessorContainer = errors.New("intermediate processor container is nil")
+
+// ErrTransactionNotFound signals that a transaction was not found
+var ErrTransactionNotFound = errors.New("transaction not found")
+
+// ErrCannotRetrieveTransaction signals that a transaction was not found
+var ErrCannotRetrieveTransaction = errors.New("transaction cannot be retrieved")
+
+// ErrDifferentSenderShardId signals that a different shard ID was detected between the sender shard ID and the current node shard ID
+var ErrDifferentSenderShardId = errors.New("different shard ID between the transaction sender shard ID and current node shard ID")
+
+// ErrNilTransactionVersionChecker signals that provided transaction version checker is nil
+var ErrNilTransactionVersionChecker = errors.New("nil transaction version checker")
+
+// ErrNilNodeRedundancyHandler signals that provided node redundancy handler is nil
+var ErrNilNodeRedundancyHandler = errors.New("nil node redundancy handler")

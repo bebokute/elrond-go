@@ -2,27 +2,32 @@ package smartContract
 
 import (
 	"bytes"
-	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"math"
 	"math/big"
 	"testing"
 
+	"github.com/ElrondNetwork/elrond-go/config"
+	"github.com/ElrondNetwork/elrond-go/core"
+	"github.com/ElrondNetwork/elrond-go/core/parsers"
+	"github.com/ElrondNetwork/elrond-go/core/vmcommon"
+	"github.com/ElrondNetwork/elrond-go/data"
 	"github.com/ElrondNetwork/elrond-go/data/smartContractResult"
 	"github.com/ElrondNetwork/elrond-go/data/state"
 	"github.com/ElrondNetwork/elrond-go/data/transaction"
 	"github.com/ElrondNetwork/elrond-go/process"
-	"github.com/ElrondNetwork/elrond-go/process/coordinator"
+	"github.com/ElrondNetwork/elrond-go/process/block/postprocess"
+	"github.com/ElrondNetwork/elrond-go/process/economics"
 	"github.com/ElrondNetwork/elrond-go/process/mock"
-	"github.com/ElrondNetwork/elrond-vm-common"
+	"github.com/ElrondNetwork/elrond-go/process/smartContract/builtInFunctions"
+	"github.com/ElrondNetwork/elrond-go/testscommon/economicsmocks"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func generateRandomByteSlice(size int) []byte {
-	buff := make([]byte, size)
-	_, _ = rand.Reader.Read(buff)
-
-	return buff
-}
+const maxEpoch = math.MaxUint32
 
 func generateEmptyByteSlice(size int) []byte {
 	buff := make([]byte, size)
@@ -30,490 +35,786 @@ func generateEmptyByteSlice(size int) []byte {
 	return buff
 }
 
-func createAccounts(tx *transaction.Transaction) (state.AccountHandler, state.AccountHandler) {
-	journalizeCalled := 0
-	saveAccountCalled := 0
-	tracker := &mock.AccountTrackerStub{
-		JournalizeCalled: func(entry state.JournalEntry) {
-			journalizeCalled++
-		},
-		SaveAccountCalled: func(accountHandler state.AccountHandler) error {
-			saveAccountCalled++
-			return nil
-		},
-	}
+func createMockPubkeyConverter() *mock.PubkeyConverterMock {
+	return mock.NewPubkeyConverterMock(32)
+}
 
-	acntSrc, _ := state.NewAccount(mock.NewAddressMock(tx.SndAddr), tracker)
-	acntSrc.Balance = acntSrc.Balance.Add(acntSrc.Balance, tx.Value)
+func createAccounts(tx data.TransactionHandler) (state.UserAccountHandler, state.UserAccountHandler) {
+	acntSrc, _ := state.NewUserAccount(tx.GetSndAddr())
+	acntSrc.Balance = acntSrc.Balance.Add(acntSrc.Balance, tx.GetValue())
 	totalFee := big.NewInt(0)
-	totalFee = totalFee.Mul(big.NewInt(int64(tx.GasLimit)), big.NewInt(int64(tx.GasPrice)))
-	acntSrc.Balance = acntSrc.Balance.Add(acntSrc.Balance, totalFee)
+	totalFee = totalFee.Mul(big.NewInt(int64(tx.GetGasLimit())), big.NewInt(int64(tx.GetGasPrice())))
+	acntSrc.Balance.Set(acntSrc.Balance.Add(acntSrc.Balance, totalFee))
 
-	acntDst, _ := state.NewAccount(mock.NewAddressMock(tx.RcvAddr), tracker)
+	acntDst, _ := state.NewUserAccount(tx.GetRcvAddr())
 
 	return acntSrc, acntDst
 }
 
+func createMockSmartContractProcessorArguments() ArgsNewSmartContractProcessor {
+	gasSchedule := make(map[string]map[string]uint64)
+	gasSchedule[core.ElrondAPICost] = make(map[string]uint64)
+	gasSchedule[core.ElrondAPICost][core.AsyncCallStepField] = 1000
+	gasSchedule[core.ElrondAPICost][core.AsyncCallbackGasLockField] = 3000
+	gasSchedule[core.BuiltInCost] = make(map[string]uint64)
+	gasSchedule[core.BuiltInCost][core.BuiltInFunctionESDTTransfer] = 2000
+
+	return ArgsNewSmartContractProcessor{
+		VmContainer: &mock.VMContainerMock{},
+		ArgsParser:  &mock.ArgumentParserMock{},
+		Hasher:      &mock.HasherMock{},
+		Marshalizer: &mock.MarshalizerMock{},
+		AccountsDB: &mock.AccountsStub{
+			RevertToSnapshotCalled: func(snapshot int) error {
+				return nil
+			},
+		},
+		BlockChainHook:   &mock.BlockChainHookHandlerMock{},
+		PubkeyConv:       createMockPubkeyConverter(),
+		ShardCoordinator: mock.NewMultiShardsCoordinatorMock(5),
+		ScrForwarder:     &mock.IntermediateTransactionHandlerMock{},
+		BadTxForwarder:   &mock.IntermediateTransactionHandlerMock{},
+		TxFeeHandler:     &mock.FeeAccumulatorStub{},
+		TxLogsProcessor:  &mock.TxLogsProcessorStub{},
+		EconomicsFee: &mock.FeeHandlerStub{
+			DeveloperPercentageCalled: func() float64 {
+				return 0.0
+			},
+			ComputeTxFeeCalled: func(tx process.TransactionWithFeeHandler) *big.Int {
+				return core.SafeMul(tx.GetGasLimit(), tx.GetGasPrice())
+			},
+			ComputeFeeForProcessingCalled: func(tx process.TransactionWithFeeHandler, gasToUse uint64) *big.Int {
+				return core.SafeMul(tx.GetGasPrice(), gasToUse)
+			},
+		},
+		TxTypeHandler: &mock.TxTypeHandlerMock{},
+		GasHandler: &mock.GasHandlerMock{
+			SetGasRefundedCalled: func(gasRefunded uint64, hash []byte) {},
+		},
+		GasSchedule:          mock.NewGasScheduleNotifierMock(gasSchedule),
+		BuiltInFunctions:     builtInFunctions.NewBuiltInFunctionContainer(),
+		EpochNotifier:        &mock.EpochNotifierStub{},
+		StakingV2EnableEpoch: 0,
+	}
+}
+
+// ===================== TestNewSmartContractProcessor =====================
 func TestNewSmartContractProcessorNilVM(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSmartContractProcessor(
-		nil,
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = nil
+	sc, err := NewSmartContractProcessor(arguments)
 
-	assert.Nil(t, sc)
-	assert.Equal(t, process.ErrNoVM, err)
+	require.Nil(t, sc)
+	require.Nil(t, sc)
+	require.Equal(t, process.ErrNoVM, err)
 }
 
 func TestNewSmartContractProcessorNilArgsParser(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		nil,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.ArgsParser = nil
+	sc, err := NewSmartContractProcessor(arguments)
 
-	assert.Nil(t, sc)
-	assert.Equal(t, process.ErrNilArgumentParser, err)
+	require.Nil(t, sc)
+	require.Equal(t, process.ErrNilArgumentParser, err)
 }
 
 func TestNewSmartContractProcessorNilHasher(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		nil,
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.Hasher = nil
+	sc, err := NewSmartContractProcessor(arguments)
 
-	assert.Nil(t, sc)
-	assert.Equal(t, process.ErrNilHasher, err)
+	require.Nil(t, sc)
+	require.Equal(t, process.ErrNilHasher, err)
 }
 
 func TestNewSmartContractProcessorNilMarshalizer(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		nil,
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.Marshalizer = nil
+	sc, err := NewSmartContractProcessor(arguments)
 
-	assert.Nil(t, sc)
-	assert.Equal(t, process.ErrNilMarshalizer, err)
+	require.Nil(t, sc)
+	require.Equal(t, process.ErrNilMarshalizer, err)
 }
 
 func TestNewSmartContractProcessorNilAccountsDB(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		nil,
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = nil
+	sc, err := NewSmartContractProcessor(arguments)
 
-	assert.Nil(t, sc)
-	assert.Equal(t, process.ErrNilAccountsAdapter, err)
+	require.Nil(t, sc)
+	require.Equal(t, process.ErrNilAccountsAdapter, err)
 }
 
 func TestNewSmartContractProcessorNilAdrConv(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		nil,
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.PubkeyConv = nil
+	sc, err := NewSmartContractProcessor(arguments)
 
-	assert.Nil(t, sc)
-	assert.Equal(t, process.ErrNilAddressConverter, err)
+	require.Nil(t, sc)
+	require.Equal(t, process.ErrNilPubkeyConverter, err)
 }
 
 func TestNewSmartContractProcessorNilShardCoordinator(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		nil,
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.ShardCoordinator = nil
+	sc, err := NewSmartContractProcessor(arguments)
 
-	assert.Nil(t, sc)
-	assert.Equal(t, process.ErrNilShardCoordinator, err)
+	require.Nil(t, sc)
+	require.Equal(t, process.ErrNilShardCoordinator, err)
 }
 
 func TestNewSmartContractProcessorNilFakeAccountsHandler(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		nil,
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.BlockChainHook = nil
+	sc, err := NewSmartContractProcessor(arguments)
 
-	assert.Nil(t, sc)
-	assert.Equal(t, process.ErrNilTemporaryAccountsHandler, err)
+	require.Nil(t, sc)
+	require.Equal(t, process.ErrNilTemporaryAccountsHandler, err)
 }
 
 func TestNewSmartContractProcessor_NilIntermediateMock(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		nil,
-		&mock.UnsignedTxHandlerMock{},
-	)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.ScrForwarder = nil
+	sc, err := NewSmartContractProcessor(arguments)
 
-	assert.Nil(t, sc)
-	assert.Equal(t, process.ErrNilIntermediateTransactionHandler, err)
+	require.Nil(t, sc)
+	require.Equal(t, process.ErrNilIntermediateTransactionHandler, err)
+}
+
+func TestNewSmartContractProcessor_ErrNilUnsignedTxHandlerMock(t *testing.T) {
+	t.Parallel()
+
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.TxFeeHandler = nil
+	sc, err := NewSmartContractProcessor(arguments)
+
+	require.Nil(t, sc)
+	require.Equal(t, process.ErrNilUnsignedTxHandler, err)
+}
+
+func TestNewSmartContractProcessor_ErrNilGasHandlerMock(t *testing.T) {
+	t.Parallel()
+
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.GasHandler = nil
+	sc, err := NewSmartContractProcessor(arguments)
+
+	require.Nil(t, sc)
+	require.Equal(t, process.ErrNilGasHandler, err)
+}
+
+func TestNewSmartContractProcessor_NilEpochNotifierShouldErr(t *testing.T) {
+	t.Parallel()
+
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.EpochNotifier = nil
+	sc, err := NewSmartContractProcessor(arguments)
+
+	require.Nil(t, sc)
+	require.Equal(t, process.ErrNilEpochNotifier, err)
+}
+
+func TestNewSmartContractProcessor_NilEconomicsFeeShouldErr(t *testing.T) {
+	t.Parallel()
+
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.EconomicsFee = nil
+	sc, err := NewSmartContractProcessor(arguments)
+
+	require.Nil(t, sc)
+	require.Equal(t, process.ErrNilEconomicsFeeHandler, err)
+}
+
+func TestNewSmartContractProcessor_NilTxTypeHandlerShouldErr(t *testing.T) {
+	t.Parallel()
+
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.TxTypeHandler = nil
+	sc, err := NewSmartContractProcessor(arguments)
+
+	require.Nil(t, sc)
+	require.Equal(t, process.ErrNilTxTypeHandler, err)
+}
+
+func TestNewSmartContractProcessor_NilGasScheduleShouldErr(t *testing.T) {
+	t.Parallel()
+
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.GasSchedule = nil
+	sc, err := NewSmartContractProcessor(arguments)
+
+	require.Nil(t, sc)
+	require.Equal(t, process.ErrNilGasSchedule, err)
+}
+
+func TestNewSmartContractProcessor_NilLatestGasScheduleShouldErr(t *testing.T) {
+	t.Parallel()
+
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.GasSchedule = mock.NewGasScheduleNotifierMock(nil)
+	sc, err := NewSmartContractProcessor(arguments)
+
+	require.Nil(t, sc)
+	require.Equal(t, process.ErrNilGasSchedule, err)
+}
+
+func TestNewSmartContractProcessor_NilBuiltInFunctionsShouldErr(t *testing.T) {
+	t.Parallel()
+
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.BuiltInFunctions = nil
+	sc, err := NewSmartContractProcessor(arguments)
+
+	require.Nil(t, sc)
+	require.Equal(t, process.ErrNilBuiltInFunction, err)
+}
+
+func TestNewSmartContractProcessor_NilTxLogsProcessorShouldErr(t *testing.T) {
+	t.Parallel()
+
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.TxLogsProcessor = nil
+	sc, err := NewSmartContractProcessor(arguments)
+
+	require.Nil(t, sc)
+	require.Equal(t, process.ErrNilTxLogsProcessor, err)
+}
+
+func TestNewSmartContractProcessor_NilBadTxForwarderShouldErr(t *testing.T) {
+	t.Parallel()
+
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.BadTxForwarder = nil
+	sc, err := NewSmartContractProcessor(arguments)
+
+	require.Nil(t, sc)
+	require.Equal(t, process.ErrNilBadTxHandler, err)
+}
+
+func TestNewSmartContractProcessor_ShouldRegisterNotifiers(t *testing.T) {
+	t.Parallel()
+
+	epochNotifierRegisterCalled := false
+	gasScheduleRegisterCalled := false
+
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.EpochNotifier = &mock.EpochNotifierStub{
+		RegisterNotifyHandlerCalled: func(handler core.EpochSubscriberHandler) {
+			epochNotifierRegisterCalled = true
+		},
+	}
+	gasSchedule := mock.NewGasScheduleNotifierMock(make(map[string]map[string]uint64))
+	gasSchedule.RegisterNotifyHandlerCalled = func(handler core.GasScheduleSubscribeHandler) {
+		gasScheduleRegisterCalled = true
+	}
+	arguments.GasSchedule = gasSchedule
+
+	_, _ = NewSmartContractProcessor(arguments)
+
+	require.True(t, epochNotifierRegisterCalled)
+	require.True(t, gasScheduleRegisterCalled)
 }
 
 func TestNewSmartContractProcessor(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
+	arguments := createMockSmartContractProcessorArguments()
+	sc, err := NewSmartContractProcessor(arguments)
 
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
+	require.False(t, sc.IsInterfaceNil())
 }
 
-func TestScProcessor_ComputeTransactionTypeNil(t *testing.T) {
+func TestNewSmartContractProcessorVerifyAllMembers(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
+	arguments := createMockSmartContractProcessorArguments()
+	sc, _ := NewSmartContractProcessor(arguments)
 
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	apiCosts := arguments.GasSchedule.LatestGasSchedule()[core.ElrondAPICost]
+	builtInFuncCost := arguments.GasSchedule.LatestGasSchedule()[core.BuiltInCost]
 
-	_, err = sc.ComputeTransactionType(nil)
-	assert.Equal(t, process.ErrNilTransaction, err)
+	assert.Equal(t, arguments.VmContainer, sc.vmContainer)
+	assert.Equal(t, arguments.ArgsParser, sc.argsParser)
+	assert.Equal(t, arguments.Hasher, sc.hasher)
+	assert.Equal(t, arguments.AccountsDB, sc.accounts)
+	assert.Equal(t, arguments.BlockChainHook, sc.blockChainHook)
+	assert.Equal(t, arguments.PubkeyConv, sc.pubkeyConv)
+	assert.Equal(t, arguments.ShardCoordinator, sc.shardCoordinator)
+	assert.Equal(t, arguments.ScrForwarder, sc.scrForwarder)
+	assert.Equal(t, arguments.TxFeeHandler, sc.txFeeHandler)
+	assert.Equal(t, arguments.EconomicsFee, sc.economicsFee)
+	assert.Equal(t, arguments.TxTypeHandler, sc.txTypeHandler)
+	assert.Equal(t, apiCosts[core.AsyncCallStepField], sc.asyncCallStepCost)
+	assert.Equal(t, apiCosts[core.AsyncCallbackGasLockField], sc.asyncCallbackGasLock)
+	assert.Equal(t, builtInFuncCost[core.BuiltInFunctionESDTTransfer], sc.esdtTransferCost)
+	assert.Equal(t, arguments.BuiltInFunctions, sc.builtInFunctions)
+	assert.Equal(t, arguments.TxLogsProcessor, sc.txLogsProcessor)
+	assert.Equal(t, arguments.BadTxForwarder, sc.badTxForwarder)
+	assert.Equal(t, arguments.DeployEnableEpoch, sc.deployEnableEpoch)
+	assert.Equal(t, arguments.BuiltinEnableEpoch, sc.builtinEnableEpoch)
+	assert.Equal(t, arguments.PenalizedTooMuchGasEnableEpoch, sc.penalizedTooMuchGasEnableEpoch)
 }
 
-func TestScProcessor_ComputeTransactionTypeNilTx(t *testing.T) {
+// ===================== TestGasScheduleChange =====================
+
+func TestGasScheduleChangeNoApiCostShouldNotChange(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
+	arguments := createMockSmartContractProcessorArguments()
+	sc, _ := NewSmartContractProcessor(arguments)
 
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	apiCosts := arguments.GasSchedule.LatestGasSchedule()[core.ElrondAPICost]
+	builtInFuncCost := arguments.GasSchedule.LatestGasSchedule()[core.BuiltInCost]
 
-	tx := &transaction.Transaction{}
-	tx.Nonce = 0
-	tx.SndAddr = []byte("SRC")
-	tx.RcvAddr = []byte("DST")
-	tx.Value = big.NewInt(45)
+	gasSchedule := make(map[string]map[string]uint64)
+	gasSchedule[core.BuiltInCost] = make(map[string]uint64)
+	gasSchedule[core.BuiltInCost][core.BuiltInFunctionESDTTransfer] = 2000
 
-	tx = nil
-	_, err = sc.ComputeTransactionType(tx)
-	assert.Equal(t, process.ErrNilTransaction, err)
+	sc.GasScheduleChange(gasSchedule)
+	require.Equal(t, apiCosts[core.AsyncCallStepField], sc.asyncCallStepCost)
+	require.Equal(t, apiCosts[core.AsyncCallbackGasLockField], sc.asyncCallbackGasLock)
+	require.Equal(t, builtInFuncCost[core.BuiltInFunctionESDTTransfer], sc.esdtTransferCost)
+
+	gasSchedule[core.ElrondAPICost] = nil
+	gasSchedule[core.BuiltInCost] = make(map[string]uint64)
+	gasSchedule[core.BuiltInCost][core.BuiltInFunctionESDTTransfer] = 2000
+	sc.GasScheduleChange(gasSchedule)
+
+	require.Equal(t, apiCosts[core.AsyncCallStepField], sc.asyncCallStepCost)
+	require.Equal(t, apiCosts[core.AsyncCallbackGasLockField], sc.asyncCallbackGasLock)
+	require.Equal(t, builtInFuncCost[core.BuiltInFunctionESDTTransfer], sc.esdtTransferCost)
+
+	gasSchedule[core.ElrondAPICost] = make(map[string]uint64)
+	sc.GasScheduleChange(gasSchedule)
+
+	require.Equal(t, apiCosts[core.AsyncCallStepField], sc.asyncCallStepCost)
+	require.Equal(t, apiCosts[core.AsyncCallbackGasLockField], sc.asyncCallbackGasLock)
+	require.Equal(t, builtInFuncCost[core.BuiltInFunctionESDTTransfer], sc.esdtTransferCost)
 }
 
-func TestScProcessor_ComputeTransactionTypeErrWrongTransaction(t *testing.T) {
+func TestGasScheduleChangeNoApiCostNoAsyncCallStepFieldShouldNotChange(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
+	arguments := createMockSmartContractProcessorArguments()
+	sc, _ := NewSmartContractProcessor(arguments)
 
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	apiCosts := arguments.GasSchedule.LatestGasSchedule()[core.ElrondAPICost]
+	builtInFuncCost := arguments.GasSchedule.LatestGasSchedule()[core.BuiltInCost]
 
-	tx := &transaction.Transaction{}
-	tx.Nonce = 0
-	tx.SndAddr = []byte("SRC")
-	tx.RcvAddr = nil
-	tx.Value = big.NewInt(45)
+	gasSchedule := make(map[string]map[string]uint64)
+	gasSchedule[core.ElrondAPICost] = make(map[string]uint64)
+	gasSchedule[core.ElrondAPICost][core.AsyncCallbackGasLockField] = 3000
+	gasSchedule[core.BuiltInCost] = make(map[string]uint64)
+	gasSchedule[core.BuiltInCost][core.BuiltInFunctionESDTTransfer] = 2000
+	sc.GasScheduleChange(gasSchedule)
 
-	_, err = sc.ComputeTransactionType(tx)
-	assert.Equal(t, process.ErrWrongTransaction, err)
+	require.Equal(t, apiCosts[core.AsyncCallStepField], sc.asyncCallStepCost)
+	require.Equal(t, apiCosts[core.AsyncCallbackGasLockField], sc.asyncCallbackGasLock)
+	require.Equal(t, builtInFuncCost[core.BuiltInFunctionESDTTransfer], sc.esdtTransferCost)
 }
 
-func TestScProcessor_ComputeTransactionTypeScDeployment(t *testing.T) {
+func TestGasScheduleChangeNoApiCostNoAsyncCallbackGasLockFieldShouldNotChange(t *testing.T) {
 	t.Parallel()
 
-	addressConverter := &mock.AddressConverterMock{}
+	arguments := createMockSmartContractProcessorArguments()
+	sc, _ := NewSmartContractProcessor(arguments)
 
-	txTypeHandler, err := coordinator.NewTxTypeHandler(
-		addressConverter,
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.AccountsStub{
-			GetAccountWithJournalCalled: func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
-				return nil, nil
-			},
-		},
-	)
+	apiCosts := arguments.GasSchedule.LatestGasSchedule()[core.ElrondAPICost]
+	builtInFuncCost := arguments.GasSchedule.LatestGasSchedule()[core.BuiltInCost]
 
-	assert.NotNil(t, txTypeHandler)
-	assert.Nil(t, err)
+	gasSchedule := make(map[string]map[string]uint64)
+	gasSchedule[core.ElrondAPICost] = make(map[string]uint64)
+	gasSchedule[core.ElrondAPICost][core.AsyncCallStepField] = 1000
+	gasSchedule[core.BuiltInCost] = make(map[string]uint64)
+	gasSchedule[core.BuiltInCost][core.BuiltInFunctionESDTTransfer] = 2000
+	sc.GasScheduleChange(gasSchedule)
 
-	tx := &transaction.Transaction{}
-	tx.Nonce = 0
-	tx.SndAddr = []byte("SRC")
-	tx.RcvAddr = make([]byte, addressConverter.AddressLen())
-	tx.Data = "data"
-	tx.Value = big.NewInt(45)
-
-	txType, err := txTypeHandler.ComputeTransactionType(tx)
-	assert.Nil(t, err)
-	assert.Equal(t, process.SCDeployment, txType)
+	require.Equal(t, apiCosts[core.AsyncCallStepField], sc.asyncCallStepCost)
+	require.Equal(t, apiCosts[core.AsyncCallbackGasLockField], sc.asyncCallbackGasLock)
+	require.Equal(t, builtInFuncCost[core.BuiltInFunctionESDTTransfer], sc.esdtTransferCost)
 }
 
-func TestScProcessor_ComputeTransactionTypeScInvoking(t *testing.T) {
+func TestGasScheduleChangeNoBuiltInCostShouldNotChange(t *testing.T) {
 	t.Parallel()
 
-	addrConverter := &mock.AddressConverterMock{}
-	tx := &transaction.Transaction{}
-	tx.Nonce = 0
-	tx.SndAddr = []byte("SRC")
-	tx.RcvAddr = generateRandomByteSlice(addrConverter.AddressLen())
-	tx.Data = "data"
-	tx.Value = big.NewInt(45)
+	arguments := createMockSmartContractProcessorArguments()
+	sc, _ := NewSmartContractProcessor(arguments)
 
-	_, acntDst := createAccounts(tx)
-	acntDst.SetCode([]byte("code"))
+	apiCosts := arguments.GasSchedule.LatestGasSchedule()[core.ElrondAPICost]
+	builtInFuncCost := arguments.GasSchedule.LatestGasSchedule()[core.BuiltInCost]
 
-	txTypeHandler, err := coordinator.NewTxTypeHandler(
-		addrConverter,
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.AccountsStub{
-			GetAccountWithJournalCalled: func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
-				return acntDst, nil
-			},
-		},
-	)
+	gasSchedule := make(map[string]map[string]uint64)
+	gasSchedule[core.ElrondAPICost] = make(map[string]uint64)
+	gasSchedule[core.ElrondAPICost][core.AsyncCallStepField] = 1000
+	gasSchedule[core.ElrondAPICost][core.AsyncCallbackGasLockField] = 3000
 
-	assert.NotNil(t, txTypeHandler)
-	assert.Nil(t, err)
+	sc.GasScheduleChange(gasSchedule)
 
-	txType, err := txTypeHandler.ComputeTransactionType(tx)
-	assert.Nil(t, err)
-	assert.Equal(t, process.SCInvoking, txType)
+	require.Equal(t, apiCosts[core.AsyncCallStepField], sc.asyncCallStepCost)
+	require.Equal(t, apiCosts[core.AsyncCallbackGasLockField], sc.asyncCallbackGasLock)
+	require.Equal(t, builtInFuncCost[core.BuiltInFunctionESDTTransfer], sc.esdtTransferCost)
+
+	gasSchedule[core.BuiltInCost] = make(map[string]uint64)
+
+	sc.GasScheduleChange(gasSchedule)
+
+	require.Equal(t, apiCosts[core.AsyncCallStepField], sc.asyncCallStepCost)
+	require.Equal(t, apiCosts[core.AsyncCallbackGasLockField], sc.asyncCallbackGasLock)
+	require.Equal(t, builtInFuncCost[core.BuiltInFunctionESDTTransfer], sc.esdtTransferCost)
 }
 
-func TestScProcessor_ComputeTransactionTypeMoveBalance(t *testing.T) {
+func TestGasScheduleChangeShouldWork(t *testing.T) {
 	t.Parallel()
 
-	addrConverter := &mock.AddressConverterMock{}
-	tx := &transaction.Transaction{}
-	tx.Nonce = 0
-	tx.SndAddr = []byte("SRC")
-	tx.RcvAddr = generateRandomByteSlice(addrConverter.AddressLen())
-	tx.Data = "data"
-	tx.Value = big.NewInt(45)
+	arguments := createMockSmartContractProcessorArguments()
+	sc, _ := NewSmartContractProcessor(arguments)
 
-	_, acntDst := createAccounts(tx)
+	gasSchedule := make(map[string]map[string]uint64)
+	gasSchedule[core.ElrondAPICost] = make(map[string]uint64)
+	gasSchedule[core.ElrondAPICost][core.AsyncCallStepField] = 10
+	gasSchedule[core.ElrondAPICost][core.AsyncCallbackGasLockField] = 30
+	gasSchedule[core.BuiltInCost] = make(map[string]uint64)
+	gasSchedule[core.BuiltInCost][core.BuiltInFunctionESDTTransfer] = 20
 
-	txTypeHandler, err := coordinator.NewTxTypeHandler(
-		addrConverter,
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.AccountsStub{
-			GetAccountWithJournalCalled: func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
-				return acntDst, nil
-			},
-		},
-	)
+	sc.GasScheduleChange(gasSchedule)
 
-	assert.NotNil(t, txTypeHandler)
-	assert.Nil(t, err)
-
-	txType, err := txTypeHandler.ComputeTransactionType(tx)
-	assert.Nil(t, err)
-	assert.Equal(t, process.MoveBalance, txType)
+	apiCosts := gasSchedule[core.ElrondAPICost]
+	builtInFuncCost := gasSchedule[core.BuiltInCost]
+	require.Equal(t, apiCosts[core.AsyncCallStepField], sc.asyncCallStepCost)
+	require.Equal(t, apiCosts[core.AsyncCallbackGasLockField], sc.asyncCallbackGasLock)
+	require.Equal(t, builtInFuncCost[core.BuiltInFunctionESDTTransfer], sc.esdtTransferCost)
 }
+
+// ===================== TestDeploySmartContract =====================
 
 func TestScProcessor_DeploySmartContractBadParse(t *testing.T) {
 	t.Parallel()
 
-	addrConverter := &mock.AddressConverterMock{}
-	vm := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		addrConverter,
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = &mock.VMContainerMock{}
+	arguments.ArgsParser = argParser
 
 	tx := &transaction.Transaction{}
 	tx.Nonce = 0
 	tx.SndAddr = []byte("SRC")
-	tx.RcvAddr = generateEmptyByteSlice(addrConverter.AddressLen())
-	tx.Data = "data"
+	tx.RcvAddr = generateEmptyByteSlice(createMockPubkeyConverter().Len())
+	tx.Data = []byte("data")
 	tx.Value = big.NewInt(45)
 	acntSrc, _ := createAccounts(tx)
 
-	tmpError := errors.New("error")
-	argParser.ParseDataCalled = func(data string) error {
-		return tmpError
+	parseError := fmt.Errorf("fooError")
+	argParser.ParseDeployDataCalled = func(data string) (*parsers.DeployArgs, error) {
+		return nil, parseError
 	}
-	err = sc.DeploySmartContract(tx, acntSrc, 10)
-	assert.Equal(t, tmpError, err)
+
+	arguments.AccountsDB = &mock.AccountsStub{
+		RevertToSnapshotCalled: func(snapshot int) error {
+			return nil
+		},
+		LoadAccountCalled: func(address []byte) (state.AccountHandler, error) {
+			return acntSrc, nil
+		},
+	}
+
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
+
+	returnCode, _ := sc.DeploySmartContract(tx, acntSrc)
+
+	tsc := NewTestScProcessor(sc)
+
+	scrs := tsc.GetAllSCRs()
+	expectedError := "@" + hex.EncodeToString([]byte(parseError.Error()))
+	require.Equal(t, expectedError, string(scrs[0].GetData()))
+	require.Equal(t, vmcommon.UserError, returnCode)
+	require.Equal(t, uint64(1), acntSrc.GetNonce())
+	require.True(t, acntSrc.GetBalance().Cmp(tx.Value) == 0)
 }
 
 func TestScProcessor_DeploySmartContractRunError(t *testing.T) {
 	t.Parallel()
 
-	addrConverter := &mock.AddressConverterMock{}
 	vmContainer := &mock.VMContainerMock{}
-	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vmContainer,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		addrConverter,
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	argParser := NewArgumentParser()
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = &mock.AccountsStub{RevertToSnapshotCalled: func(snapshot int) error {
+		return nil
+	}}
+	arguments.VmContainer = vmContainer
+	arguments.ArgsParser = argParser
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{}
 	tx.Nonce = 0
 	tx.SndAddr = []byte("SRC")
-	tx.RcvAddr = generateEmptyByteSlice(addrConverter.AddressLen())
-	tx.Data = "data"
+	tx.RcvAddr = generateEmptyByteSlice(createMockPubkeyConverter().Len())
+	tx.Data = []byte("abba@0500@0000")
 	tx.Value = big.NewInt(45)
 	acntSrc, _ := createAccounts(tx)
 
-	tmpError := errors.New("error")
 	vm := &mock.VMExecutionHandlerStub{}
+
+	createError := fmt.Errorf("fooError")
 	vm.RunSmartContractCreateCalled = func(input *vmcommon.ContractCreateInput) (output *vmcommon.VMOutput, e error) {
-		return nil, tmpError
+		return nil, createError
 	}
 
 	vmContainer.GetCalled = func(key []byte) (handler vmcommon.VMExecutionHandler, e error) {
 		return vm, nil
 	}
 
-	vmArg := []byte("00")
-	argParser.GetArgumentsCalled = func() ([]*big.Int, error) {
-		args := make([]*big.Int, 0)
-		args = append(args, big.NewInt(0).SetBytes(vmArg))
-		return args, nil
+	_, _ = sc.DeploySmartContract(tx, acntSrc)
+	tsc := NewTestScProcessor(sc)
+	scrs := tsc.GetAllSCRs()
+	expectedError := "@" + hex.EncodeToString([]byte(createError.Error()))
+	require.Equal(t, expectedError, string(scrs[0].GetData()))
+}
+
+func TestScProcessor_DeploySmartContractDisabled(t *testing.T) {
+	t.Parallel()
+
+	vmContainer := &mock.VMContainerMock{}
+	argParser := NewArgumentParser()
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = &mock.AccountsStub{RevertToSnapshotCalled: func(snapshot int) error {
+		return nil
+	}}
+	arguments.VmContainer = vmContainer
+	arguments.ArgsParser = argParser
+	arguments.DeployEnableEpoch = maxEpoch
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = generateEmptyByteSlice(createMockPubkeyConverter().Len())
+	tx.Data = []byte("abba@0500@0000")
+	tx.Value = big.NewInt(45)
+	acntSrc, _ := createAccounts(tx)
+
+	vm := &mock.VMExecutionHandlerStub{}
+	vmContainer.GetCalled = func(key []byte) (handler vmcommon.VMExecutionHandler, e error) {
+		return vm, nil
 	}
 
-	err = sc.DeploySmartContract(tx, acntSrc, 10)
-	assert.Equal(t, tmpError, err)
+	_, _ = sc.DeploySmartContract(tx, acntSrc)
+	tsc := NewTestScProcessor(sc)
+	require.Equal(t, process.ErrSmartContractDeploymentIsDisabled, tsc.GetLatestTestError())
+}
+
+func TestScProcessor_BuiltInCallSmartContractDisabled(t *testing.T) {
+	t.Parallel()
+
+	vmContainer := &mock.VMContainerMock{}
+	argParser := NewArgumentParser()
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = &mock.AccountsStub{RevertToSnapshotCalled: func(snapshot int) error {
+		return nil
+	}}
+	arguments.VmContainer = vmContainer
+	arguments.ArgsParser = argParser
+	arguments.BuiltinEnableEpoch = maxEpoch
+	funcName := "builtIn"
+	_ = arguments.BuiltInFunctions.Add(funcName, &mock.BuiltInFunctionStub{})
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = []byte("DST")
+	tx.Data = []byte(funcName + "@0500@0000")
+	tx.Value = big.NewInt(45)
+	acntSrc, _ := createAccounts(tx)
+
+	vm := &mock.VMExecutionHandlerStub{}
+	vmContainer.GetCalled = func(key []byte) (handler vmcommon.VMExecutionHandler, e error) {
+		return vm, nil
+	}
+
+	_, err = sc.ExecuteBuiltInFunction(tx, acntSrc, nil)
+	require.Equal(t, process.ErrFailedTransaction, err)
+}
+
+func TestScProcessor_BuiltInCallSmartContractSenderFailed(t *testing.T) {
+	t.Parallel()
+
+	vmContainer := &mock.VMContainerMock{}
+	argParser := NewArgumentParser()
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = &mock.AccountsStub{RevertToSnapshotCalled: func(snapshot int) error {
+		return nil
+	}}
+	arguments.VmContainer = vmContainer
+	arguments.ArgsParser = argParser
+	arguments.BuiltinEnableEpoch = maxEpoch
+	funcName := "builtIn"
+	localError := errors.New("failed built in call")
+	_ = arguments.BuiltInFunctions.Add(funcName, &mock.BuiltInFunctionStub{
+		ProcessBuiltinFunctionCalled: func(acntSnd, acntDst state.UserAccountHandler, vmInput *vmcommon.ContractCallInput) (*vmcommon.VMOutput, error) {
+			return nil, localError
+		},
+	})
+
+	scrAdded := false
+	badTxAdded := false
+	arguments.BadTxForwarder = &mock.IntermediateTransactionHandlerMock{
+		AddIntermediateTransactionsCalled: func(txs []data.TransactionHandler) error {
+			badTxAdded = true
+			return nil
+		},
+	}
+	arguments.ScrForwarder = &mock.IntermediateTransactionHandlerMock{
+		AddIntermediateTransactionsCalled: func(txs []data.TransactionHandler) error {
+			scrAdded = true
+			return nil
+		},
+	}
+
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = []byte("DST")
+	tx.Data = []byte(funcName + "@0500@0000")
+	tx.Value = big.NewInt(45)
+	acntSrc, _ := createAccounts(tx)
+
+	vm := &mock.VMExecutionHandlerStub{}
+	vmContainer.GetCalled = func(key []byte) (handler vmcommon.VMExecutionHandler, e error) {
+		return vm, nil
+	}
+
+	_, err = sc.ExecuteBuiltInFunction(tx, acntSrc, nil)
+	require.Equal(t, process.ErrFailedTransaction, err)
+	require.True(t, scrAdded)
+	require.True(t, badTxAdded)
+
+	_, err = sc.ExecuteSmartContractTransaction(tx, nil, acntSrc)
+	require.Nil(t, err)
+}
+
+func TestScProcessor_ExecuteBuiltInFunctionSCResultCallSelfShard(t *testing.T) {
+	t.Parallel()
+
+	vmContainer := &mock.VMContainerMock{}
+	argParser := NewArgumentParser()
+	arguments := createMockSmartContractProcessorArguments()
+	accountState := &mock.AccountsStub{
+		RevertToSnapshotCalled: func(snapshot int) error {
+			return nil
+		},
+	}
+	arguments.AccountsDB = accountState
+	arguments.VmContainer = vmContainer
+	arguments.ArgsParser = argParser
+	arguments.BuiltinEnableEpoch = maxEpoch
+	funcName := "builtIn"
+	_ = arguments.BuiltInFunctions.Add(funcName, &mock.BuiltInFunctionStub{})
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
+
+	tx := &smartContractResult.SmartContractResult{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = make([]byte, arguments.PubkeyConv.Len())
+	tx.Data = []byte(funcName + "@0500@0000")
+	tx.Value = big.NewInt(0)
+	tx.CallType = vmcommon.AsynchronousCallBack
+	acntSrc, actDst := createAccounts(tx)
+
+	vm := &mock.VMExecutionHandlerStub{}
+	vmContainer.GetCalled = func(key []byte) (handler vmcommon.VMExecutionHandler, e error) {
+		return vm, nil
+	}
+	accountState.LoadAccountCalled = func(address []byte) (state.AccountHandler, error) {
+		if bytes.Equal(tx.SndAddr, address) {
+			return acntSrc, nil
+		}
+		if bytes.Equal(tx.RcvAddr, address) {
+			return actDst, nil
+		}
+		return nil, nil
+	}
+
+	sc.flagBuiltin.Set()
+	retCode, err := sc.ExecuteBuiltInFunction(tx, acntSrc, actDst)
+	require.Equal(t, vmcommon.Ok, retCode)
+	require.Nil(t, err)
+}
+
+func TestScProcessor_ExecuteBuiltInFunction(t *testing.T) {
+	t.Parallel()
+
+	vmContainer := &mock.VMContainerMock{}
+	argParser := NewArgumentParser()
+	arguments := createMockSmartContractProcessorArguments()
+	accountState := &mock.AccountsStub{
+		RevertToSnapshotCalled: func(snapshot int) error {
+			return nil
+		},
+	}
+	arguments.AccountsDB = accountState
+	arguments.VmContainer = vmContainer
+	arguments.ArgsParser = argParser
+	arguments.BuiltinEnableEpoch = maxEpoch
+	funcName := "builtIn"
+	_ = arguments.BuiltInFunctions.Add(funcName, &mock.BuiltInFunctionStub{})
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = []byte("DST")
+	tx.Data = []byte(funcName + "@0500@0000")
+	tx.Value = big.NewInt(45)
+	acntSrc, _ := createAccounts(tx)
+
+	vm := &mock.VMExecutionHandlerStub{}
+	vmContainer.GetCalled = func(key []byte) (handler vmcommon.VMExecutionHandler, e error) {
+		return vm, nil
+	}
+	accountState.LoadAccountCalled = func(address []byte) (state.AccountHandler, error) {
+		return acntSrc, nil
+	}
+
+	sc.flagBuiltin.Set()
+	retCode, err := sc.ExecuteBuiltInFunction(tx, acntSrc, nil)
+	require.Equal(t, vmcommon.Ok, retCode)
+	require.Nil(t, err)
 }
 
 func TestScProcessor_DeploySmartContractWrongTx(t *testing.T) {
@@ -521,76 +822,591 @@ func TestScProcessor_DeploySmartContractWrongTx(t *testing.T) {
 
 	vm := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	sc, _ := NewSmartContractProcessor(arguments)
 
 	tx := &transaction.Transaction{}
 	tx.Nonce = 0
 	tx.SndAddr = []byte("SRC")
 	tx.RcvAddr = []byte("DST")
-	tx.Data = "data"
+	tx.Data = []byte("data")
 	tx.Value = big.NewInt(45)
 	acntSrc, _ := createAccounts(tx)
 
-	err = sc.DeploySmartContract(tx, acntSrc, 10)
-	assert.Equal(t, process.ErrWrongTransaction, err)
+	_, err := sc.DeploySmartContract(tx, acntSrc)
+	require.Equal(t, process.ErrWrongTransaction, err)
+}
+
+func TestScProcessor_DeploySmartContractNilTx(t *testing.T) {
+	t.Parallel()
+
+	vm := &mock.VMContainerMock{}
+	argParser := &mock.ArgumentParserMock{}
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = []byte("DST")
+	tx.Data = []byte("data")
+	tx.Value = big.NewInt(45)
+	acntSrc, _ := createAccounts(tx)
+
+	_, err := sc.DeploySmartContract(nil, acntSrc)
+	require.Equal(t, process.ErrNilTransaction, err)
+}
+
+func TestScProcessor_DeploySmartContractNotEmptyDestinationAddress(t *testing.T) {
+	t.Parallel()
+
+	vm := &mock.VMContainerMock{}
+	argParser := &mock.ArgumentParserMock{}
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	arguments.PubkeyConv = mock.NewPubkeyConverterMock(3)
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = []byte("DST")
+	tx.Data = []byte("data")
+	tx.Value = big.NewInt(45)
+	acntSrc, _ := createAccounts(tx)
+
+	_, err := sc.DeploySmartContract(tx, acntSrc)
+	require.Equal(t, process.ErrWrongTransaction, err)
+}
+
+func TestScProcessor_DeploySmartContractCalculateHashFails(t *testing.T) {
+	t.Parallel()
+
+	vm := &mock.VMContainerMock{}
+	argParser := &mock.ArgumentParserMock{}
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+
+	arguments.Marshalizer = &mock.MarshalizerMock{
+		Fail: true,
+	}
+
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = make([]byte, sc.pubkeyConv.Len())
+	tx.Data = []byte("data")
+	tx.Value = big.NewInt(45)
+	acntSrc, _ := createAccounts(tx)
+
+	_, err = sc.DeploySmartContract(tx, acntSrc)
+	require.NotNil(t, err)
+	require.Equal(t, "MarshalizerMock generic error", err.Error())
+}
+
+func TestScProcessor_DeploySmartContractEconomicsFeeValidateFails(t *testing.T) {
+	t.Parallel()
+
+	expectedError := errors.New("expected error")
+
+	vm := &mock.VMContainerMock{}
+	argParser := &mock.ArgumentParserMock{}
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+
+	arguments.EconomicsFee = &mock.FeeHandlerStub{
+		CheckValidityTxValuesCalled: func(tx process.TransactionWithFeeHandler) error {
+			return expectedError
+		},
+	}
+
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = make([]byte, sc.pubkeyConv.Len())
+	tx.Data = []byte("data")
+	tx.Value = big.NewInt(45)
+	acntSrc, _ := createAccounts(tx)
+
+	_, err := sc.DeploySmartContract(tx, acntSrc)
+	require.Equal(t, expectedError, err)
+}
+
+func TestScProcessor_DeploySmartContractEconomicsFeeSaveAccountsFails(t *testing.T) {
+	t.Parallel()
+
+	expectedError := errors.New("expected error")
+
+	vm := &mock.VMContainerMock{}
+	argParser := &mock.ArgumentParserMock{}
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	arguments.AccountsDB = &mock.AccountsStub{
+		SaveAccountCalled: func(account state.AccountHandler) error {
+			return expectedError
+		},
+	}
+
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = make([]byte, sc.pubkeyConv.Len())
+	tx.Data = []byte("data")
+	tx.Value = big.NewInt(45)
+	acntSrc, _ := createAccounts(tx)
+
+	_, err := sc.DeploySmartContract(tx, acntSrc)
+	require.Equal(t, expectedError, err)
+}
+
+func TestScProcessor_DeploySmartContractEconomicsWithFlagPenalizeTooMuchGasEnabled(t *testing.T) {
+	t.Parallel()
+
+	vm := &mock.VMContainerMock{}
+	argParser := NewArgumentParser()
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	sc.flagPenalizedTooMuchGas.Toggle(false)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = make([]byte, sc.pubkeyConv.Len())
+	tx.Data = []byte("data")
+	tx.Value = big.NewInt(45)
+	acntSrc, _ := createAccounts(tx)
+
+	_, err := sc.DeploySmartContract(tx, acntSrc)
+	require.Equal(t, nil, err)
+}
+
+func TestScProcessor_DeploySmartContractVmContainerGetFails(t *testing.T) {
+	t.Parallel()
+
+	expectedError := errors.New("expected error")
+	argParser := NewArgumentParser()
+	vm := &mock.VMContainerMock{}
+	vm.GetCalled = func(key []byte) (vmcommon.VMExecutionHandler, error) {
+		return nil, expectedError
+	}
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = make([]byte, sc.pubkeyConv.Len())
+	tx.Data = []byte("abba@0500@0000")
+	tx.Value = big.NewInt(45)
+	acntSrc, _ := createAccounts(tx)
+
+	errCode, err := sc.DeploySmartContract(tx, acntSrc)
+	// TODO: check why nil error here
+	require.Nil(t, err)
+	require.Equal(t, vmcommon.UserError, errCode)
+}
+
+func TestScProcessor_DeploySmartContractVmExecuteCreateSCFails(t *testing.T) {
+	t.Parallel()
+
+	expectedError := errors.New("expected error")
+	argParser := NewArgumentParser()
+	vm := &mock.VMContainerMock{}
+	vmExecutor := &mock.VMExecutionHandlerStub{
+		RunSmartContractCreateCalled: func(input *vmcommon.ContractCreateInput) (*vmcommon.VMOutput, error) {
+			return nil, expectedError
+		},
+	}
+	vm.GetCalled = func(key []byte) (vmcommon.VMExecutionHandler, error) {
+		return vmExecutor, nil
+	}
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = make([]byte, sc.pubkeyConv.Len())
+	tx.Data = []byte("abba@0500@0000")
+	tx.Value = big.NewInt(45)
+	acntSrc, _ := createAccounts(tx)
+
+	errCode, err := sc.DeploySmartContract(tx, acntSrc)
+	// TODO: check why nil error here
+	require.Nil(t, err)
+	require.Equal(t, vmcommon.UserError, errCode)
+}
+
+func TestScProcessor_DeploySmartContractVmExecuteCreateSCVMOutputNil(t *testing.T) {
+	t.Parallel()
+
+	argParser := NewArgumentParser()
+	vm := &mock.VMContainerMock{}
+	vmExecutor := &mock.VMExecutionHandlerStub{
+		RunSmartContractCreateCalled: func(input *vmcommon.ContractCreateInput) (*vmcommon.VMOutput, error) {
+			return nil, nil
+		},
+	}
+	vm.GetCalled = func(key []byte) (vmcommon.VMExecutionHandler, error) {
+		return vmExecutor, nil
+	}
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = make([]byte, sc.pubkeyConv.Len())
+	tx.Data = []byte("abba@0500@0000")
+	tx.Value = big.NewInt(45)
+	acntSrc, _ := createAccounts(tx)
+
+	errCode, err := sc.DeploySmartContract(tx, acntSrc)
+	// TODO: check why nil error here
+	require.Nil(t, err)
+	require.Equal(t, vmcommon.UserError, errCode)
+}
+
+func TestScProcessor_DeploySmartContractVmOutputReturnCodeNotOk(t *testing.T) {
+	t.Parallel()
+
+	argParser := NewArgumentParser()
+	vm := &mock.VMContainerMock{}
+	vmExecutor := &mock.VMExecutionHandlerStub{
+		RunSmartContractCreateCalled: func(input *vmcommon.ContractCreateInput) (*vmcommon.VMOutput, error) {
+			return &vmcommon.VMOutput{ReturnCode: vmcommon.CallStackOverFlow, ReturnMessage: "returnMessage"}, nil
+		},
+	}
+	vm.GetCalled = func(key []byte) (vmcommon.VMExecutionHandler, error) {
+		return vmExecutor, nil
+	}
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = make([]byte, sc.pubkeyConv.Len())
+	tx.Data = []byte("abba@0500@0000")
+	tx.Value = big.NewInt(45)
+	acntSrc, _ := createAccounts(tx)
+
+	errCode, err := sc.DeploySmartContract(tx, acntSrc)
+	require.Nil(t, err)
+	// TODO: check why userError here and not executionException? The run failed with callStackOverflow
+	require.Equal(t, vmcommon.UserError, errCode)
+}
+
+func TestScProcessor_DeploySmartContractUpdateDeveloperRewardsFails(t *testing.T) {
+	t.Parallel()
+
+	nrCalls := 0
+
+	vm := &mock.VMContainerMock{}
+	argParser := NewArgumentParser()
+	accntState := &mock.AccountsStub{}
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	arguments.AccountsDB = accntState
+	economicsFee := &mock.FeeHandlerStub{
+		DeveloperPercentageCalled: func() float64 {
+			return 0.0
+		},
+		ComputeTxFeeCalled: func(tx process.TransactionWithFeeHandler) *big.Int {
+			return core.SafeMul(tx.GetGasLimit(), tx.GetGasPrice())
+		},
+		ComputeFeeForProcessingCalled: func(tx process.TransactionWithFeeHandler, gasToUse uint64) *big.Int {
+			return core.SafeMul(tx.GetGasPrice(), gasToUse)
+		},
+		// second call is in rewards and will fail
+		ComputeGasLimitCalled: func(tx process.TransactionWithFeeHandler) uint64 {
+			if nrCalls == 0 {
+				nrCalls++
+				return 0
+			}
+			return 1000000
+		},
+	}
+	arguments.EconomicsFee = economicsFee
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = generateEmptyByteSlice(createMockPubkeyConverter().Len())
+	tx.Data = []byte("abba@0500@0000")
+	tx.Value = big.NewInt(0)
+	acntSrc, _ := createAccounts(tx)
+
+	accntState.LoadAccountCalled = func(address []byte) (handler state.AccountHandler, e error) {
+		return acntSrc, nil
+	}
+
+	errCode, err := sc.DeploySmartContract(tx, acntSrc)
+	require.NotNil(t, err)
+	require.Equal(t, core.ErrSubtractionOverflow, err)
+	require.Equal(t, vmcommon.Ok, errCode)
+}
+
+func TestScProcessor_DeploySmartContractVmOutputGasRemainingNotOk(t *testing.T) {
+	t.Parallel()
+
+	gasRemainingOnVmOutput := uint64(100)
+	gasLimit := uint64(50)
+
+	argParser := NewArgumentParser()
+	vm := &mock.VMContainerMock{}
+	vmExecutor := &mock.VMExecutionHandlerStub{
+		RunSmartContractCreateCalled: func(input *vmcommon.ContractCreateInput) (*vmcommon.VMOutput, error) {
+			return &vmcommon.VMOutput{
+				GasRemaining: gasRemainingOnVmOutput,
+				ReturnCode:   vmcommon.Ok}, nil
+		},
+	}
+	vm.GetCalled = func(key []byte) (vmcommon.VMExecutionHandler, error) {
+		return vmExecutor, nil
+	}
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = make([]byte, sc.pubkeyConv.Len())
+	tx.Data = []byte("abba@0500@0000")
+	tx.Value = big.NewInt(45)
+	tx.GasLimit = gasLimit
+	acntSrc, _ := createAccounts(tx)
+
+	errCode, err := sc.DeploySmartContract(tx, acntSrc)
+	require.Nil(t, err)
+	require.Equal(t, vmcommon.ExecutionFailed, errCode)
+}
+
+func TestScProcessor_DeploySmartContractVmOutputProcessDeleteAccountsFails(t *testing.T) {
+	t.Parallel()
+
+	argParser := NewArgumentParser()
+	vm := &mock.VMContainerMock{}
+	vmExecutor := &mock.VMExecutionHandlerStub{
+		RunSmartContractCreateCalled: func(input *vmcommon.ContractCreateInput) (*vmcommon.VMOutput, error) {
+			return &vmcommon.VMOutput{
+				DeletedAccounts: [][]byte{[]byte("deletedAccount")},
+				ReturnCode:      vmcommon.Ok,
+			}, nil
+		},
+	}
+	vm.GetCalled = func(key []byte) (vmcommon.VMExecutionHandler, error) {
+		return vmExecutor, nil
+	}
+	accountsDb := &mock.AccountsStub{
+		RevertToSnapshotCalled: func(snapshot int) error {
+			return nil
+		},
+		RemoveAccountCalled: func(address []byte) error {
+			return errors.New("remove failed")
+		},
+	}
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	arguments.AccountsDB = accountsDb
+
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = make([]byte, sc.pubkeyConv.Len())
+	tx.Data = []byte("abba@0500@0000")
+	tx.Value = big.NewInt(0)
+	acntSrc, _ := createAccounts(tx)
+
+	accountsDb.LoadAccountCalled = func(address []byte) (state.AccountHandler, error) {
+		return acntSrc, nil
+	}
+
+	errCode, err := sc.DeploySmartContract(tx, acntSrc)
+	require.Nil(t, err)
+	require.Equal(t, vmcommon.ExecutionFailed, errCode)
+}
+
+func TestScProcessor_DeploySmartContractReloadAccountFails(t *testing.T) {
+	t.Parallel()
+
+	calledNr := 0
+
+	vm := &mock.VMContainerMock{}
+	argParser := NewArgumentParser()
+	accntState := &mock.AccountsStub{}
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	arguments.AccountsDB = accntState
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = generateEmptyByteSlice(createMockPubkeyConverter().Len())
+	tx.Data = []byte("abba@0500@0000")
+	tx.Value = big.NewInt(0)
+	acntSrc, _ := createAccounts(tx)
+
+	accntState.LoadAccountCalled = func(address []byte) (handler state.AccountHandler, e error) {
+		if calledNr == 0 {
+			calledNr++
+			return acntSrc, nil
+		}
+		return nil, process.ErrWrongTypeAssertion
+	}
+
+	errCode, err := sc.DeploySmartContract(tx, acntSrc)
+
+	require.Equal(t, process.ErrWrongTypeAssertion, err)
+	require.Equal(t, vmcommon.Ok, errCode)
+}
+
+func TestScProcessor_DeploySmartContractAddIntermediateTxFails(t *testing.T) {
+	t.Parallel()
+
+	expectedError := errors.New("expected error")
+
+	argParser := NewArgumentParser()
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.ArgsParser = argParser
+	arguments.ScrForwarder = &mock.IntermediateTransactionHandlerMock{
+		AddIntermediateTransactionsCalled: func(txs []data.TransactionHandler) error {
+			return expectedError
+		},
+	}
+	accntState := &mock.AccountsStub{}
+	arguments.AccountsDB = accntState
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = generateEmptyByteSlice(createMockPubkeyConverter().Len())
+	tx.Data = []byte("abba@0500@0000")
+	tx.Value = big.NewInt(0)
+	acntSrc, _ := createAccounts(tx)
+
+	accntState.LoadAccountCalled = func(address []byte) (handler state.AccountHandler, e error) {
+		return acntSrc, nil
+	}
+
+	returnCode, err := sc.DeploySmartContract(tx, acntSrc)
+	// TODO: check OK?
+	require.Equal(t, vmcommon.Ok, returnCode)
+	require.Equal(t, expectedError, err)
+}
+
+func TestScProcessor_DeploySmartContractComputeRewardsFails(t *testing.T) {
+	t.Parallel()
+
+	expectedError := errors.New("expected error")
+
+	argParser := NewArgumentParser()
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.ArgsParser = argParser
+	arguments.ScrForwarder = &mock.IntermediateTransactionHandlerMock{
+		AddIntermediateTransactionsCalled: func(txs []data.TransactionHandler) error {
+			return expectedError
+		},
+	}
+	accntState := &mock.AccountsStub{}
+	arguments.AccountsDB = accntState
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = generateEmptyByteSlice(createMockPubkeyConverter().Len())
+	tx.Data = []byte("abba@0500@0000")
+	tx.Value = big.NewInt(0)
+	acntSrc, _ := createAccounts(tx)
+
+	accntState.LoadAccountCalled = func(address []byte) (handler state.AccountHandler, e error) {
+		return acntSrc, nil
+	}
+
+	returnCode, err := sc.DeploySmartContract(tx, acntSrc)
+	// TODO: check OK?
+	require.Equal(t, vmcommon.Ok, returnCode)
+	require.Equal(t, expectedError, err)
 }
 
 func TestScProcessor_DeploySmartContract(t *testing.T) {
 	t.Parallel()
 
-	addrConverter := &mock.AddressConverterMock{}
 	vm := &mock.VMContainerMock{}
-	argParser := &mock.ArgumentParserMock{}
+	argParser := NewArgumentParser()
 	accntState := &mock.AccountsStub{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accntState,
-		&mock.TemporaryAccountsHandlerMock{},
-		addrConverter,
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	arguments.AccountsDB = accntState
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{}
 	tx.Nonce = 0
 	tx.SndAddr = []byte("SRC")
-	tx.RcvAddr = generateEmptyByteSlice(addrConverter.AddressLen())
-	tx.Data = "data"
+	tx.RcvAddr = generateEmptyByteSlice(createMockPubkeyConverter().Len())
+	tx.Data = []byte("abba@0500@0000")
 	tx.Value = big.NewInt(0)
 	acntSrc, _ := createAccounts(tx)
 
-	accntState.GetAccountWithJournalCalled = func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
+	accntState.LoadAccountCalled = func(address []byte) (handler state.AccountHandler, e error) {
 		return acntSrc, nil
 	}
 
-	vmArg := []byte("00")
-	argParser.GetArgumentsCalled = func() ([]*big.Int, error) {
-		args := make([]*big.Int, 0)
-		args = append(args, big.NewInt(0).SetBytes(vmArg))
-		return args, nil
-	}
-
-	err = sc.DeploySmartContract(tx, acntSrc, 10)
-	assert.Equal(t, nil, err)
+	_, err = sc.DeploySmartContract(tx, acntSrc)
+	tsp := NewTestScProcessor(sc)
+	require.Nil(t, err)
+	require.Nil(t, tsp.GetLatestTestError())
 }
 
 func TestScProcessor_ExecuteSmartContractTransactionNilTx(t *testing.T) {
@@ -598,31 +1414,23 @@ func TestScProcessor_ExecuteSmartContractTransactionNilTx(t *testing.T) {
 
 	vm := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{}
 	tx.Nonce = 0
 	tx.SndAddr = []byte("SRC")
 	tx.RcvAddr = []byte("DST")
-	tx.Data = "data"
+	tx.Data = []byte("data")
 	tx.Value = big.NewInt(45)
 	acntSrc, acntDst := createAccounts(tx)
 
-	err = sc.ExecuteSmartContractTransaction(nil, acntSrc, acntDst, 10)
-	assert.Equal(t, process.ErrNilTransaction, err)
+	_, err = sc.ExecuteSmartContractTransaction(nil, acntSrc, acntDst)
+	require.Equal(t, process.ErrNilTransaction, err)
 }
 
 func TestScProcessor_ExecuteSmartContractTransactionNilAccount(t *testing.T) {
@@ -630,39 +1438,32 @@ func TestScProcessor_ExecuteSmartContractTransactionNilAccount(t *testing.T) {
 
 	vm := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{}
 	tx.Nonce = 0
 	tx.SndAddr = []byte("SRC")
 	tx.RcvAddr = []byte("DST")
-	tx.Data = "data"
+	tx.Data = []byte("data")
 	tx.Value = big.NewInt(45)
+	acntSrc, _ := createAccounts(tx)
+
+	_, err = sc.ExecuteSmartContractTransaction(tx, acntSrc, nil)
+	require.Equal(t, process.ErrNilSCDestAccount, err)
+
 	acntSrc, acntDst := createAccounts(tx)
+	_, err = sc.ExecuteSmartContractTransaction(tx, acntSrc, acntDst)
+	require.Nil(t, err)
 
-	err = sc.ExecuteSmartContractTransaction(tx, acntSrc, nil, 10)
-	assert.Equal(t, process.ErrNilSCDestAccount, err)
-
-	acntDst.SetCode(nil)
-	err = sc.ExecuteSmartContractTransaction(tx, acntSrc, acntDst, 10)
-	assert.Equal(t, process.ErrNilSCDestAccount, err)
-
+	acntSrc, _ = createAccounts(tx)
 	acntDst = nil
-	err = sc.ExecuteSmartContractTransaction(tx, acntSrc, acntDst, 10)
-	assert.Equal(t, process.ErrNilSCDestAccount, err)
+	_, err = sc.ExecuteSmartContractTransaction(tx, acntSrc, acntDst)
+	require.Equal(t, process.ErrNilSCDestAccount, err)
 }
 
 func TestScProcessor_ExecuteSmartContractTransactionBadParser(t *testing.T) {
@@ -670,36 +1471,31 @@ func TestScProcessor_ExecuteSmartContractTransactionBadParser(t *testing.T) {
 
 	vm := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{}
 	tx.Nonce = 0
 	tx.SndAddr = []byte("SRC")
 	tx.RcvAddr = []byte("DST")
-	tx.Data = "data"
+	tx.Data = []byte("data")
 	tx.Value = big.NewInt(45)
 	acntSrc, acntDst := createAccounts(tx)
 
 	acntDst.SetCode([]byte("code"))
 	tmpError := errors.New("error")
-	argParser.ParseDataCalled = func(data string) error {
-		return tmpError
+	called := false
+	argParser.ParseCallDataCalled = func(data string) (string, [][]byte, error) {
+		called = true
+		return "", nil, tmpError
 	}
-	err = sc.ExecuteSmartContractTransaction(tx, acntSrc, acntDst, 10)
-	assert.Equal(t, tmpError, err)
+	_, err = sc.ExecuteSmartContractTransaction(tx, acntSrc, acntDst)
+	require.True(t, called)
+	require.Nil(t, err)
 }
 
 func TestScProcessor_ExecuteSmartContractTransactionVMRunError(t *testing.T) {
@@ -707,41 +1503,132 @@ func TestScProcessor_ExecuteSmartContractTransactionVMRunError(t *testing.T) {
 
 	vmContainer := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vmContainer,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vmContainer
+	arguments.ArgsParser = argParser
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{}
 	tx.Nonce = 0
 	tx.SndAddr = []byte("SRC")
 	tx.RcvAddr = []byte("DST0000000")
-	tx.Data = "data"
+	tx.Data = []byte("data")
 	tx.Value = big.NewInt(45)
 	acntSrc, acntDst := createAccounts(tx)
 
 	acntDst.SetCode([]byte("code"))
 	tmpError := errors.New("error")
 	vm := &mock.VMExecutionHandlerStub{}
+	called := false
 	vm.RunSmartContractCallCalled = func(input *vmcommon.ContractCallInput) (output *vmcommon.VMOutput, e error) {
+		called = true
 		return nil, tmpError
 	}
 	vmContainer.GetCalled = func(key []byte) (handler vmcommon.VMExecutionHandler, e error) {
 		return vm, nil
 	}
 
-	err = sc.ExecuteSmartContractTransaction(tx, acntSrc, acntDst, 10)
-	assert.Equal(t, tmpError, err)
+	_, err = sc.ExecuteSmartContractTransaction(tx, acntSrc, acntDst)
+	require.True(t, called)
+	require.Nil(t, err)
+}
+
+func TestScProcessor_ExecuteSmartContractTransactionGasConsumedChecksError(t *testing.T) {
+	t.Parallel()
+
+	gasRemainingOnVmOutput := uint64(100)
+
+	argParser := NewArgumentParser()
+	vm := &mock.VMContainerMock{}
+	vmExecutor := &mock.VMExecutionHandlerStub{
+		RunSmartContractCallCalled: func(input *vmcommon.ContractCallInput) (*vmcommon.VMOutput, error) {
+			return &vmcommon.VMOutput{
+				GasRemaining: gasRemainingOnVmOutput,
+				ReturnCode:   vmcommon.Ok}, nil
+		},
+	}
+	vm.GetCalled = func(key []byte) (vmcommon.VMExecutionHandler, error) {
+		return vmExecutor, nil
+	}
+	accntState := &mock.AccountsStub{}
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	arguments.AccountsDB = accntState
+
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = []byte("DST0000000")
+	tx.Data = []byte("data")
+	tx.Value = big.NewInt(0)
+	acntSrc, acntDst := createAccounts(tx)
+
+	accntState.LoadAccountCalled = func(address []byte) (handler state.AccountHandler, e error) {
+		return acntSrc, nil
+	}
+	accntState.RevertToSnapshotCalled = func(snapshot int) error {
+		return nil
+	}
+
+	acntDst.SetCode([]byte("code"))
+	errCode, err := sc.ExecuteSmartContractTransaction(tx, acntSrc, acntDst)
+	require.Nil(t, err)
+	require.Equal(t, vmcommon.ExecutionFailed, errCode)
+}
+
+func TestScProcessor_ExecuteSmartContractTransactionVmOutputError(t *testing.T) {
+	t.Parallel()
+
+	expectedError := errors.New("expected error")
+
+	argParser := NewArgumentParser()
+	vm := &mock.VMContainerMock{}
+	vmExecutor := &mock.VMExecutionHandlerStub{
+		RunSmartContractCallCalled: func(input *vmcommon.ContractCallInput) (*vmcommon.VMOutput, error) {
+			return &vmcommon.VMOutput{
+				GasRemaining:    0,
+				DeletedAccounts: [][]byte{[]byte("DEL")},
+				ReturnCode:      vmcommon.Ok}, nil
+		},
+	}
+	vm.GetCalled = func(key []byte) (vmcommon.VMExecutionHandler, error) {
+		return vmExecutor, nil
+	}
+	accntState := &mock.AccountsStub{}
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	arguments.AccountsDB = accntState
+
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = []byte("DST0000000")
+	tx.Data = []byte("data")
+	tx.Value = big.NewInt(0)
+	acntSrc, acntDst := createAccounts(tx)
+
+	accntState.LoadAccountCalled = func(address []byte) (handler state.AccountHandler, e error) {
+		return acntSrc, nil
+	}
+	accntState.RevertToSnapshotCalled = func(snapshot int) error {
+		return nil
+	}
+	accntState.RemoveAccountCalled = func(address []byte) error {
+		return expectedError
+	}
+
+	acntDst.SetCode([]byte("code"))
+	errCode, err := sc.ExecuteSmartContractTransaction(tx, acntSrc, acntDst)
+	require.Nil(t, err)
+	require.Equal(t, vmcommon.ExecutionFailed, errCode)
 }
 
 func TestScProcessor_ExecuteSmartContractTransaction(t *testing.T) {
@@ -750,36 +1637,68 @@ func TestScProcessor_ExecuteSmartContractTransaction(t *testing.T) {
 	vm := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
 	accntState := &mock.AccountsStub{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accntState,
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	arguments.AccountsDB = accntState
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{}
 	tx.Nonce = 0
 	tx.SndAddr = []byte("SRC")
 	tx.RcvAddr = []byte("DST0000000")
-	tx.Data = "data"
+	tx.Data = []byte("data")
 	tx.Value = big.NewInt(0)
 	acntSrc, acntDst := createAccounts(tx)
 
-	accntState.GetAccountWithJournalCalled = func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
+	accntState.LoadAccountCalled = func(address []byte) (handler state.AccountHandler, e error) {
 		return acntSrc, nil
 	}
 
 	acntDst.SetCode([]byte("code"))
-	err = sc.ExecuteSmartContractTransaction(tx, acntSrc, acntDst, 10)
-	assert.Nil(t, err)
+	_, err = sc.ExecuteSmartContractTransaction(tx, acntSrc, acntDst)
+	require.Nil(t, err)
+}
+
+func TestScProcessor_ExecuteSmartContractTransactionSaveLogCalled(t *testing.T) {
+	t.Parallel()
+
+	slCalled := false
+
+	vm := &mock.VMContainerMock{}
+	argParser := &mock.ArgumentParserMock{}
+	accntState := &mock.AccountsStub{}
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	arguments.AccountsDB = accntState
+	arguments.TxLogsProcessor = &mock.TxLogsProcessorStub{
+		SaveLogCalled: func(txHash []byte, tx data.TransactionHandler, vmLogs []*vmcommon.LogEntry) error {
+			slCalled = true
+			return nil
+		},
+	}
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = []byte("DST0000000")
+	tx.Data = []byte("data")
+	tx.Value = big.NewInt(0)
+	acntSrc, acntDst := createAccounts(tx)
+
+	accntState.LoadAccountCalled = func(address []byte) (handler state.AccountHandler, e error) {
+		return acntSrc, nil
+	}
+
+	acntDst.SetCode([]byte("code"))
+	_, _ = sc.ExecuteSmartContractTransaction(tx, acntSrc, acntDst)
+	require.True(t, slCalled)
 }
 
 func TestScProcessor_CreateVMCallInputWrongCode(t *testing.T) {
@@ -787,35 +1706,27 @@ func TestScProcessor_CreateVMCallInputWrongCode(t *testing.T) {
 
 	vm := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{}
 	tx.Nonce = 0
 	tx.SndAddr = []byte("SRC")
 	tx.RcvAddr = []byte("DST")
-	tx.Data = "data"
+	tx.Data = []byte("data")
 	tx.Value = big.NewInt(45)
 
 	tmpError := errors.New("error")
-	argParser.GetFunctionCalled = func() (s string, e error) {
-		return "", tmpError
+	argParser.ParseCallDataCalled = func(data string) (string, [][]byte, error) {
+		return "", nil, tmpError
 	}
-	vmInput, err := sc.CreateVMCallInput(tx)
-	assert.Nil(t, vmInput)
-	assert.Equal(t, tmpError, err)
+	input, err := sc.createVMCallInput(tx, []byte{}, false)
+	require.Nil(t, input)
+	require.Equal(t, tmpError, err)
 }
 
 func TestScProcessor_CreateVMCallInput(t *testing.T) {
@@ -823,75 +1734,50 @@ func TestScProcessor_CreateVMCallInput(t *testing.T) {
 
 	vm := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{}
 	tx.Nonce = 0
 	tx.SndAddr = []byte("SRC")
 	tx.RcvAddr = []byte("DST")
-	tx.Data = "data"
+	tx.Data = []byte("data")
 	tx.Value = big.NewInt(45)
 
-	vmInput, err := sc.CreateVMCallInput(tx)
-	assert.NotNil(t, vmInput)
-	assert.Nil(t, err)
+	input, err := sc.createVMCallInput(tx, []byte{}, false)
+	require.NotNil(t, input)
+	require.Nil(t, err)
 }
 
-func TestScProcessor_CreateVMDeployInputBadFunction(t *testing.T) {
+func TestScProcessor_CreateVMDeployBadCode(t *testing.T) {
 	t.Parallel()
 
 	vm := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{}
-	tx.Nonce = 0
-	tx.SndAddr = []byte("SRC")
-	tx.RcvAddr = []byte("DST")
-	tx.Data = "data"
-	tx.Value = big.NewInt(45)
+	tx.Data = nil
+	tx.Value = big.NewInt(0)
 
-	tmpError := errors.New("error")
-	argParser.GetCodeCalled = func() (code []byte, e error) {
-		return nil, tmpError
-	}
-	vmArg := []byte("00")
-	argParser.GetArgumentsCalled = func() ([]*big.Int, error) {
-		args := make([]*big.Int, 0)
-		args = append(args, big.NewInt(0).SetBytes(vmArg))
-		return args, nil
+	badCodeError := errors.New("fooError")
+	argParser.ParseDeployDataCalled = func(data string) (*parsers.DeployArgs, error) {
+		return nil, badCodeError
 	}
 
-	vmInput, vmType, err := sc.CreateVMDeployInput(tx)
-	assert.Nil(t, vmInput)
-	assert.Equal(t, tmpError, err)
-	assert.Nil(t, vmType)
+	input, vmType, err := sc.createVMDeployInput(tx)
+	require.Nil(t, vmType)
+	require.Nil(t, input)
+	require.Equal(t, badCodeError, err)
 }
 
 func TestScProcessor_CreateVMDeployInput(t *testing.T) {
@@ -899,206 +1785,159 @@ func TestScProcessor_CreateVMDeployInput(t *testing.T) {
 
 	vm := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{}
 	tx.Nonce = 0
 	tx.SndAddr = []byte("SRC")
 	tx.RcvAddr = []byte("DST")
-	tx.Data = "data@0000"
+	tx.Data = []byte("foobar")
 	tx.Value = big.NewInt(45)
 
-	vmArg := []byte("00")
-	argParser.GetArgumentsCalled = func() ([]*big.Int, error) {
-		args := make([]*big.Int, 0)
-		args = append(args, big.NewInt(0).SetBytes(vmArg))
-		return args, nil
+	expectedVMType := []byte{5, 6}
+	expectedCodeMetadata := vmcommon.CodeMetadata{Upgradeable: true}
+	argParser.ParseDeployDataCalled = func(data string) (*parsers.DeployArgs, error) {
+		return &parsers.DeployArgs{
+			Code:         []byte("code"),
+			VMType:       expectedVMType,
+			CodeMetadata: expectedCodeMetadata,
+			Arguments:    nil,
+		}, nil
 	}
 
-	vmInput, vmType, err := sc.CreateVMDeployInput(tx)
-	assert.NotNil(t, vmInput)
-	assert.True(t, bytes.Equal(vmArg, vmType))
-	assert.Nil(t, err)
+	input, vmType, err := sc.createVMDeployInput(tx)
+	require.NotNil(t, input)
+	require.Nil(t, err)
+	require.Equal(t, vmcommon.DirectCall, input.CallType)
+	require.True(t, bytes.Equal(expectedVMType, vmType))
+	require.Equal(t, expectedCodeMetadata.ToBytes(), input.ContractCodeMetadata)
+	require.Nil(t, err)
 }
 
 func TestScProcessor_CreateVMDeployInputNotEnoughArguments(t *testing.T) {
 	t.Parallel()
 
 	vm := &mock.VMContainerMock{}
-	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	argParser := NewArgumentParser()
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{}
 	tx.Nonce = 0
 	tx.SndAddr = []byte("SRC")
 	tx.RcvAddr = []byte("DST")
-	tx.Data = "data@0000"
+	tx.Data = []byte("data@0000")
 	tx.Value = big.NewInt(45)
 
-	vmInput, vmType, err := sc.CreateVMDeployInput(tx)
-	assert.Nil(t, vmInput)
-	assert.Nil(t, vmType)
-	assert.Equal(t, process.ErrNotEnoughArgumentsToDeploy, err)
+	input, vmType, err := sc.createVMDeployInput(tx)
+	require.Nil(t, input)
+	require.Nil(t, vmType)
+	require.Equal(t, parsers.ErrInvalidDeployArguments, err)
 }
 
-func TestScProcessor_CreateVMInputWrongArgument(t *testing.T) {
+func TestScProcessor_CreateVMDeployInputWrongArgument(t *testing.T) {
 	t.Parallel()
 
 	vm := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{}
 	tx.Nonce = 0
 	tx.SndAddr = []byte("SRC")
 	tx.RcvAddr = []byte("DST")
-	tx.Data = "data"
+	tx.Data = []byte("data")
 	tx.Value = big.NewInt(45)
 
-	tmpError := errors.New("error")
-	argParser.GetArgumentsCalled = func() (ints []*big.Int, e error) {
+	tmpError := errors.New("fooError")
+	argParser.ParseDeployDataCalled = func(data string) (*parsers.DeployArgs, error) {
 		return nil, tmpError
 	}
-	vmInput, err := sc.CreateVMInput(tx)
-	assert.Nil(t, vmInput)
-	assert.Equal(t, tmpError, err)
+	input, vmType, err := sc.createVMDeployInput(tx)
+	require.Nil(t, input)
+	require.Nil(t, vmType)
+	require.Equal(t, tmpError, err)
 }
 
-func TestScProcessor_CreateVMInput(t *testing.T) {
+func TestScProcessor_InitializeVMInputFromTx_ShouldErrNotEnoughGas(t *testing.T) {
 	t.Parallel()
 
 	vm := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	arguments.EconomicsFee = &mock.FeeHandlerStub{
+		ComputeGasLimitCalled: func(tx process.TransactionWithFeeHandler) uint64 {
+			return 1000
+		},
+	}
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{}
 	tx.Nonce = 0
 	tx.SndAddr = []byte("SRC")
 	tx.RcvAddr = []byte("DST")
-	tx.Data = "data"
+	tx.Data = []byte("data")
 	tx.Value = big.NewInt(45)
+	tx.GasLimit = 100
 
-	vmInput, err := sc.CreateVMInput(tx)
-	assert.NotNil(t, vmInput)
-	assert.Equal(t, nil, err)
+	vmInput := &vmcommon.VMInput{}
+	err = sc.initializeVMInputFromTx(vmInput, tx)
+	require.Equal(t, process.ErrNotEnoughGas, err)
 }
 
-func createAccountsAndTransaction() (*state.Account, *state.Account, *transaction.Transaction) {
+func TestScProcessor_InitializeVMInputFromTx(t *testing.T) {
+	t.Parallel()
+
+	vm := &mock.VMContainerMock{}
+	argParser := &mock.ArgumentParserMock{}
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
+
 	tx := &transaction.Transaction{}
 	tx.Nonce = 0
 	tx.SndAddr = []byte("SRC")
 	tx.RcvAddr = []byte("DST")
-	tx.Data = "data"
+	tx.Data = []byte("data")
+	tx.Value = big.NewInt(45)
+
+	vmInput := &vmcommon.VMInput{}
+	err = sc.initializeVMInputFromTx(vmInput, tx)
+	require.Nil(t, err)
+}
+
+func createAccountsAndTransaction() (state.UserAccountHandler, state.UserAccountHandler, *transaction.Transaction) {
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = []byte("DST")
+	tx.Data = []byte("data")
 	tx.Value = big.NewInt(45)
 
 	acntSrc, acntDst := createAccounts(tx)
 
-	return acntSrc.(*state.Account), acntDst.(*state.Account), tx
-}
-
-func TestScProcessor_processVMOutputNilVMOutput(t *testing.T) {
-	t.Parallel()
-
-	vm := &mock.VMContainerMock{}
-	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
-
-	acntSrc, _, tx := createAccountsAndTransaction()
-
-	_, _, err = sc.processVMOutput(nil, tx, acntSrc, 10)
-	assert.Equal(t, process.ErrNilVMOutput, err)
-}
-
-func TestScProcessor_processVMOutputNilTx(t *testing.T) {
-	t.Parallel()
-
-	vm := &mock.VMContainerMock{}
-	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
-
-	acntSrc, _, _ := createAccountsAndTransaction()
-
-	vmOutput := &vmcommon.VMOutput{}
-	_, _, err = sc.processVMOutput(vmOutput, nil, acntSrc, 10)
-	assert.Equal(t, process.ErrNilTransaction, err)
+	return acntSrc.(state.UserAccountHandler), acntDst.(state.UserAccountHandler), tx
 }
 
 func TestScProcessor_processVMOutputNilSndAcc(t *testing.T) {
@@ -1106,29 +1945,25 @@ func TestScProcessor_processVMOutputNilSndAcc(t *testing.T) {
 
 	vm := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	arguments.ShardCoordinator = &mock.CoordinatorStub{ComputeIdCalled: func(address []byte) uint32 {
+		return 5
+	}}
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{Value: big.NewInt(0)}
 
 	vmOutput := &vmcommon.VMOutput{
 		GasRefund:    big.NewInt(0),
-		GasRemaining: big.NewInt(0),
+		GasRemaining: 0,
 	}
-	_, _, err = sc.processVMOutput(vmOutput, tx, nil, 10)
-	assert.Nil(t, err)
+	txHash, _ := core.CalculateHash(arguments.Marshalizer, arguments.Hasher, tx)
+	_, err = sc.processVMOutput(vmOutput, txHash, tx, vmcommon.DirectCall, 0)
+	require.Nil(t, err)
 }
 
 func TestScProcessor_processVMOutputNilDstAcc(t *testing.T) {
@@ -1137,386 +1972,277 @@ func TestScProcessor_processVMOutputNilDstAcc(t *testing.T) {
 	vm := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
 	accntState := &mock.AccountsStub{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accntState,
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	arguments.AccountsDB = accntState
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	acntSnd, _, tx := createAccountsAndTransaction()
 
 	vmOutput := &vmcommon.VMOutput{
 		GasRefund:    big.NewInt(0),
-		GasRemaining: big.NewInt(0),
+		GasRemaining: 0,
 	}
 
-	accntState.GetAccountWithJournalCalled = func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
+	accntState.LoadAccountCalled = func(address []byte) (handler state.AccountHandler, e error) {
 		return acntSnd, nil
 	}
 
 	tx.Value = big.NewInt(0)
-	_, _, err = sc.processVMOutput(vmOutput, tx, acntSnd, 10)
-	assert.Nil(t, err)
+	txHash, _ := core.CalculateHash(arguments.Marshalizer, arguments.Hasher, tx)
+	_, err = sc.processVMOutput(vmOutput, txHash, tx, vmcommon.DirectCall, 0)
+	require.Nil(t, err)
 }
 
 func TestScProcessor_GetAccountFromAddressAccNotFound(t *testing.T) {
 	t.Parallel()
 
 	accountsDB := &mock.AccountsStub{}
-	accountsDB.GetAccountWithJournalCalled = func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
+	accountsDB.LoadAccountCalled = func(address []byte) (handler state.AccountHandler, e error) {
 		return nil, state.ErrAccNotFound
 	}
 
-	addrConv := &mock.AddressConverterMock{}
 	shardCoordinator := mock.NewMultiShardsCoordinatorMock(2)
-	shardCoordinator.ComputeIdCalled = func(address state.AddressContainer) uint32 {
+	shardCoordinator.ComputeIdCalled = func(address []byte) uint32 {
 		return shardCoordinator.SelfId()
 	}
 
 	vm := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accountsDB,
-		&mock.TemporaryAccountsHandlerMock{},
-		addrConv,
-		shardCoordinator,
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
-	acc, err := sc.GetAccountFromAddress([]byte("SRC"))
-	assert.Nil(t, acc)
-	assert.Equal(t, state.ErrAccNotFound, err)
-}
-
-func TestScProcessor_GetAccountFromAddrFaildAddressConv(t *testing.T) {
-	t.Parallel()
-
-	addrConv := &mock.AddressConverterMock{}
-	addrConv.Fail = true
-
-	accountsDB := &mock.AccountsStub{}
-	getCalled := 0
-	accountsDB.GetAccountWithJournalCalled = func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
-		getCalled++
-		return nil, state.ErrAccNotFound
-	}
-
-	shardCoordinator := mock.NewMultiShardsCoordinatorMock(2)
-	shardCoordinator.ComputeIdCalled = func(address state.AddressContainer) uint32 {
-		return shardCoordinator.SelfId()
-	}
-
-	vm := &mock.VMContainerMock{}
-	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accountsDB,
-		&mock.TemporaryAccountsHandlerMock{},
-		addrConv,
-		shardCoordinator,
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
-
-	acc, err := sc.GetAccountFromAddress([]byte("DST"))
-	assert.Nil(t, acc)
-	assert.NotNil(t, err)
-	assert.Equal(t, 0, getCalled)
+	acc, err := sc.getAccountFromAddress([]byte("SRC"))
+	require.Nil(t, acc)
+	require.Equal(t, state.ErrAccNotFound, err)
 }
 
 func TestScProcessor_GetAccountFromAddrFailedGetExistingAccount(t *testing.T) {
 	t.Parallel()
 
-	addrConv := &mock.AddressConverterMock{}
-
 	accountsDB := &mock.AccountsStub{}
 	getCalled := 0
-	accountsDB.GetAccountWithJournalCalled = func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
+	accountsDB.LoadAccountCalled = func(address []byte) (handler state.AccountHandler, e error) {
 		getCalled++
 		return nil, state.ErrAccNotFound
 	}
 
 	shardCoordinator := mock.NewMultiShardsCoordinatorMock(2)
-	shardCoordinator.ComputeIdCalled = func(address state.AddressContainer) uint32 {
+	shardCoordinator.ComputeIdCalled = func(address []byte) uint32 {
 		return shardCoordinator.SelfId()
 	}
 
 	vm := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accountsDB,
-		&mock.TemporaryAccountsHandlerMock{},
-		addrConv,
-		shardCoordinator,
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
-	acc, err := sc.GetAccountFromAddress([]byte("DST"))
-	assert.Nil(t, acc)
-	assert.Equal(t, state.ErrAccNotFound, err)
-	assert.Equal(t, 1, getCalled)
+	acc, err := sc.getAccountFromAddress([]byte("DST"))
+	require.Nil(t, acc)
+	require.Equal(t, state.ErrAccNotFound, err)
+	require.Equal(t, 1, getCalled)
 }
 
 func TestScProcessor_GetAccountFromAddrAccNotInShard(t *testing.T) {
 	t.Parallel()
 
-	addrConv := &mock.AddressConverterMock{}
-
 	accountsDB := &mock.AccountsStub{}
 	getCalled := 0
-	accountsDB.GetAccountWithJournalCalled = func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
+	accountsDB.LoadAccountCalled = func(address []byte) (handler state.AccountHandler, e error) {
 		getCalled++
 		return nil, state.ErrAccNotFound
 	}
 
 	shardCoordinator := mock.NewMultiShardsCoordinatorMock(2)
-	shardCoordinator.ComputeIdCalled = func(address state.AddressContainer) uint32 {
+	shardCoordinator.ComputeIdCalled = func(address []byte) uint32 {
 		return shardCoordinator.SelfId() + 1
 	}
 
 	vm := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accountsDB,
-		&mock.TemporaryAccountsHandlerMock{},
-		addrConv,
-		shardCoordinator,
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
-	acc, err := sc.GetAccountFromAddress([]byte("DST"))
-	assert.Nil(t, acc)
-	assert.Nil(t, err)
-	assert.Equal(t, 0, getCalled)
+	acc, err := sc.getAccountFromAddress([]byte("DST"))
+	require.Nil(t, acc)
+	require.Nil(t, err)
+	require.Equal(t, 0, getCalled)
 }
 
 func TestScProcessor_GetAccountFromAddr(t *testing.T) {
 	t.Parallel()
 
-	addrConv := &mock.AddressConverterMock{}
-
 	accountsDB := &mock.AccountsStub{}
 	getCalled := 0
-	accountsDB.GetAccountWithJournalCalled = func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
+	accountsDB.LoadAccountCalled = func(address []byte) (handler state.AccountHandler, e error) {
 		getCalled++
-		acc, _ := state.NewAccount(addressContainer, &mock.AccountTrackerStub{})
+		acc, _ := state.NewUserAccount(address)
 		return acc, nil
 	}
 
 	shardCoordinator := mock.NewMultiShardsCoordinatorMock(2)
-	shardCoordinator.ComputeIdCalled = func(address state.AddressContainer) uint32 {
+	shardCoordinator.ComputeIdCalled = func(address []byte) uint32 {
 		return shardCoordinator.SelfId()
 	}
 
 	vm := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accountsDB,
-		&mock.TemporaryAccountsHandlerMock{},
-		addrConv,
-		shardCoordinator,
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
-	acc, err := sc.GetAccountFromAddress([]byte("DST"))
-	assert.NotNil(t, acc)
-	assert.Nil(t, err)
-	assert.Equal(t, 1, getCalled)
+	acc, err := sc.getAccountFromAddress([]byte("DST"))
+	require.NotNil(t, acc)
+	require.Nil(t, err)
+	require.Equal(t, 1, getCalled)
 }
 
 func TestScProcessor_DeleteAccountsFailedAtRemove(t *testing.T) {
 	t.Parallel()
-	addrConv := &mock.AddressConverterMock{}
 
 	accountsDB := &mock.AccountsStub{}
 	removeCalled := 0
-	accountsDB.GetAccountWithJournalCalled = func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
+	accountsDB.LoadAccountCalled = func(address []byte) (handler state.AccountHandler, e error) {
 		return nil, state.ErrAccNotFound
 	}
-	accountsDB.RemoveAccountCalled = func(addressContainer state.AddressContainer) error {
+	accountsDB.RemoveAccountCalled = func(address []byte) error {
 		removeCalled++
 		return state.ErrAccNotFound
 	}
 
 	shardCoordinator := mock.NewMultiShardsCoordinatorMock(2)
-	shardCoordinator.ComputeIdCalled = func(address state.AddressContainer) uint32 {
+	shardCoordinator.ComputeIdCalled = func(address []byte) uint32 {
 		return shardCoordinator.SelfId()
 	}
 
 	vm := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accountsDB,
-		&mock.TemporaryAccountsHandlerMock{},
-		addrConv,
-		shardCoordinator,
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	deletedAccounts := make([][]byte, 0)
 	deletedAccounts = append(deletedAccounts, []byte("acc1"), []byte("acc2"), []byte("acc3"))
-	err = sc.DeleteAccounts(deletedAccounts)
-	assert.Equal(t, state.ErrAccNotFound, err)
-	assert.Equal(t, 0, removeCalled)
+	err = sc.deleteAccounts(deletedAccounts)
+	require.Equal(t, state.ErrAccNotFound, err)
+	require.Equal(t, 0, removeCalled)
 }
 
 func TestScProcessor_DeleteAccountsNotInShard(t *testing.T) {
 	t.Parallel()
-	addrConv := &mock.AddressConverterMock{}
 
 	accountsDB := &mock.AccountsStub{}
 	removeCalled := 0
-	accountsDB.RemoveAccountCalled = func(addressContainer state.AddressContainer) error {
+	accountsDB.RemoveAccountCalled = func(address []byte) error {
 		removeCalled++
 		return state.ErrAccNotFound
 	}
 
 	shardCoordinator := mock.NewMultiShardsCoordinatorMock(2)
 	computeIdCalled := 0
-	shardCoordinator.ComputeIdCalled = func(address state.AddressContainer) uint32 {
+	shardCoordinator.ComputeIdCalled = func(address []byte) uint32 {
 		computeIdCalled++
 		return shardCoordinator.SelfId() + 1
 	}
 
 	vm := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accountsDB,
-		&mock.TemporaryAccountsHandlerMock{},
-		addrConv,
-		shardCoordinator,
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	deletedAccounts := make([][]byte, 0)
 	deletedAccounts = append(deletedAccounts, []byte("acc1"), []byte("acc2"), []byte("acc3"))
-	err = sc.DeleteAccounts(deletedAccounts)
-	assert.Nil(t, err)
-	assert.Equal(t, 0, removeCalled)
-	assert.Equal(t, len(deletedAccounts), computeIdCalled)
+	err = sc.deleteAccounts(deletedAccounts)
+	require.Nil(t, err)
+	require.Equal(t, 0, removeCalled)
+	require.Equal(t, len(deletedAccounts), computeIdCalled)
 }
 
 func TestScProcessor_DeleteAccountsInShard(t *testing.T) {
 	t.Parallel()
 
-	addrConv := &mock.AddressConverterMock{}
 	accountsDB := &mock.AccountsStub{}
 	removeCalled := 0
-	accountsDB.GetAccountWithJournalCalled = func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
-		acc, _ := state.NewAccount(addressContainer, &mock.AccountTrackerStub{})
+	accountsDB.LoadAccountCalled = func(address []byte) (handler state.AccountHandler, e error) {
+		acc, _ := state.NewUserAccount(address)
 		return acc, nil
 	}
-	accountsDB.RemoveAccountCalled = func(addressContainer state.AddressContainer) error {
+	accountsDB.RemoveAccountCalled = func(address []byte) error {
 		removeCalled++
 		return nil
 	}
 
 	shardCoordinator := mock.NewMultiShardsCoordinatorMock(2)
 	computeIdCalled := 0
-	shardCoordinator.ComputeIdCalled = func(address state.AddressContainer) uint32 {
+	shardCoordinator.ComputeIdCalled = func(address []byte) uint32 {
 		computeIdCalled++
 		return shardCoordinator.SelfId()
 	}
 
 	vm := &mock.VMContainerMock{}
 	argParser := &mock.ArgumentParserMock{}
-	sc, err := NewSmartContractProcessor(
-		vm,
-		argParser,
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accountsDB,
-		&mock.TemporaryAccountsHandlerMock{},
-		addrConv,
-		shardCoordinator,
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.VmContainer = vm
+	arguments.ArgsParser = argParser
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	deletedAccounts := make([][]byte, 0)
 	deletedAccounts = append(deletedAccounts, []byte("acc1"), []byte("acc2"), []byte("acc3"))
-	err = sc.DeleteAccounts(deletedAccounts)
-	assert.Nil(t, err)
-	assert.Equal(t, len(deletedAccounts), removeCalled)
-	assert.Equal(t, len(deletedAccounts), computeIdCalled)
+	err = sc.deleteAccounts(deletedAccounts)
+	require.Nil(t, err)
+	require.Equal(t, len(deletedAccounts), removeCalled)
+	require.Equal(t, len(deletedAccounts), computeIdCalled)
 }
 
 func TestScProcessor_ProcessSCPaymentAccNotInShardShouldNotReturnError(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
+	arguments := createMockSmartContractProcessorArguments()
+	sc, err := NewSmartContractProcessor(arguments)
 
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{}
 	tx.Nonce = 1
@@ -1527,64 +2253,22 @@ func TestScProcessor_ProcessSCPaymentAccNotInShardShouldNotReturnError(t *testin
 	tx.GasPrice = 10
 	tx.GasLimit = 10
 
-	err = sc.ProcessSCPayment(tx, nil)
-	assert.Nil(t, err)
-}
-
-func TestScProcessor_ProcessSCPaymentWrongTypeAssertion(t *testing.T) {
-	t.Parallel()
-
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
-
-	tx := &transaction.Transaction{}
-	tx.Nonce = 0
-	tx.SndAddr = []byte("SRC")
-	tx.RcvAddr = []byte("DST")
-
-	tx.Value = big.NewInt(45)
-	tx.GasPrice = 10
-	tx.GasLimit = 10
-
-	acntSrc := &mock.AccountWrapMock{SetNonceWithJournalCalled: func(nonce uint64) error {
-		return nil
-	}}
-
-	err = sc.ProcessSCPayment(tx, acntSrc)
-	assert.Equal(t, process.ErrWrongTypeAssertion, err)
+	err = sc.processSCPayment(tx, nil)
+	require.Nil(t, err)
 }
 
 func TestScProcessor_ProcessSCPaymentNotEnoughBalance(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.EconomicsFee = &economicsmocks.EconomicsHandlerStub{
+		ComputeTxFeeCalled: func(tx process.TransactionWithFeeHandler) *big.Int {
+			return core.SafeMul(tx.GetGasPrice(), tx.GetGasLimit())
+		}}
+	sc, err := NewSmartContractProcessor(arguments)
 
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{}
 	tx.Nonce = 1
@@ -1595,35 +2279,24 @@ func TestScProcessor_ProcessSCPaymentNotEnoughBalance(t *testing.T) {
 	tx.GasPrice = 10
 	tx.GasLimit = 15
 
-	acntSrc, _ := createAccounts(tx)
-	stAcc, _ := acntSrc.(*state.Account)
-	stAcc.Balance = big.NewInt(45)
+	acntSrc, _ := state.NewUserAccount(tx.SndAddr)
+	_ = acntSrc.AddToBalance(big.NewInt(45))
 
-	currBalance := acntSrc.(*state.Account).Balance.Uint64()
+	currBalance := acntSrc.GetBalance().Uint64()
 
-	err = sc.ProcessSCPayment(tx, acntSrc)
-	assert.Equal(t, process.ErrInsufficientFunds, err)
-	assert.Equal(t, currBalance, acntSrc.(*state.Account).Balance.Uint64())
+	err = sc.processSCPayment(tx, acntSrc)
+	require.Equal(t, process.ErrInsufficientFunds, err)
+	require.Equal(t, currBalance, acntSrc.GetBalance().Uint64())
 }
 
 func TestScProcessor_ProcessSCPayment(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
+	arguments := createMockSmartContractProcessorArguments()
+	sc, err := NewSmartContractProcessor(arguments)
 
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{}
 	tx.Nonce = 0
@@ -1635,32 +2308,68 @@ func TestScProcessor_ProcessSCPayment(t *testing.T) {
 	tx.GasLimit = 10
 
 	acntSrc, _ := createAccounts(tx)
-	currBalance := acntSrc.(*state.Account).Balance.Uint64()
+	currBalance := acntSrc.(state.UserAccountHandler).GetBalance().Uint64()
 	modifiedBalance := currBalance - tx.Value.Uint64() - tx.GasLimit*tx.GasLimit
 
-	err = sc.ProcessSCPayment(tx, acntSrc)
-	assert.Nil(t, err)
-	assert.Equal(t, modifiedBalance, acntSrc.(*state.Account).Balance.Uint64())
+	err = sc.processSCPayment(tx, acntSrc)
+	require.Nil(t, err)
+	require.Equal(t, modifiedBalance, acntSrc.(state.UserAccountHandler).GetBalance().Uint64())
+}
+
+func TestScProcessor_ProcessSCPaymentWithNewFlags(t *testing.T) {
+	t.Parallel()
+
+	txFee := big.NewInt(25)
+
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.EconomicsFee = &mock.FeeHandlerStub{
+		DeveloperPercentageCalled: func() float64 {
+			return 0.0
+		},
+		ComputeTxFeeCalled: func(tx process.TransactionWithFeeHandler) *big.Int {
+			return txFee
+		},
+		ComputeFeeForProcessingCalled: func(tx process.TransactionWithFeeHandler, gasToUse uint64) *big.Int {
+			return core.SafeMul(tx.GetGasPrice(), gasToUse)
+		},
+	}
+	sc, err := NewSmartContractProcessor(arguments)
+
+	require.NotNil(t, sc)
+	require.Nil(t, err)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = []byte("DST")
+
+	tx.Value = big.NewInt(45)
+	tx.GasPrice = 10
+	tx.GasLimit = 10
+
+	acntSrc, _ := createAccounts(tx)
+	currBalance := acntSrc.(state.UserAccountHandler).GetBalance().Uint64()
+	modifiedBalance := currBalance - tx.Value.Uint64() - txFee.Uint64()
+	err = sc.processSCPayment(tx, acntSrc)
+	require.Nil(t, err)
+	require.Equal(t, modifiedBalance, acntSrc.(state.UserAccountHandler).GetBalance().Uint64())
+
+	acntSrc, _ = createAccounts(tx)
+	modifiedBalance = currBalance - tx.Value.Uint64() - tx.GasLimit*tx.GasLimit
+	sc.flagPenalizedTooMuchGas.Toggle(false)
+	err = sc.processSCPayment(tx, acntSrc)
+	require.Nil(t, err)
+	require.Equal(t, modifiedBalance, acntSrc.(state.UserAccountHandler).GetBalance().Uint64())
 }
 
 func TestScProcessor_RefundGasToSenderNilAndZeroRefund(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
+	arguments := createMockSmartContractProcessorArguments()
+	sc, err := NewSmartContractProcessor(arguments)
 
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{}
 	tx.Nonce = 1
@@ -1674,35 +2383,26 @@ func TestScProcessor_RefundGasToSenderNilAndZeroRefund(t *testing.T) {
 	txHash := []byte("txHash")
 
 	acntSrc, _ := createAccounts(tx)
-	currBalance := acntSrc.(*state.Account).Balance.Uint64()
-
-	_, _, err = sc.refundGasToSender(nil, tx, txHash, acntSrc)
-	assert.Nil(t, err)
-	assert.Equal(t, currBalance, acntSrc.(*state.Account).Balance.Uint64())
-
-	_, _, err = sc.refundGasToSender(big.NewInt(0), tx, txHash, acntSrc)
-	assert.Nil(t, err)
-	assert.Equal(t, currBalance, acntSrc.(*state.Account).Balance.Uint64())
+	currBalance := acntSrc.(state.UserAccountHandler).GetBalance().Uint64()
+	vmOutput := &vmcommon.VMOutput{GasRemaining: 0, GasRefund: big.NewInt(0)}
+	_, _ = sc.createSCRForSenderAndRelayer(
+		vmOutput,
+		tx,
+		txHash,
+		vmcommon.DirectCall,
+	)
+	require.Nil(t, err)
+	require.Equal(t, currBalance, acntSrc.(state.UserAccountHandler).GetBalance().Uint64())
 }
 
 func TestScProcessor_RefundGasToSenderAccNotInShard(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
+	arguments := createMockSmartContractProcessorArguments()
+	sc, err := NewSmartContractProcessor(arguments)
 
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{}
 	tx.Nonce = 1
@@ -1713,43 +2413,39 @@ func TestScProcessor_RefundGasToSenderAccNotInShard(t *testing.T) {
 	tx.GasPrice = 10
 	tx.GasLimit = 10
 	txHash := []byte("txHash")
-	acntSrc, _ := createAccounts(tx)
+	vmOutput := &vmcommon.VMOutput{GasRemaining: 0, GasRefund: big.NewInt(10)}
+	sctx, _ := sc.createSCRForSenderAndRelayer(
+		vmOutput,
+		tx,
+		txHash,
+		vmcommon.DirectCall,
+	)
+	require.Nil(t, err)
+	require.NotNil(t, sctx)
 
-	sctx, consumed, err := sc.refundGasToSender(big.NewInt(10), tx, txHash, nil)
-	assert.Nil(t, err)
-	assert.NotNil(t, sctx)
-	assert.Equal(t, 0, consumed.Cmp(big.NewInt(0)))
-
-	acntSrc = nil
-	sctx, consumed, err = sc.refundGasToSender(big.NewInt(10), tx, txHash, acntSrc)
-	assert.Nil(t, err)
-	assert.NotNil(t, sctx)
-	assert.Equal(t, 0, consumed.Cmp(big.NewInt(0)))
-
-	badAcc := &mock.AccountWrapMock{}
-	sctx, consumed, err = sc.refundGasToSender(big.NewInt(10), tx, txHash, badAcc)
-	assert.Equal(t, process.ErrWrongTypeAssertion, err)
-	assert.Nil(t, sctx)
+	vmOutput = &vmcommon.VMOutput{GasRemaining: 0, GasRefund: big.NewInt(10)}
+	sctx, _ = sc.createSCRForSenderAndRelayer(
+		vmOutput,
+		tx,
+		txHash,
+		vmcommon.DirectCall,
+	)
+	require.Nil(t, err)
+	require.NotNil(t, sctx)
 }
 
 func TestScProcessor_RefundGasToSender(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	minGasPrice := uint64(10)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.EconomicsFee = &mock.FeeHandlerStub{MinGasPriceCalled: func() uint64 {
+		return minGasPrice
+	}}
+	arguments.DeployEnableEpoch = 10
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{}
 	tx.Nonce = 1
@@ -1757,135 +2453,108 @@ func TestScProcessor_RefundGasToSender(t *testing.T) {
 	tx.RcvAddr = []byte("DST")
 
 	tx.Value = big.NewInt(45)
-	tx.GasPrice = 10
+	tx.GasPrice = 15
 	tx.GasLimit = 15
 	txHash := []byte("txHash")
 	acntSrc, _ := createAccounts(tx)
-	currBalance := acntSrc.(*state.Account).Balance.Uint64()
+	currBalance := acntSrc.(state.UserAccountHandler).GetBalance().Uint64()
 
 	refundGas := big.NewInt(10)
-	_, _, err = sc.refundGasToSender(refundGas, tx, txHash, acntSrc)
-	assert.Nil(t, err)
+	vmOutput := &vmcommon.VMOutput{GasRemaining: 0, GasRefund: refundGas}
+	scr, _ := sc.createSCRForSenderAndRelayer(
+		vmOutput,
+		tx,
+		txHash,
+		vmcommon.DirectCall,
+	)
+	require.Nil(t, err)
 
-	totalRefund := refundGas.Uint64() * tx.GasPrice
-	assert.Equal(t, currBalance+totalRefund, acntSrc.(*state.Account).Balance.Uint64())
+	finalValue := big.NewInt(0).Mul(refundGas, big.NewInt(0).SetUint64(sc.economicsFee.MinGasPrice()))
+	require.Equal(t, currBalance, acntSrc.(state.UserAccountHandler).GetBalance().Uint64())
+	require.Equal(t, scr.Value.Cmp(finalValue), 0)
 }
 
-func TestScProcessor_processVMOutputNilOutput(t *testing.T) {
+func TestScProcessor_DoNotRefundGasToSenderForAsyncCall(t *testing.T) {
 	t.Parallel()
 
-	round := uint64(10)
-	acntSrc, _, tx := createAccountsAndTransaction()
+	minGasPrice := uint64(10)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.EconomicsFee = &mock.FeeHandlerStub{MinGasPriceCalled: func() uint64 {
+		return minGasPrice
+	}}
+	arguments.DeployEnableEpoch = 10
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
+	tx := &smartContractResult.SmartContractResult{}
+	tx.Nonce = 1
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = []byte("DST")
+
+	tx.Value = big.NewInt(45)
+	tx.GasPrice = 15
+	tx.GasLimit = 15
+	txHash := []byte("txHash")
+
+	refundGas := big.NewInt(10)
+	vmOutput := &vmcommon.VMOutput{GasRemaining: 10, GasRefund: refundGas}
+	scr, _ := sc.createSCRForSenderAndRelayer(
+		vmOutput,
+		tx,
+		txHash,
+		vmcommon.AsynchronousCall,
 	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	require.Nil(t, err)
 
-	_, _, err = sc.ProcessVMOutput(nil, tx, acntSrc, round)
-
-	assert.Equal(t, process.ErrNilVMOutput, err)
-}
-
-func TestScProcessor_processVMOutputNilTransaction(t *testing.T) {
-	t.Parallel()
-
-	round := uint64(10)
-	acntSrc, _, _ := createAccountsAndTransaction()
-
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		&mock.AccountsStub{},
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
-
-	vmOutput := &vmcommon.VMOutput{}
-	_, _, err = sc.ProcessVMOutput(vmOutput, nil, acntSrc, round)
-
-	assert.Equal(t, process.ErrNilTransaction, err)
+	scrValue := big.NewInt(0).Mul(vmOutput.GasRefund, big.NewInt(0).SetUint64(sc.economicsFee.MinGasPrice()))
+	require.Equal(t, scr.Value.Cmp(scrValue), 0)
+	require.Equal(t, scr.GasLimit, vmOutput.GasRemaining)
+	require.Equal(t, scr.GasPrice, tx.GasPrice)
 }
 
 func TestScProcessor_processVMOutput(t *testing.T) {
 	t.Parallel()
 
-	round := uint64(10)
 	acntSrc, _, tx := createAccountsAndTransaction()
 
 	accntState := &mock.AccountsStub{}
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accntState,
-		&mock.TemporaryAccountsHandlerMock{},
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = accntState
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	vmOutput := &vmcommon.VMOutput{
 		GasRefund:    big.NewInt(0),
-		GasRemaining: big.NewInt(0),
+		GasRemaining: 0,
 	}
 
-	accntState.GetAccountWithJournalCalled = func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
+	accntState.LoadAccountCalled = func(address []byte) (handler state.AccountHandler, e error) {
 		return acntSrc, nil
 	}
 
 	tx.Value = big.NewInt(0)
-	_, _, err = sc.ProcessVMOutput(vmOutput, tx, acntSrc, round)
-	assert.Nil(t, err)
+	txHash, _ := core.CalculateHash(arguments.Marshalizer, arguments.Hasher, tx)
+	_, err = sc.processVMOutput(vmOutput, txHash, tx, vmcommon.DirectCall, 0)
+	require.Nil(t, err)
 }
 
 func TestScProcessor_processSCOutputAccounts(t *testing.T) {
 	t.Parallel()
 
 	accountsDB := &mock.AccountsStub{}
-	fakeAccountsHandler := &mock.TemporaryAccountsHandlerMock{}
-	accTracker := &mock.AccountTrackerStub{}
 
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accountsDB,
-		fakeAccountsHandler,
-		&mock.AddressConverterMock{},
-		mock.NewMultiShardsCoordinatorMock(5),
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = accountsDB
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{Value: big.NewInt(0)}
 	outputAccounts := make([]*vmcommon.OutputAccount, 0)
-	err = sc.ProcessSCOutputAccounts(outputAccounts, tx)
-	assert.Nil(t, err)
+	_, _, err = sc.processSCOutputAccounts(&vmcommon.VMOutput{}, vmcommon.DirectCall, outputAccounts, tx, []byte("hash"))
+	require.Nil(t, err)
 
 	outaddress := []byte("newsmartcontract")
 	outacc1 := &vmcommon.OutputAccount{}
@@ -1895,78 +2564,57 @@ func TestScProcessor_processSCOutputAccounts(t *testing.T) {
 	outacc1.BalanceDelta = big.NewInt(int64(5))
 	outputAccounts = append(outputAccounts, outacc1)
 
-	testAddr := mock.NewAddressMock(outaddress)
-	testAcc, _ := state.NewAccount(testAddr, accTracker)
+	testAddr := outaddress
+	testAcc, _ := state.NewUserAccount(testAddr)
 
-	accountsDB.GetAccountWithJournalCalled = func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
-		if bytes.Equal(addressContainer.Bytes(), testAddr.Bytes()) {
+	accountsDB.LoadAccountCalled = func(address []byte) (handler state.AccountHandler, e error) {
+		if bytes.Equal(address, testAddr) {
 			return testAcc, nil
 		}
 		return nil, state.ErrAccNotFound
 	}
-	accountsDB.PutCodeCalled = func(accountHandler state.AccountHandler, code []byte) error {
-		return nil
-	}
 
-	accTracker.JournalizeCalled = func(entry state.JournalEntry) {
-		return
-	}
-	accTracker.SaveAccountCalled = func(accountHandler state.AccountHandler) error {
-		testAcc = accountHandler.(*state.Account)
+	accountsDB.SaveAccountCalled = func(accountHandler state.AccountHandler) error {
 		return nil
 	}
 
 	tx.Value = big.NewInt(int64(5))
-	err = sc.ProcessSCOutputAccounts(outputAccounts, tx)
-	assert.Nil(t, err)
+	_, _, err = sc.processSCOutputAccounts(&vmcommon.VMOutput{}, vmcommon.DirectCall, outputAccounts, tx, []byte("hash"))
+	require.Nil(t, err)
 
 	outacc1.BalanceDelta = nil
-	outacc1.Nonce = outacc1.Nonce + 1
+	outacc1.Nonce++
 	tx.Value = big.NewInt(0)
-	err = sc.processSCOutputAccounts(outputAccounts, tx)
-	assert.Nil(t, err)
+	_, _, err = sc.processSCOutputAccounts(&vmcommon.VMOutput{}, vmcommon.DirectCall, outputAccounts, tx, []byte("hash"))
+	require.Nil(t, err)
 
-	outacc1.Nonce = outacc1.Nonce + 1
+	outacc1.Nonce++
 	outacc1.BalanceDelta = big.NewInt(int64(10))
 	tx.Value = big.NewInt(int64(10))
-	fakeAccountsHandler.TempAccountCalled = func(address []byte) state.AccountHandler {
-		fakeAcc, _ := state.NewAccount(mock.NewAddressMock(address), &mock.AccountTrackerStub{})
-		fakeAcc.Balance = big.NewInt(int64(5))
-		return fakeAcc
-	}
 
 	currentBalance := testAcc.Balance.Uint64()
 	vmOutBalance := outacc1.BalanceDelta.Uint64()
-	err = sc.processSCOutputAccounts(outputAccounts, tx)
-	assert.Nil(t, err)
-	assert.Equal(t, currentBalance+vmOutBalance, testAcc.Balance.Uint64())
+	_, _, err = sc.processSCOutputAccounts(&vmcommon.VMOutput{}, vmcommon.DirectCall, outputAccounts, tx, []byte("hash"))
+	require.Nil(t, err)
+	require.Equal(t, currentBalance+vmOutBalance, testAcc.Balance.Uint64())
 }
 
 func TestScProcessor_processSCOutputAccountsNotInShard(t *testing.T) {
 	t.Parallel()
 
 	accountsDB := &mock.AccountsStub{}
-	fakeAccountsHandler := &mock.TemporaryAccountsHandlerMock{}
 	shardCoordinator := mock.NewMultiShardsCoordinatorMock(5)
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accountsDB,
-		fakeAccountsHandler,
-		&mock.AddressConverterMock{},
-		shardCoordinator,
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	tx := &transaction.Transaction{Value: big.NewInt(0)}
 	outputAccounts := make([]*vmcommon.OutputAccount, 0)
-	err = sc.ProcessSCOutputAccounts(outputAccounts, tx)
-	assert.Nil(t, err)
+	_, _, err = sc.processSCOutputAccounts(&vmcommon.VMOutput{}, vmcommon.DirectCall, outputAccounts, tx, []byte("hash"))
+	require.Nil(t, err)
 
 	outaddress := []byte("newsmartcontract")
 	outacc1 := &vmcommon.OutputAccount{}
@@ -1975,42 +2623,47 @@ func TestScProcessor_processSCOutputAccountsNotInShard(t *testing.T) {
 	outacc1.Nonce = 5
 	outputAccounts = append(outputAccounts, outacc1)
 
-	shardCoordinator.ComputeIdCalled = func(address state.AddressContainer) uint32 {
+	shardCoordinator.ComputeIdCalled = func(address []byte) uint32 {
 		return shardCoordinator.SelfId() + 1
 	}
 
-	err = sc.ProcessSCOutputAccounts(outputAccounts, tx)
-	assert.Nil(t, err)
+	_, _, err = sc.processSCOutputAccounts(&vmcommon.VMOutput{}, vmcommon.DirectCall, outputAccounts, tx, []byte("hash"))
+	require.Nil(t, err)
+
+	outacc1.BalanceDelta = big.NewInt(-50)
+	_, _, err = sc.processSCOutputAccounts(&vmcommon.VMOutput{}, vmcommon.DirectCall, outputAccounts, tx, []byte("hash"))
+	require.Equal(t, err, process.ErrNegativeBalanceDeltaOnCrossShardAccount)
 }
 
 func TestScProcessor_CreateCrossShardTransactions(t *testing.T) {
 	t.Parallel()
 
-	accountsDB := &mock.AccountsStub{}
-	fakeAccountsHandler := &mock.TemporaryAccountsHandlerMock{}
+	testAccounts, _ := state.NewUserAccount([]byte("address"))
+	accountsDB := &mock.AccountsStub{
+		LoadAccountCalled: func(address []byte) (handler state.AccountHandler, err error) {
+			return testAccounts, nil
+		},
+		SaveAccountCalled: func(accountHandler state.AccountHandler) error {
+			return nil
+		},
+	}
 	shardCoordinator := mock.NewMultiShardsCoordinatorMock(5)
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accountsDB,
-		fakeAccountsHandler,
-		&mock.AddressConverterMock{},
-		shardCoordinator,
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	outputAccounts := make([]*vmcommon.OutputAccount, 0)
 	outaddress := []byte("newsmartcontract")
 	outacc1 := &vmcommon.OutputAccount{}
 	outacc1.Address = outaddress
-	outacc1.Code = []byte("contract-code")
-	outacc1.Nonce = 5
-	outacc1.Balance = big.NewInt(int64(5))
+	outacc1.Nonce = 0
+	outacc1.Balance = big.NewInt(5)
+	outacc1.BalanceDelta = big.NewInt(15)
+	outTransfer := vmcommon.OutputTransfer{Value: big.NewInt(5)}
+	outacc1.OutputTransfers = append(outacc1.OutputTransfers, outTransfer)
 	outputAccounts = append(outputAccounts, outacc1, outacc1, outacc1)
 
 	tx := &transaction.Transaction{}
@@ -2023,155 +2676,242 @@ func TestScProcessor_CreateCrossShardTransactions(t *testing.T) {
 	tx.GasLimit = 15
 	txHash := []byte("txHash")
 
-	scTxs, err := sc.CreateSCRTransactions(outputAccounts, tx, txHash)
-	assert.Nil(t, err)
-	assert.Equal(t, len(outputAccounts), len(scTxs))
+	createdAsyncSCR, scTxs, err := sc.processSCOutputAccounts(&vmcommon.VMOutput{}, vmcommon.DirectCall, outputAccounts, tx, txHash)
+	require.Nil(t, err)
+	require.Equal(t, len(outputAccounts), len(scTxs))
+	require.False(t, createdAsyncSCR)
+}
+
+func TestScProcessor_CreateCrossShardTransactionsWithAsyncCalls(t *testing.T) {
+	t.Parallel()
+
+	testAccounts, _ := state.NewUserAccount([]byte("address"))
+	accountsDB := &mock.AccountsStub{
+		LoadAccountCalled: func(address []byte) (handler state.AccountHandler, err error) {
+			return testAccounts, nil
+		},
+		SaveAccountCalled: func(accountHandler state.AccountHandler) error {
+			return nil
+		},
+	}
+	shardCoordinator := mock.NewMultiShardsCoordinatorMock(5)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
+
+	outputAccounts := make([]*vmcommon.OutputAccount, 0)
+	outaddress := []byte("newsmartcontract")
+	outacc1 := &vmcommon.OutputAccount{}
+	outacc1.Address = outaddress
+	outacc1.Nonce = 0
+	outacc1.Balance = big.NewInt(5)
+	outacc1.BalanceDelta = big.NewInt(15)
+	outTransfer := vmcommon.OutputTransfer{Value: big.NewInt(5)}
+	outacc1.OutputTransfers = append(outacc1.OutputTransfers, outTransfer)
+	outputAccounts = append(outputAccounts, outacc1, outacc1, outacc1)
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 1
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = []byte("DST")
+
+	tx.Value = big.NewInt(45)
+	tx.GasPrice = 10
+	tx.GasLimit = 15
+	txHash := []byte("txHash")
+
+	createdAsyncSCR, scTxs, err := sc.processSCOutputAccounts(&vmcommon.VMOutput{GasRemaining: 1000}, vmcommon.AsynchronousCall, outputAccounts, tx, txHash)
+	require.Nil(t, err)
+	require.Equal(t, len(outputAccounts), len(scTxs))
+	require.False(t, createdAsyncSCR)
+
+	outAccBackTransfer := &vmcommon.OutputAccount{
+		Address:         tx.SndAddr,
+		Nonce:           0,
+		Balance:         big.NewInt(0),
+		BalanceDelta:    big.NewInt(0),
+		OutputTransfers: []vmcommon.OutputTransfer{outTransfer},
+		GasUsed:         0,
+	}
+	outputAccounts = append(outputAccounts, outAccBackTransfer)
+	createdAsyncSCR, scTxs, err = sc.processSCOutputAccounts(&vmcommon.VMOutput{GasRemaining: 1000}, vmcommon.AsynchronousCall, outputAccounts, tx, txHash)
+	require.Nil(t, err)
+	require.Equal(t, len(outputAccounts), len(scTxs))
+	require.True(t, createdAsyncSCR)
+
+	lastScTx := scTxs[len(scTxs)-1].(*smartContractResult.SmartContractResult)
+	require.Equal(t, vmcommon.AsynchronousCallBack, lastScTx.CallType)
+
+	tx.Value = big.NewInt(0)
+	scTxs, err = sc.processVMOutput(&vmcommon.VMOutput{GasRemaining: 1000}, txHash, tx, vmcommon.AsynchronousCall, 10000)
+	require.Nil(t, err)
+	require.Equal(t, 1, len(scTxs))
+	lastScTx = scTxs[len(scTxs)-1].(*smartContractResult.SmartContractResult)
+	require.Equal(t, vmcommon.AsynchronousCallBack, lastScTx.CallType)
 }
 
 func TestScProcessor_ProcessSmartContractResultNilScr(t *testing.T) {
 	t.Parallel()
 
 	accountsDB := &mock.AccountsStub{}
-	fakeAccountsHandler := &mock.TemporaryAccountsHandlerMock{}
 	shardCoordinator := mock.NewMultiShardsCoordinatorMock(5)
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accountsDB,
-		fakeAccountsHandler,
-		&mock.AddressConverterMock{},
-		shardCoordinator,
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
-	err = sc.ProcessSmartContractResult(nil)
-	assert.Equal(t, process.ErrNilSmartContractResult, err)
+	_, err = sc.ProcessSmartContractResult(nil)
+	require.Equal(t, process.ErrNilSmartContractResult, err)
 }
 
 func TestScProcessor_ProcessSmartContractResultErrGetAccount(t *testing.T) {
 	t.Parallel()
 
 	accError := errors.New("account get error")
-	accountsDB := &mock.AccountsStub{GetAccountWithJournalCalled: func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
+	called := false
+	accountsDB := &mock.AccountsStub{LoadAccountCalled: func(address []byte) (handler state.AccountHandler, e error) {
+		called = true
 		return nil, accError
 	}}
-	fakeAccountsHandler := &mock.TemporaryAccountsHandlerMock{}
 	shardCoordinator := mock.NewMultiShardsCoordinatorMock(5)
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accountsDB,
-		fakeAccountsHandler,
-		&mock.AddressConverterMock{},
-		shardCoordinator,
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	scr := smartContractResult.SmartContractResult{RcvAddr: []byte("recv address")}
-	err = sc.ProcessSmartContractResult(&scr)
-	assert.Equal(t, accError, err)
+	_, _ = sc.ProcessSmartContractResult(&scr)
+	require.True(t, called)
 }
 
 func TestScProcessor_ProcessSmartContractResultAccNotInShard(t *testing.T) {
 	t.Parallel()
 
 	accountsDB := &mock.AccountsStub{}
-	fakeAccountsHandler := &mock.TemporaryAccountsHandlerMock{}
 	shardCoordinator := mock.NewMultiShardsCoordinatorMock(5)
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accountsDB,
-		fakeAccountsHandler,
-		&mock.AddressConverterMock{},
-		shardCoordinator,
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
-	shardCoordinator.ComputeIdCalled = func(address state.AddressContainer) uint32 {
+	shardCoordinator.ComputeIdCalled = func(address []byte) uint32 {
 		return shardCoordinator.CurrentShard + 1
 	}
 	scr := smartContractResult.SmartContractResult{RcvAddr: []byte("recv address")}
-	err = sc.ProcessSmartContractResult(&scr)
-	assert.Equal(t, process.ErrNilSCDestAccount, err)
+	_, err = sc.ProcessSmartContractResult(&scr)
+	require.Equal(t, err, process.ErrNilSCDestAccount)
 }
 
 func TestScProcessor_ProcessSmartContractResultBadAccType(t *testing.T) {
 	t.Parallel()
 
-	accountsDB := &mock.AccountsStub{GetAccountWithJournalCalled: func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
-		return &mock.AccountWrapMock{}, nil
-	}}
-	fakeAccountsHandler := &mock.TemporaryAccountsHandlerMock{}
+	accountsDB := &mock.AccountsStub{
+		LoadAccountCalled: func(address []byte) (handler state.AccountHandler, e error) {
+			return &mock.AccountWrapMock{}, nil
+		},
+	}
 	shardCoordinator := mock.NewMultiShardsCoordinatorMock(5)
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accountsDB,
-		fakeAccountsHandler,
-		&mock.AddressConverterMock{},
-		shardCoordinator,
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
-	scr := smartContractResult.SmartContractResult{RcvAddr: []byte("recv address")}
-	err = sc.ProcessSmartContractResult(&scr)
-	assert.Equal(t, process.ErrWrongTypeAssertion, err)
+	scr := smartContractResult.SmartContractResult{RcvAddr: []byte("recv address"), Value: big.NewInt(0)}
+	_, err = sc.ProcessSmartContractResult(&scr)
+	require.Nil(t, err)
+}
+
+func TestScProcessor_ProcessSmartContractResultNotPayable(t *testing.T) {
+	t.Parallel()
+
+	userAcc, _ := state.NewUserAccount([]byte("recv address"))
+	accountsDB := &mock.AccountsStub{
+		LoadAccountCalled: func(address []byte) (handler state.AccountHandler, e error) {
+			if bytes.Equal(address, userAcc.Address) {
+				return userAcc, nil
+			}
+			return state.NewEmptyUserAccount(), nil
+		},
+		SaveAccountCalled: func(accountHandler state.AccountHandler) error {
+			return nil
+		},
+		RevertToSnapshotCalled: func(snapshot int) error {
+			return nil
+		},
+	}
+
+	shardCoordinator := mock.NewMultiShardsCoordinatorMock(5)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	arguments.BlockChainHook = &mock.BlockChainHookHandlerMock{
+		IsPayableCalled: func(address []byte) (bool, error) {
+			return false, nil
+		},
+	}
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
+
+	scr := smartContractResult.SmartContractResult{
+		RcvAddr: userAcc.Address,
+		SndAddr: []byte("snd addr"),
+		Value:   big.NewInt(0),
+	}
+	returnCode, err := sc.ProcessSmartContractResult(&scr)
+	require.Nil(t, err)
+	require.Equal(t, vmcommon.Ok, returnCode)
+
+	scr.Value = big.NewInt(10)
+	returnCode, err = sc.ProcessSmartContractResult(&scr)
+	require.Nil(t, err)
+	require.Equal(t, vmcommon.UserError, returnCode)
+	require.True(t, userAcc.GetBalance().Cmp(zero) == 0)
+
+	scr.OriginalSender = scr.RcvAddr
+	returnCode, err = sc.ProcessSmartContractResult(&scr)
+	require.Nil(t, err)
+	require.Equal(t, vmcommon.Ok, returnCode)
+	require.True(t, userAcc.GetBalance().Cmp(scr.Value) == 0)
 }
 
 func TestScProcessor_ProcessSmartContractResultOutputBalanceNil(t *testing.T) {
 	t.Parallel()
 
 	accountsDB := &mock.AccountsStub{
-		GetAccountWithJournalCalled: func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
-			return state.NewAccount(addressContainer,
-				&mock.AccountTrackerStub{JournalizeCalled: func(entry state.JournalEntry) {},
-					SaveAccountCalled: func(accountHandler state.AccountHandler) error {
-						return nil
-					}})
+		LoadAccountCalled: func(address []byte) (handler state.AccountHandler, e error) {
+			return state.NewUserAccount(address)
+		},
+		SaveAccountCalled: func(accountHandler state.AccountHandler) error {
+			return nil
 		},
 	}
-	fakeAccountsHandler := &mock.TemporaryAccountsHandlerMock{}
 	shardCoordinator := mock.NewMultiShardsCoordinatorMock(5)
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accountsDB,
-		fakeAccountsHandler,
-		&mock.AddressConverterMock{},
-		shardCoordinator,
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	scr := smartContractResult.SmartContractResult{
-		RcvAddr: []byte("recv address")}
-	err = sc.ProcessSmartContractResult(&scr)
-	assert.Equal(t, process.ErrNilBalanceFromSC, err)
+		RcvAddr: []byte("recv address"),
+		SndAddr: []byte("snd addr"),
+		Value:   big.NewInt(0),
+	}
+	_, err = sc.ProcessSmartContractResult(&scr)
+	require.Nil(t, err)
 }
 
 func TestScProcessor_ProcessSmartContractResultWithCode(t *testing.T) {
@@ -2179,100 +2919,948 @@ func TestScProcessor_ProcessSmartContractResultWithCode(t *testing.T) {
 
 	putCodeCalled := 0
 	accountsDB := &mock.AccountsStub{
-		GetAccountWithJournalCalled: func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
-			return state.NewAccount(addressContainer,
-				&mock.AccountTrackerStub{JournalizeCalled: func(entry state.JournalEntry) {},
-					SaveAccountCalled: func(accountHandler state.AccountHandler) error {
-						return nil
-					}})
+		LoadAccountCalled: func(address []byte) (handler state.AccountHandler, e error) {
+			return state.NewUserAccount(address)
 		},
-		PutCodeCalled: func(accountHandler state.AccountHandler, code []byte) error {
+		SaveAccountCalled: func(accountHandler state.AccountHandler) error {
 			putCodeCalled++
 			return nil
 		},
+		RevertToSnapshotCalled: func(snapshot int) error {
+			return nil
+		},
 	}
-	fakeAccountsHandler := &mock.TemporaryAccountsHandlerMock{}
 	shardCoordinator := mock.NewMultiShardsCoordinatorMock(5)
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accountsDB,
-		fakeAccountsHandler,
-		&mock.AddressConverterMock{},
-		shardCoordinator,
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	scr := smartContractResult.SmartContractResult{
+		SndAddr: []byte("snd addr"),
 		RcvAddr: []byte("recv address"),
 		Code:    []byte("code"),
 		Value:   big.NewInt(15),
 	}
-	err = sc.ProcessSmartContractResult(&scr)
-	assert.Nil(t, err)
-	assert.Equal(t, 1, putCodeCalled)
+	_, err = sc.ProcessSmartContractResult(&scr)
+	require.Nil(t, err)
+	require.Equal(t, 1, putCodeCalled)
 }
 
 func TestScProcessor_ProcessSmartContractResultWithData(t *testing.T) {
 	t.Parallel()
 
-	saveTrieCalled := 0
+	saveAccountCalled := 0
 	accountsDB := &mock.AccountsStub{
-		GetAccountWithJournalCalled: func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
-			return state.NewAccount(addressContainer,
-				&mock.AccountTrackerStub{JournalizeCalled: func(entry state.JournalEntry) {},
-					SaveAccountCalled: func(accountHandler state.AccountHandler) error {
-						return nil
-					}})
+		LoadAccountCalled: func(address []byte) (handler state.AccountHandler, e error) {
+			return state.NewUserAccount(address)
 		},
-		SaveDataTrieCalled: func(acountWrapper state.AccountHandler) error {
-			saveTrieCalled++
+		SaveAccountCalled: func(accountHandler state.AccountHandler) error {
+			saveAccountCalled++
+			return nil
+		},
+		RevertToSnapshotCalled: func(snapshot int) error {
 			return nil
 		},
 	}
-	fakeAccountsHandler := &mock.TemporaryAccountsHandlerMock{}
 	shardCoordinator := mock.NewMultiShardsCoordinatorMock(5)
-	sc, err := NewSmartContractProcessor(
-		&mock.VMContainerMock{},
-		&mock.ArgumentParserMock{},
-		&mock.HasherMock{},
-		&mock.MarshalizerMock{},
-		accountsDB,
-		fakeAccountsHandler,
-		&mock.AddressConverterMock{},
-		shardCoordinator,
-		&mock.IntermediateTransactionHandlerMock{},
-		&mock.UnsignedTxHandlerMock{},
-	)
-	assert.NotNil(t, sc)
-	assert.Nil(t, err)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
 
 	test := "test"
 	result := ""
 	sep := "@"
-	result = result + test
-	result = result + sep
-	result = result + test
-	result = result + sep
-	result = result + test
-	result = result + sep
-	result = result + test
-	result = result + sep
-	result = result + test
-	result = result + sep
-	result = result + test
+	for i := 0; i < 6; i++ {
+		result += test
+		result += sep
+	}
 
 	scr := smartContractResult.SmartContractResult{
+		SndAddr: []byte("snd addr"),
 		RcvAddr: []byte("recv address"),
-		Data:    result,
+		Data:    []byte(result),
 		Value:   big.NewInt(15),
 	}
-	err = sc.ProcessSmartContractResult(&scr)
-	assert.Nil(t, err)
-	assert.Equal(t, 1, saveTrieCalled)
+	_, err = sc.ProcessSmartContractResult(&scr)
+	require.Nil(t, err)
+	require.Equal(t, 1, saveAccountCalled)
+}
+
+func TestScProcessor_ProcessSmartContractResultDeploySCShouldError(t *testing.T) {
+	t.Parallel()
+
+	accountsDB := &mock.AccountsStub{
+		LoadAccountCalled: func(address []byte) (handler state.AccountHandler, e error) {
+			return state.NewUserAccount(address)
+		},
+		SaveAccountCalled: func(accountHandler state.AccountHandler) error {
+			return nil
+		},
+		RevertToSnapshotCalled: func(snapshot int) error {
+			return nil
+		},
+	}
+	shardCoordinator := mock.NewMultiShardsCoordinatorMock(5)
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	arguments.TxTypeHandler = &mock.TxTypeHandlerMock{
+		ComputeTransactionTypeCalled: func(tx data.TransactionHandler) (process.TransactionType, process.TransactionType) {
+			return process.SCDeployment, process.SCDeployment
+		},
+	}
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
+
+	scr := smartContractResult.SmartContractResult{
+		SndAddr: []byte("snd addr"),
+		RcvAddr: []byte("recv address"),
+		Data:    []byte("code@06"),
+		Value:   big.NewInt(15),
+	}
+	_, err = sc.ProcessSmartContractResult(&scr)
+	require.Nil(t, err)
+}
+
+func TestScProcessor_ProcessSmartContractResultExecuteSC(t *testing.T) {
+	t.Parallel()
+
+	scAddress := []byte("000000000001234567890123456789012")
+	dstScAddress, _ := state.NewUserAccount(scAddress)
+	dstScAddress.SetCode([]byte("code"))
+	accountsDB := &mock.AccountsStub{
+		LoadAccountCalled: func(address []byte) (handler state.AccountHandler, e error) {
+			if bytes.Equal(scAddress, address) {
+				return dstScAddress, nil
+			}
+			return nil, nil
+		},
+		SaveAccountCalled: func(accountHandler state.AccountHandler) error {
+			return nil
+		},
+		RevertToSnapshotCalled: func(snapshot int) error {
+			return nil
+		},
+	}
+	shardCoordinator := mock.NewMultiShardsCoordinatorMock(5)
+	shardCoordinator.ComputeIdCalled = func(address []byte) uint32 {
+		if bytes.Equal(scAddress, address) {
+			return shardCoordinator.SelfId()
+		}
+		return shardCoordinator.SelfId() + 1
+	}
+
+	executeCalled := false
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	arguments.VmContainer = &mock.VMContainerMock{
+		GetCalled: func(key []byte) (handler vmcommon.VMExecutionHandler, e error) {
+			return &mock.VMExecutionHandlerStub{
+				RunSmartContractCallCalled: func(input *vmcommon.ContractCallInput) (output *vmcommon.VMOutput, e error) {
+					executeCalled = true
+					return nil, nil
+				},
+			}, nil
+		},
+	}
+	arguments.TxTypeHandler = &mock.TxTypeHandlerMock{
+		ComputeTransactionTypeCalled: func(tx data.TransactionHandler) (process.TransactionType, process.TransactionType) {
+			return process.SCInvoking, process.SCInvoking
+		},
+	}
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
+
+	scr := smartContractResult.SmartContractResult{
+		SndAddr: []byte("snd addr"),
+		RcvAddr: scAddress,
+		Data:    []byte("code@06"),
+		Value:   big.NewInt(15),
+	}
+	_, err = sc.ProcessSmartContractResult(&scr)
+	require.Nil(t, err)
+	require.True(t, executeCalled)
+}
+
+func TestScProcessor_ProcessSmartContractResultExecuteSCIfMetaAndBuiltIn(t *testing.T) {
+	t.Parallel()
+
+	scAddress := []byte("000000000001234567890123456789012")
+	dstScAddress, _ := state.NewUserAccount(scAddress)
+	dstScAddress.SetCode([]byte("code"))
+	accountsDB := &mock.AccountsStub{
+		LoadAccountCalled: func(address []byte) (handler state.AccountHandler, e error) {
+			if bytes.Equal(scAddress, address) {
+				return dstScAddress, nil
+			}
+			return nil, nil
+		},
+		SaveAccountCalled: func(accountHandler state.AccountHandler) error {
+			return nil
+		},
+		RevertToSnapshotCalled: func(snapshot int) error {
+			return nil
+		},
+	}
+	shardCoordinator := mock.NewMultiShardsCoordinatorMock(5)
+	shardCoordinator.ComputeIdCalled = func(address []byte) uint32 {
+		if bytes.Equal(scAddress, address) {
+			return shardCoordinator.SelfId()
+		}
+		return 0
+	}
+	shardCoordinator.CurrentShard = core.MetachainShardId
+
+	executeCalled := false
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	arguments.VmContainer = &mock.VMContainerMock{
+		GetCalled: func(key []byte) (handler vmcommon.VMExecutionHandler, e error) {
+			return &mock.VMExecutionHandlerStub{
+				RunSmartContractCallCalled: func(input *vmcommon.ContractCallInput) (output *vmcommon.VMOutput, e error) {
+					executeCalled = true
+					return nil, nil
+				},
+			}, nil
+		},
+	}
+	arguments.TxTypeHandler = &mock.TxTypeHandlerMock{
+		ComputeTransactionTypeCalled: func(tx data.TransactionHandler) (process.TransactionType, process.TransactionType) {
+			return process.BuiltInFunctionCall, process.BuiltInFunctionCall
+		},
+	}
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
+
+	scr := smartContractResult.SmartContractResult{
+		SndAddr: []byte("snd addr"),
+		RcvAddr: scAddress,
+		Data:    []byte("code@06"),
+		Value:   big.NewInt(15),
+	}
+	_, err = sc.ProcessSmartContractResult(&scr)
+	require.Nil(t, err)
+	require.True(t, executeCalled)
+}
+
+func TestScProcessor_ProcessRelayedSCRValueBackToRelayer(t *testing.T) {
+	t.Parallel()
+
+	scAddress := []byte("000000000001234567890123456789012")
+	dstScAddress, _ := state.NewUserAccount(scAddress)
+	dstScAddress.SetCode([]byte("code"))
+
+	baseValue := big.NewInt(100)
+	userAddress := []byte("111111111111234567890123456789012")
+	userAcc, _ := state.NewUserAccount(userAddress)
+	_ = userAcc.AddToBalance(baseValue)
+	relayedAddress := []byte("211111111111234567890123456789012")
+	relayedAcc, _ := state.NewUserAccount(relayedAddress)
+
+	accountsDB := &mock.AccountsStub{
+		LoadAccountCalled: func(address []byte) (handler state.AccountHandler, e error) {
+			if bytes.Equal(scAddress, address) {
+				return dstScAddress, nil
+			}
+			if bytes.Equal(userAddress, address) {
+				return userAcc, nil
+			}
+			if bytes.Equal(relayedAddress, address) {
+				return relayedAcc, nil
+			}
+
+			return nil, nil
+		},
+		SaveAccountCalled: func(accountHandler state.AccountHandler) error {
+			return nil
+		},
+		RevertToSnapshotCalled: func(snapshot int) error {
+			return nil
+		},
+	}
+
+	shardCoordinator := mock.NewMultiShardsCoordinatorMock(5)
+	executeCalled := false
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = accountsDB
+	arguments.ShardCoordinator = shardCoordinator
+	arguments.VmContainer = &mock.VMContainerMock{
+		GetCalled: func(key []byte) (handler vmcommon.VMExecutionHandler, e error) {
+			return &mock.VMExecutionHandlerStub{
+				RunSmartContractCallCalled: func(input *vmcommon.ContractCallInput) (output *vmcommon.VMOutput, e error) {
+					executeCalled = true
+					return &vmcommon.VMOutput{ReturnCode: vmcommon.UserError}, nil
+				},
+			}, nil
+		},
+	}
+	arguments.TxTypeHandler = &mock.TxTypeHandlerMock{
+		ComputeTransactionTypeCalled: func(tx data.TransactionHandler) (process.TransactionType, process.TransactionType) {
+			return process.SCInvoking, process.SCInvoking
+		},
+	}
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
+
+	scr := smartContractResult.SmartContractResult{
+		SndAddr:      userAddress,
+		RcvAddr:      scAddress,
+		RelayerAddr:  relayedAddress,
+		RelayedValue: big.NewInt(10),
+		Data:         []byte("code@06"),
+		Value:        big.NewInt(15),
+	}
+	returnCode, err := sc.ProcessSmartContractResult(&scr)
+	require.Nil(t, err)
+	require.True(t, executeCalled)
+	require.Equal(t, returnCode, vmcommon.UserError)
+
+	require.True(t, relayedAcc.GetBalance().Cmp(scr.RelayedValue) == 0)
+	userReturnValue := big.NewInt(0).Sub(scr.Value, scr.RelayedValue)
+	userFinalValue := baseValue.Sub(baseValue, scr.Value)
+	userFinalValue.Add(userFinalValue, userReturnValue)
+	require.True(t, userAcc.GetBalance().Cmp(userFinalValue) == 0)
+}
+
+func TestScProcessor_checkUpgradePermission(t *testing.T) {
+	t.Parallel()
+
+	arguments := createMockSmartContractProcessorArguments()
+	sc, err := NewSmartContractProcessor(arguments)
+	require.NotNil(t, sc)
+	require.Nil(t, err)
+
+	// Not an upgrade
+	err = sc.checkUpgradePermission(nil, &vmcommon.ContractCallInput{})
+	require.Nil(t, err)
+
+	// Upgrade, nil contract passed (quite impossible though)
+	err = sc.checkUpgradePermission(nil, &vmcommon.ContractCallInput{Function: "upgradeContract"})
+	require.Equal(t, process.ErrUpgradeNotAllowed, err)
+
+	// Create a contract, owned by Alice
+	contract, err := state.NewUserAccount([]byte("contract"))
+	require.Nil(t, err)
+	contract.SetOwnerAddress([]byte("alice"))
+	// Not yet upgradeable
+	contract.SetCodeMetadata([]byte{0, 0})
+
+	// Upgrade as Alice, but not allowed (not upgradeable)
+	err = sc.checkUpgradePermission(contract, &vmcommon.ContractCallInput{Function: "upgradeContract", VMInput: vmcommon.VMInput{CallerAddr: []byte("alice")}})
+	require.Equal(t, process.ErrUpgradeNotAllowed, err)
+
+	// Upgrade as Bob, but not allowed
+	err = sc.checkUpgradePermission(contract, &vmcommon.ContractCallInput{Function: "upgradeContract", VMInput: vmcommon.VMInput{CallerAddr: []byte("bob")}})
+	require.Equal(t, process.ErrUpgradeNotAllowed, err)
+
+	// Mark as upgradeable
+	contract.SetCodeMetadata([]byte{1, 0})
+
+	// Upgrade as Alice, allowed
+	err = sc.checkUpgradePermission(contract, &vmcommon.ContractCallInput{Function: "upgradeContract", VMInput: vmcommon.VMInput{CallerAddr: []byte("alice")}})
+	require.Nil(t, err)
+
+	// Upgrade as Bob, but not allowed
+	err = sc.checkUpgradePermission(contract, &vmcommon.ContractCallInput{Function: "upgradeContract", VMInput: vmcommon.VMInput{CallerAddr: []byte("bob")}})
+	require.Equal(t, process.ErrUpgradeNotAllowed, err)
+
+	// Upgrade as nobody, not allowed
+	err = sc.checkUpgradePermission(contract, &vmcommon.ContractCallInput{Function: "upgradeContract", VMInput: vmcommon.VMInput{CallerAddr: nil}})
+	require.Equal(t, process.ErrUpgradeNotAllowed, err)
+}
+
+func TestScProcessor_penalizeUserIfNeededShouldWork(t *testing.T) {
+	t.Parallel()
+
+	arguments := createMockSmartContractProcessorArguments()
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	gasProvided := uint64(1000)
+	maxGasToRemain := gasProvided - (gasProvided / process.MaxGasFeeHigherFactorAccepted)
+
+	callType := vmcommon.DirectCall
+	vmOutput := &vmcommon.VMOutput{
+		GasRemaining: maxGasToRemain,
+	}
+	sc.penalizeUserIfNeeded(&transaction.Transaction{}, []byte("txHash"), callType, gasProvided, vmOutput)
+	assert.Equal(t, maxGasToRemain, vmOutput.GasRemaining)
+
+	callType = vmcommon.AsynchronousCall
+	vmOutput = &vmcommon.VMOutput{
+		GasRemaining: maxGasToRemain + 1,
+	}
+	sc.penalizeUserIfNeeded(&transaction.Transaction{}, []byte("txHash"), callType, gasProvided, vmOutput)
+	assert.Equal(t, maxGasToRemain+1, vmOutput.GasRemaining)
+
+	callType = vmcommon.DirectCall
+	vmOutput = &vmcommon.VMOutput{
+		GasRemaining: maxGasToRemain + 1,
+	}
+	sc.penalizeUserIfNeeded(&transaction.Transaction{}, []byte("txHash"), callType, gasProvided, vmOutput)
+	assert.Equal(t, uint64(0), vmOutput.GasRemaining)
+}
+
+func TestScProcessor_isTooMuchGasProvidedShouldWork(t *testing.T) {
+	t.Parallel()
+
+	gasProvided := uint64(100)
+	maxGasToRemain := gasProvided - (gasProvided / process.MaxGasFeeHigherFactorAccepted)
+
+	isTooMuchGas := isTooMuchGasProvided(gasProvided, gasProvided)
+	assert.False(t, isTooMuchGas)
+
+	isTooMuchGas = isTooMuchGasProvided(gasProvided, maxGasToRemain-1)
+	assert.False(t, isTooMuchGas)
+
+	isTooMuchGas = isTooMuchGasProvided(gasProvided, maxGasToRemain)
+	assert.False(t, isTooMuchGas)
+
+	isTooMuchGas = isTooMuchGasProvided(gasProvided, maxGasToRemain+1)
+	assert.True(t, isTooMuchGas)
+}
+
+func TestScProcessor_penalizeUserIfNeededShouldWorkOnFlagActivation(t *testing.T) {
+	arguments := createMockSmartContractProcessorArguments()
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	gasProvided := uint64(1000)
+	maxGasToRemain := gasProvided - (gasProvided / process.MaxGasFeeHigherFactorAccepted)
+
+	callType := vmcommon.DirectCall
+	vmOutput := &vmcommon.VMOutput{
+		GasRemaining: maxGasToRemain + 1,
+	}
+
+	sc.penalizedTooMuchGasEnableEpoch = 1
+
+	sc.EpochConfirmed(0)
+	sc.penalizeUserIfNeeded(&transaction.Transaction{}, []byte("txHash"), callType, gasProvided, vmOutput)
+	assert.Equal(t, maxGasToRemain+1, vmOutput.GasRemaining)
+
+	sc.EpochConfirmed(1)
+	sc.penalizeUserIfNeeded(&transaction.Transaction{}, []byte("txHash"), callType, gasProvided, vmOutput)
+	assert.Equal(t, uint64(0), vmOutput.GasRemaining)
+}
+
+func TestSCProcessor_createSCRWhenError(t *testing.T) {
+	arguments := createMockSmartContractProcessorArguments()
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	acntSnd := &mock.UserAccountStub{}
+	scr, consumedFee := sc.createSCRsWhenError(nil, []byte("txHash"), &transaction.Transaction{}, "string", []byte("msg"), 0)
+	assert.Equal(t, uint64(0), scr.GasLimit)
+	assert.Equal(t, consumedFee.Cmp(big.NewInt(0)), 0)
+	expectedError := "@" + hex.EncodeToString([]byte("string"))
+	assert.Equal(t, expectedError, string(scr.Data))
+
+	scr, consumedFee = sc.createSCRsWhenError(acntSnd, []byte("txHash"), &transaction.Transaction{}, "string", []byte("msg"), 0)
+	assert.Equal(t, uint64(0), scr.GasLimit)
+	assert.Equal(t, consumedFee.Cmp(big.NewInt(0)), 0)
+	assert.Equal(t, expectedError, string(scr.Data))
+
+	scr, consumedFee = sc.createSCRsWhenError(
+		acntSnd,
+		[]byte("txHash"),
+		&smartContractResult.SmartContractResult{CallType: vmcommon.AsynchronousCall},
+		"string",
+		[]byte("msg"),
+		0)
+	assert.Equal(t, uint64(0), scr.GasLimit)
+	assert.Equal(t, consumedFee.Cmp(big.NewInt(0)), 0)
+	assert.Equal(t, "@04@6d7367", string(scr.Data))
+
+	sc.asyncCallbackGasLock = 10
+	sc.asyncCallStepCost = 10
+	scr, consumedFee = sc.createSCRsWhenError(
+		acntSnd,
+		[]byte("txHash"),
+		&smartContractResult.SmartContractResult{CallType: vmcommon.AsynchronousCall, GasPrice: 1, GasLimit: 100},
+		"string",
+		[]byte("msg"),
+		20)
+	assert.Equal(t, uint64(1), scr.GasPrice)
+	assert.Equal(t, consumedFee.Cmp(big.NewInt(80)), 0)
+	assert.Equal(t, "@04@6d7367", string(scr.Data))
+	assert.Equal(t, uint64(20), scr.GasLimit)
+
+	sc.asyncCallbackGasLock = 100
+	sc.asyncCallStepCost = 100
+	scr, consumedFee = sc.createSCRsWhenError(
+		acntSnd,
+		[]byte("txHash"),
+		&smartContractResult.SmartContractResult{CallType: vmcommon.AsynchronousCall, GasPrice: 1, GasLimit: 100},
+		"string",
+		[]byte("msg"),
+		0)
+	assert.Equal(t, uint64(1), scr.GasPrice)
+	assert.Equal(t, consumedFee.Cmp(big.NewInt(100)), 0)
+	assert.Equal(t, "@04@6d7367", string(scr.Data))
+	assert.Equal(t, uint64(0), scr.GasLimit)
+}
+
+func TestGasLockedInSmartContractProcessor(t *testing.T) {
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.ArgsParser = NewArgumentParser()
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	outaddress := []byte("newsmartcontract")
+	outacc1 := &vmcommon.OutputAccount{}
+	outacc1.Address = outaddress
+	outacc1.Nonce = 0
+	outacc1.Balance = big.NewInt(5)
+	outacc1.BalanceDelta = big.NewInt(15)
+	outTransfer := vmcommon.OutputTransfer{
+		Value:     big.NewInt(5),
+		CallType:  vmcommon.AsynchronousCall,
+		GasLocked: 100,
+		GasLimit:  100,
+		Data:      []byte("functionCall"),
+	}
+	outacc1.OutputTransfers = append(outacc1.OutputTransfers, outTransfer)
+	vmOutput := &vmcommon.VMOutput{
+		OutputAccounts: make(map[string]*vmcommon.OutputAccount),
+	}
+	vmOutput.OutputAccounts[string(outaddress)] = outacc1
+
+	asyncCallback, results := sc.createSmartContractResults(vmOutput, vmcommon.DirectCall, outacc1, &transaction.Transaction{}, []byte("hash"))
+	require.False(t, asyncCallback)
+	require.Equal(t, 1, len(results))
+
+	scr := results[0].(*smartContractResult.SmartContractResult)
+	gasLocked := sc.getGasLockedFromSCR(scr)
+	require.Equal(t, gasLocked, outTransfer.GasLocked)
+
+	_, args, err := sc.argsParser.ParseCallData(string(scr.Data))
+	require.Nil(t, err)
+	require.Equal(t, 1, len(args))
+
+	finalArguments, gasLocked := sc.getAsyncCallGasLockFromTxData(scr.CallType, args)
+	require.Equal(t, 0, len(finalArguments))
+	require.Equal(t, gasLocked, outTransfer.GasLocked)
+}
+
+func TestSmartContractProcessor_computeTotalConsumedFeeAndDevRwd(t *testing.T) {
+	t.Parallel()
+
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.ArgsParser = NewArgumentParser()
+	shardCoordinator := &mock.CoordinatorStub{ComputeIdCalled: func(address []byte) uint32 {
+		return 0
+	}}
+	feeHandler := &mock.FeeHandlerStub{
+		ComputeGasLimitCalled: func(tx process.TransactionWithFeeHandler) uint64 {
+			return 0
+		},
+		ComputeTxFeeCalled: func(tx process.TransactionWithFeeHandler) *big.Int {
+			return core.SafeMul(tx.GetGasLimit(), tx.GetGasPrice())
+		},
+		ComputeFeeForProcessingCalled: func(tx process.TransactionWithFeeHandler, gasToUse uint64) *big.Int {
+			return core.SafeMul(tx.GetGasPrice(), gasToUse)
+		},
+	}
+	arguments.EconomicsFee = feeHandler
+	arguments.ShardCoordinator = shardCoordinator
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	totalFee, devFees := sc.computeTotalConsumedFeeAndDevRwd(&transaction.Transaction{GasPrice: 1}, &vmcommon.VMOutput{}, 0)
+	assert.Equal(t, totalFee.Int64(), int64(0))
+	assert.Equal(t, devFees.Int64(), int64(0))
+
+	totalFee, devFees = sc.computeTotalConsumedFeeAndDevRwd(&transaction.Transaction{GasLimit: 100, GasPrice: 1}, &vmcommon.VMOutput{GasRemaining: 200}, 0)
+	assert.Equal(t, totalFee.Int64(), int64(0))
+	assert.Equal(t, devFees.Int64(), int64(0))
+
+	totalFee, _ = sc.computeTotalConsumedFeeAndDevRwd(&transaction.Transaction{GasLimit: 100, GasPrice: 1}, &vmcommon.VMOutput{GasRemaining: 50}, 0)
+	assert.Equal(t, totalFee.Int64(), int64(50))
+
+	feeHandler.DeveloperPercentageCalled = func() float64 {
+		return 0.5
+	}
+	totalFee, devFees = sc.computeTotalConsumedFeeAndDevRwd(&transaction.Transaction{GasLimit: 100, GasPrice: 1}, &vmcommon.VMOutput{GasRemaining: 50}, 10)
+	assert.Equal(t, totalFee.Int64(), int64(50))
+	assert.Equal(t, devFees.Int64(), int64(20))
+
+	feeHandler.ComputeGasLimitCalled = func(tx process.TransactionWithFeeHandler) uint64 {
+		return 10
+	}
+	shardCoordinator.SelfIdCalled = func() uint32 {
+		return 1
+	}
+	totalFee, devFees = sc.computeTotalConsumedFeeAndDevRwd(&transaction.Transaction{GasLimit: 100, GasPrice: 1}, &vmcommon.VMOutput{GasRemaining: 50}, 10)
+	assert.Equal(t, totalFee.Int64(), int64(30))
+	assert.Equal(t, devFees.Int64(), int64(15))
+
+	vmOutput := &vmcommon.VMOutput{GasRemaining: 50}
+	vmOutput.OutputAccounts = make(map[string]*vmcommon.OutputAccount)
+	vmOutput.OutputAccounts["address"] = &vmcommon.OutputAccount{OutputTransfers: []vmcommon.OutputTransfer{{GasLimit: 10}}}
+	totalFee, devFees = sc.computeTotalConsumedFeeAndDevRwd(
+		&transaction.Transaction{GasLimit: 100, GasPrice: 1},
+		vmOutput,
+		10)
+	assert.Equal(t, totalFee.Int64(), int64(20))
+	assert.Equal(t, devFees.Int64(), int64(10))
+}
+
+func TestSmartContractProcessor_computeTotalConsumedFeeAndDevRwdWithDifferentSCCallPrice(t *testing.T) {
+	t.Parallel()
+
+	scAccountAddress := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x1e, 0x2e, 0x61, 0x1a, 0x9c, 0xe1, 0xe0, 0xc8, 0xe3, 0x28, 0x3c, 0xcc, 0x7c, 0x1b, 0x0f, 0x46, 0x61, 0x91, 0x70, 0x79, 0xa7, 0x5c}
+	acc, err := state.NewUserAccount(scAccountAddress)
+	require.Nil(t, err)
+	require.NotNil(t, acc)
+
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.ArgsParser = NewArgumentParser()
+	shardCoordinator := &mock.CoordinatorStub{ComputeIdCalled: func(address []byte) uint32 {
+		return 0
+	}}
+
+	// use a real fee handler
+	args := createRealEconomicsDataArgs()
+	feeHandler, err := economics.NewEconomicsData(*args)
+	require.Nil(t, err)
+	require.NotNil(t, feeHandler)
+	arguments.TxFeeHandler, _ = postprocess.NewFeeAccumulator()
+
+	arguments.EconomicsFee = feeHandler
+	arguments.ShardCoordinator = shardCoordinator
+	arguments.AccountsDB = &mock.AccountsStub{
+		RevertToSnapshotCalled: func(snapshot int) error {
+			return nil
+		},
+		LoadAccountCalled: func(address []byte) (state.AccountHandler, error) {
+			return acc, nil
+		},
+	}
+
+	sc, err := NewSmartContractProcessor(arguments)
+	require.Nil(t, err)
+	require.NotNil(t, sc)
+
+	// activate staking V2
+	sc.EpochConfirmed(10)
+
+	tx := &transaction.Transaction{
+		RcvAddr:  scAccountAddress,
+		GasPrice: 1000000000,
+		GasLimit: 30000000,
+		Data:     make([]byte, 100),
+	}
+	vmoutput := &vmcommon.VMOutput{
+		GasRemaining: 10000000,
+		GasRefund:    big.NewInt(0),
+	}
+	builtInGasUsed := uint64(1000000)
+
+	totalFee, devFees := sc.computeTotalConsumedFeeAndDevRwd(tx, vmoutput, builtInGasUsed)
+	expectedTotalFee, expectedDevFees := computeExpectedResults(args, tx, builtInGasUsed, vmoutput, true)
+	require.Equal(t, expectedTotalFee, totalFee)
+	require.Equal(t, expectedDevFees, devFees)
+}
+
+func TestSmartContractProcessor_finishSCExecutionV2(t *testing.T) {
+	scAccountAddress := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x1e, 0x2e, 0x61, 0x1a, 0x9c, 0xe1, 0xe0, 0xc8, 0xe3, 0x28, 0x3c, 0xcc, 0x7c, 0x1b, 0x0f, 0x46, 0x61, 0x91, 0x70, 0x79, 0xa7, 0x5c}
+	tests := []struct {
+		name           string
+		tx             *transaction.Transaction
+		vmOutput       *vmcommon.VMOutput
+		builtInGasUsed uint64
+	}{
+		{
+			name:           "intra shard smart contract execution with builtin gas and remaining gas",
+			tx:             &transaction.Transaction{RcvAddr: scAccountAddress, GasPrice: 1000000000, GasLimit: 30000000, Data: make([]byte, 100)},
+			vmOutput:       &vmcommon.VMOutput{GasRemaining: 10000000, GasRefund: big.NewInt(0)},
+			builtInGasUsed: uint64(1000000),
+		},
+		{
+			name:           "intra shard smart contract execution with no builtin gas and remaining gas",
+			tx:             &transaction.Transaction{RcvAddr: scAccountAddress, GasPrice: 1000000000, GasLimit: 30000000, Data: make([]byte, 100)},
+			vmOutput:       &vmcommon.VMOutput{GasRemaining: 10000000, GasRefund: big.NewInt(0)},
+			builtInGasUsed: uint64(1000000),
+		},
+		{
+			name:           "intra shard smart contract execution with builtin gas and no remaining gas",
+			tx:             &transaction.Transaction{RcvAddr: scAccountAddress, GasPrice: 2000000000, GasLimit: 20000000, Data: make([]byte, 100)},
+			vmOutput:       &vmcommon.VMOutput{GasRemaining: 0, GasRefund: big.NewInt(0)},
+			builtInGasUsed: uint64(1000000),
+		},
+		{
+			name:           "intra shard smart contract execution with no builtin gas and no remaining gas",
+			tx:             &transaction.Transaction{RcvAddr: scAccountAddress, GasPrice: 2000000000, GasLimit: 20000000, Data: make([]byte, 100)},
+			vmOutput:       &vmcommon.VMOutput{GasRemaining: 0, GasRefund: big.NewInt(0)},
+			builtInGasUsed: uint64(0),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			acc, err := state.NewUserAccount(scAccountAddress)
+			require.Nil(t, err)
+			require.NotNil(t, acc)
+
+			arguments := createMockSmartContractProcessorArguments()
+			arguments.ArgsParser = NewArgumentParser()
+			shardCoordinator := &mock.CoordinatorStub{ComputeIdCalled: func(address []byte) uint32 {
+				return 0
+			}}
+
+			// use a real fee handler
+			args := createRealEconomicsDataArgs()
+			arguments.EconomicsFee, err = economics.NewEconomicsData(*args)
+			require.Nil(t, err)
+
+			arguments.TxFeeHandler, err = postprocess.NewFeeAccumulator()
+			require.Nil(t, err)
+
+			arguments.ShardCoordinator = shardCoordinator
+			arguments.AccountsDB = &mock.AccountsStub{
+				RevertToSnapshotCalled: func(snapshot int) error {
+					return nil
+				},
+				LoadAccountCalled: func(address []byte) (state.AccountHandler, error) {
+					return acc, nil
+				},
+			}
+
+			sc, err := NewSmartContractProcessor(arguments)
+			require.Nil(t, err)
+			require.NotNil(t, sc)
+
+			// activate staking V2
+			sc.EpochConfirmed(10)
+
+			expectedTotalFee, expectedDevFees := computeExpectedResults(args, test.tx, test.builtInGasUsed, test.vmOutput, true)
+
+			retcode, err := sc.finishSCExecution(nil, []byte("txhash"), test.tx, test.vmOutput, test.builtInGasUsed)
+			require.Nil(t, err)
+			require.Equal(t, retcode, vmcommon.Ok)
+			require.Nil(t, err)
+			require.Equal(t, expectedDevFees, acc.DeveloperReward)
+			require.Equal(t, expectedTotalFee, sc.txFeeHandler.GetAccumulatedFees())
+			require.Equal(t, expectedDevFees, sc.txFeeHandler.GetDeveloperFees())
+		})
+	}
+}
+
+func TestScProcessor_CreateRefundForRelayerFromAnotherShard(t *testing.T) {
+	arguments := createMockSmartContractProcessorArguments()
+	sndAddress := []byte("sender11")
+	rcvAddress := []byte("receiver")
+
+	shardCoordinator := &mock.CoordinatorStub{
+		ComputeIdCalled: func(address []byte) uint32 {
+			if bytes.Equal(address, sndAddress) {
+				return 1
+			}
+			if bytes.Equal(address, rcvAddress) {
+				return 0
+			}
+			return 2
+		},
+		SelfIdCalled: func() uint32 {
+			return 0
+		}}
+	arguments.ShardCoordinator = shardCoordinator
+	arguments.EconomicsFee = &mock.FeeHandlerStub{ComputeFeeForProcessingCalled: func(tx process.TransactionWithFeeHandler, gasToUse uint64) *big.Int {
+		return big.NewInt(100)
+	}}
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	scrWithRelayed := &smartContractResult.SmartContractResult{
+		Nonce:          0,
+		Value:          big.NewInt(0),
+		RcvAddr:        rcvAddress,
+		SndAddr:        sndAddress,
+		RelayerAddr:    []byte("relayer1"),
+		RelayedValue:   big.NewInt(0),
+		PrevTxHash:     []byte("someHash"),
+		OriginalTxHash: []byte("someHash"),
+		GasLimit:       10000,
+		GasPrice:       10,
+		CallType:       vmcommon.DirectCall,
+	}
+
+	vmOutput := &vmcommon.VMOutput{GasRemaining: 1000}
+	_, relayerRefund := sc.createSCRForSenderAndRelayer(vmOutput, scrWithRelayed, []byte("txhash"), vmcommon.DirectCall)
+	assert.NotNil(t, relayerRefund)
+
+	senderID := sc.shardCoordinator.ComputeId(relayerRefund.SndAddr)
+	assert.Equal(t, sc.shardCoordinator.SelfId(), senderID)
+}
+
+func TestScProcessor_ProcessIfErrorRevertAccountFails(t *testing.T) {
+	t.Parallel()
+	expectedError := errors.New("expected error")
+	arguments := createMockSmartContractProcessorArguments()
+	arguments.AccountsDB = &mock.AccountsStub{
+		RevertToSnapshotCalled: func(snapshot int) error {
+			return expectedError
+		},
+	}
+
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	sndAccount := &mock.UserAccountStub{}
+	err := sc.ProcessIfError(sndAccount, []byte("txHash"), nil, "0", []byte("message"), 1, 100)
+	require.NotNil(t, err)
+	require.Equal(t, expectedError, err)
+}
+
+func TestProcessIfErrorCheckBackwardsCompatibilityProcessTransactionFeeCalledShouldBeCalled(t *testing.T) {
+	t.Parallel()
+
+	arguments := createMockSmartContractProcessorArguments()
+	shardCoordinator := &mock.CoordinatorStub{
+		ComputeIdCalled: func(address []byte) uint32 {
+			return 1
+		},
+		SelfIdCalled: func() uint32 {
+			return 0
+		}}
+	arguments.ShardCoordinator = shardCoordinator
+	arguments.EconomicsFee = &mock.FeeHandlerStub{
+		ComputeFeeForProcessingCalled: func(tx process.TransactionWithFeeHandler, gasToUse uint64) *big.Int {
+			return big.NewInt(100)
+		},
+	}
+
+	called := false
+	arguments.TxFeeHandler = &mock.FeeAccumulatorStub{
+		ProcessTransactionFeeCalled: func(cost *big.Int, devFee *big.Int, hash []byte) {
+			called = true
+		},
+	}
+
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	tx := &transaction.Transaction{
+		SndAddr: []byte("snd"),
+		RcvAddr: []byte("rcv"),
+		Value:   big.NewInt(15),
+	}
+
+	sndAccount := &mock.UserAccountStub{}
+	err := sc.ProcessIfError(sndAccount, []byte("txHash"), tx, "0", []byte("message"), 1, 100)
+	require.Nil(t, err)
+	require.True(t, called)
+}
+
+func TestProcessIfErrorCheckBackwardsCompatibilityProcessTransactionFeeCalledShouldNOTBeCalled(t *testing.T) {
+	t.Parallel()
+
+	arguments := createMockSmartContractProcessorArguments()
+	shardCoordinator := &mock.CoordinatorStub{
+		ComputeIdCalled: func(address []byte) uint32 {
+			return 1
+		},
+		SelfIdCalled: func() uint32 {
+			return 0
+		}}
+	arguments.ShardCoordinator = shardCoordinator
+	arguments.EconomicsFee = &mock.FeeHandlerStub{
+		ComputeFeeForProcessingCalled: func(tx process.TransactionWithFeeHandler, gasToUse uint64) *big.Int {
+			return big.NewInt(100)
+		},
+	}
+
+	called := false
+	arguments.TxFeeHandler = &mock.FeeAccumulatorStub{
+		ProcessTransactionFeeCalled: func(cost *big.Int, devFee *big.Int, hash []byte) {
+			called = true
+		},
+	}
+
+	sc, _ := NewSmartContractProcessor(arguments)
+
+	sc.EpochConfirmed(100)
+
+	tx := &transaction.Transaction{
+		SndAddr: []byte("snd"),
+		RcvAddr: []byte("rcv"),
+		Value:   big.NewInt(15),
+	}
+
+	err := sc.ProcessIfError(nil, []byte("txHash"), tx, "0", []byte("message"), 1, 100)
+	require.Nil(t, err)
+	require.False(t, called)
+}
+
+func createRealEconomicsDataArgs() *economics.ArgsNewEconomicsData {
+	return &economics.ArgsNewEconomicsData{
+		Economics: &config.EconomicsConfig{
+			GlobalSettings: config.GlobalSettings{
+				GenesisTotalSupply: "20000000000000000000000000",
+				MinimumInflation:   0.0,
+				YearSettings: []*config.YearSetting{
+					{Year: 1, MaximumInflation: 0.10845130},
+				},
+				Denomination: 18,
+			},
+			RewardsSettings: config.RewardsSettings{
+				LeaderPercentage:                 0.1,
+				DeveloperPercentage:              0.3,
+				ProtocolSustainabilityPercentage: 0.1,
+				ProtocolSustainabilityAddress:    "erd1j25xk97yf820rgdp3mj5scavhjkn6tjyn0t63pmv5qyjj7wxlcfqqe2rw5",
+				TopUpGradientPoint:               "3000000000000000000000000",
+				TopUpFactor:                      0.25,
+			},
+			FeeSettings: config.FeeSettings{
+				MaxGasLimitPerBlock:     "1500000000",
+				MaxGasLimitPerMetaBlock: "15000000000",
+				GasPerDataByte:          "1500",
+				MinGasPrice:             "1000000000",
+				MinGasLimit:             "50000",
+				GasPriceModifier:        0.01,
+			},
+		},
+		EpochNotifier:                  &mock.EpochNotifierStub{},
+		PenalizedTooMuchGasEnableEpoch: 0,
+		GasPriceModifierEnableEpoch:    0,
+	}
+}
+
+func computeExpectedResults(
+	args *economics.ArgsNewEconomicsData,
+	tx *transaction.Transaction,
+	builtInGasUsed uint64,
+	vmoutput *vmcommon.VMOutput,
+	stakingV2Enabled bool,
+) (*big.Int, *big.Int) {
+	minGasLimitBigInt, _ := big.NewInt(0).SetString(args.Economics.FeeSettings.MinGasLimit, 10)
+	gasPerByteBigInt, _ := big.NewInt(0).SetString(args.Economics.FeeSettings.GasPerDataByte, 10)
+	minGasLimit := minGasLimitBigInt.Uint64()
+	gasPerByte := gasPerByteBigInt.Uint64()
+
+	moveGas := uint64(len(tx.Data))*gasPerByte + minGasLimit
+	moveFee := big.NewInt(0).SetUint64(moveGas)
+	moveFee = big.NewInt(0).Mul(moveFee, big.NewInt(0).SetUint64(tx.GasPrice))
+
+	processGas := tx.GasLimit - builtInGasUsed - moveGas - vmoutput.GasRemaining
+	processPrice := big.NewInt(0).SetUint64(uint64(float64(tx.GasPrice) * args.Economics.FeeSettings.GasPriceModifier))
+	processFee := big.NewInt(0).SetUint64(processGas)
+	processFee = big.NewInt(0).Mul(processFee, processPrice)
+
+	builtInFee := big.NewInt(0).Mul(big.NewInt(0).SetUint64(builtInGasUsed), processPrice)
+
+	expectedTotalFee := big.NewInt(0).Add(moveFee, processFee)
+	expectedTotalFee.Add(expectedTotalFee, builtInFee)
+	var expectedDevFees *big.Int
+	if stakingV2Enabled {
+		expectedDevFees = core.GetIntTrimmedPercentageOfValue(processFee, args.Economics.RewardsSettings.DeveloperPercentage)
+	} else {
+		expectedDevFees = core.GetApproximatePercentageOfValue(processFee, args.Economics.RewardsSettings.DeveloperPercentage)
+	}
+	return expectedTotalFee, expectedDevFees
 }

@@ -1,24 +1,29 @@
 package leveldb
 
 import (
+	"bytes"
+	"fmt"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 
-	"github.com/ElrondNetwork/elrond-go/core/logger"
+	logger "github.com/ElrondNetwork/elrond-go-logger"
 	"github.com/ElrondNetwork/elrond-go/storage"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 )
 
+var _ storage.Persister = (*DB)(nil)
+
 // read + write + execute for owner only
 const rwxOwner = 0700
 
-var log = logger.DefaultLogger()
+var log = logger.GetOrCreate("storage/leveldb")
 
 // DB holds a pointer to the leveldb database and the path to where it is stored.
 type DB struct {
-	db                *leveldb.DB
+	*baseLevelDb
 	path              string
 	maxBatchSize      int
 	batchDelaySeconds int
@@ -46,13 +51,17 @@ func NewDB(path string, batchDelaySeconds int, maxBatchSize int, maxOpenFiles in
 		OpenFilesCacheCapacity: maxOpenFiles,
 	}
 
-	db, err := leveldb.OpenFile(path, options)
+	db, err := openLevelDB(path, options)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w for path %s", err, path)
+	}
+
+	bldb := &baseLevelDb{
+		db: db,
 	}
 
 	dbStore := &DB{
-		db:                db,
+		baseLevelDb:       bldb,
 		path:              path,
 		maxBatchSize:      maxBatchSize,
 		batchDelaySeconds: batchDelaySeconds,
@@ -64,6 +73,10 @@ func NewDB(path string, batchDelaySeconds int, maxBatchSize int, maxOpenFiles in
 
 	go dbStore.batchTimeoutHandle()
 
+	runtime.SetFinalizer(dbStore, func(db *DB) {
+		_ = db.Close()
+	})
+
 	return dbStore, nil
 }
 
@@ -74,7 +87,7 @@ func (s *DB) batchTimeoutHandle() {
 			s.mutBatch.Lock()
 			err := s.putBatch(s.batch)
 			if err != nil {
-				log.Error(err.Error())
+				log.Warn("leveldb putBatch", "error", err.Error())
 				s.mutBatch.Unlock()
 				continue
 			}
@@ -83,18 +96,13 @@ func (s *DB) batchTimeoutHandle() {
 			s.sizeBatch = 0
 			s.mutBatch.Unlock()
 		case <-s.dbClosed:
+			log.Debug("closing the timed batch handler", "path", s.path)
 			return
 		}
 	}
 }
 
-// Put adds the value to the (key, val) storage medium
-func (s *DB) Put(key, val []byte) error {
-	err := s.batch.Put(key, val)
-	if err != nil {
-		return err
-	}
-
+func (s *DB) updateBatchWithIncrement() error {
 	s.mutBatch.Lock()
 	defer s.mutBatch.Unlock()
 
@@ -103,9 +111,9 @@ func (s *DB) Put(key, val []byte) error {
 		return nil
 	}
 
-	err = s.putBatch(s.batch)
+	err := s.putBatch(s.batch)
 	if err != nil {
-		log.Error(err.Error())
+		log.Warn("leveldb putBatch", "error", err.Error())
 		return err
 	}
 
@@ -115,8 +123,26 @@ func (s *DB) Put(key, val []byte) error {
 	return nil
 }
 
+// Put adds the value to the (key, val) storage medium
+func (s *DB) Put(key, val []byte) error {
+	err := s.batch.Put(key, val)
+	if err != nil {
+		return err
+	}
+
+	return s.updateBatchWithIncrement()
+}
+
 // Get returns the value associated to the key
 func (s *DB) Get(key []byte) ([]byte, error) {
+	data := s.batch.Get(key)
+	if data != nil {
+		if bytes.Equal(data, []byte(removed)) {
+			return nil, storage.ErrKeyNotFound
+		}
+		return data, nil
+	}
+
 	data, err := s.db.Get(key, nil)
 	if err == leveldb.ErrNotFound {
 		return nil, storage.ErrKeyNotFound
@@ -128,8 +154,16 @@ func (s *DB) Get(key []byte) ([]byte, error) {
 	return data, nil
 }
 
-// Has returns true if the given key is present in the persistence medium
+// Has returns nil if the given key is present in the persistence medium
 func (s *DB) Has(key []byte) error {
+	data := s.batch.Get(key)
+	if data != nil {
+		if bytes.Equal(data, []byte(removed)) {
+			return storage.ErrKeyNotFound
+		}
+		return nil
+	}
+
 	has, err := s.db.Has(key, nil)
 	if err != nil {
 		return err
@@ -155,7 +189,7 @@ func (s *DB) createBatch() storage.Batcher {
 
 // putBatch writes the Batch data into the database
 func (s *DB) putBatch(b storage.Batcher) error {
-	batch, ok := b.(*batch)
+	dbBatch, ok := b.(*batch)
 	if !ok {
 		return storage.ErrInvalidBatch
 	}
@@ -164,7 +198,7 @@ func (s *DB) putBatch(b storage.Batcher) error {
 		Sync: true,
 	}
 
-	return s.db.Write(batch.batch, wopt)
+	return s.db.Write(dbBatch.batch, wopt)
 }
 
 // Close closes the files/resources associated to the storage medium
@@ -174,7 +208,10 @@ func (s *DB) Close() error {
 	s.sizeBatch = 0
 	s.mutBatch.Unlock()
 
-	s.dbClosed <- struct{}{}
+	select {
+	case s.dbClosed <- struct{}{}:
+	default:
+	}
 
 	return s.db.Close()
 }
@@ -185,7 +222,7 @@ func (s *DB) Remove(key []byte) error {
 	_ = s.batch.Delete(key)
 	s.mutBatch.Unlock()
 
-	return s.db.Delete(key, nil)
+	return s.updateBatchWithIncrement()
 }
 
 // Destroy removes the storage medium stored data
@@ -206,10 +243,12 @@ func (s *DB) Destroy() error {
 	return err
 }
 
+// DestroyClosed removes the already closed storage medium stored data
+func (s *DB) DestroyClosed() error {
+	return os.RemoveAll(s.path)
+}
+
 // IsInterfaceNil returns true if there is no value under the interface
 func (s *DB) IsInterfaceNil() bool {
-	if s == nil {
-		return true
-	}
-	return false
+	return s == nil
 }

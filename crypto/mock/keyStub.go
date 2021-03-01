@@ -19,6 +19,15 @@ type PublicKeyStub struct {
 	SuiteStub       func() crypto.Suite
 }
 
+// KeyGenMock mocks a key generation implementation
+type KeyGenMock struct {
+	GeneratePairMock            func() (crypto.PrivateKey, crypto.PublicKey)
+	PrivateKeyFromByteArrayMock func(b []byte) (crypto.PrivateKey, error)
+	PublicKeyFromByteArrayMock  func(b []byte) (crypto.PublicKey, error)
+	CheckPublicKeyValidMock     func(b []byte) error
+	SuiteMock                   func() crypto.Suite
+}
+
 // ToByteArray returns the byte array representation of the private key
 func (privKey *PrivateKeyStub) ToByteArray() ([]byte, error) {
 	return privKey.ToByteArrayStub()
@@ -41,10 +50,7 @@ func (privKey *PrivateKeyStub) Scalar() crypto.Scalar {
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (privKey *PrivateKeyStub) IsInterfaceNil() bool {
-	if privKey == nil {
-		return true
-	}
-	return false
+	return privKey == nil
 }
 
 // ToByteArray returns the byte array representation of the public key
@@ -64,8 +70,35 @@ func (pubKey *PublicKeyStub) Point() crypto.Point {
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (pubKey *PublicKeyStub) IsInterfaceNil() bool {
-	if pubKey == nil {
-		return true
-	}
-	return false
+	return pubKey == nil
+}
+
+// GeneratePair generates a pair of private and public keys
+func (keyGen *KeyGenMock) GeneratePair() (crypto.PrivateKey, crypto.PublicKey) {
+	return keyGen.GeneratePairMock()
+}
+
+// PrivateKeyFromByteArray generates the private key from it's byte array representation
+func (keyGen *KeyGenMock) PrivateKeyFromByteArray(b []byte) (crypto.PrivateKey, error) {
+	return keyGen.PrivateKeyFromByteArrayMock(b)
+}
+
+// PublicKeyFromByteArray generates a public key from it's byte array representation
+func (keyGen *KeyGenMock) PublicKeyFromByteArray(b []byte) (crypto.PublicKey, error) {
+	return keyGen.PublicKeyFromByteArrayMock(b)
+}
+
+// CheckPublicKeyValid verifies the validity of the public key
+func (keyGen *KeyGenMock) CheckPublicKeyValid(b []byte) error {
+	return keyGen.CheckPublicKeyValidMock(b)
+}
+
+// Suite -
+func (keyGen *KeyGenMock) Suite() crypto.Suite {
+	return keyGen.SuiteMock()
+}
+
+// IsInterfaceNil returns true if there is no value under the interface
+func (keyGen *KeyGenMock) IsInterfaceNil() bool {
+	return keyGen == nil
 }
