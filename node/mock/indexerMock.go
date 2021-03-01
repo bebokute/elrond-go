@@ -1,45 +1,67 @@
 package mock
 
 import (
-	"github.com/ElrondNetwork/elrond-go/core/indexer"
+	"github.com/ElrondNetwork/elastic-indexer-go/workItems"
 	"github.com/ElrondNetwork/elrond-go/core/statistics"
 	"github.com/ElrondNetwork/elrond-go/data"
 	"github.com/ElrondNetwork/elrond-go/data/block"
+	"github.com/ElrondNetwork/elrond-go/data/state"
+	"github.com/ElrondNetwork/elrond-go/process"
 )
 
 // IndexerMock is a mock implementation fot the Indexer interface
 type IndexerMock struct {
-	SaveBlockCalled func(body block.Body, header *block.Header)
+	SaveBlockCalled func(body *block.Body, header *block.Header)
 }
 
-func (im *IndexerMock) SaveBlock(body data.BodyHandler, header data.HeaderHandler, txPool map[string]data.TransactionHandler, signersIndexes []uint64) {
+// SaveBlock -
+func (im *IndexerMock) SaveBlock(_ data.BodyHandler, _ data.HeaderHandler, _ map[string]data.TransactionHandler, _ []uint64, _ []string, _ []byte) {
 	panic("implement me")
 }
 
-func (im *IndexerMock) SaveMetaBlock(header data.HeaderHandler, signersIndexes []uint64) {
+// Close will do nothing
+func (im *IndexerMock) Close() error {
+	return nil
+}
+
+// SetTxLogsProcessor will do nothing
+func (im *IndexerMock) SetTxLogsProcessor(_ process.TransactionLogProcessorDatabase) {
+}
+
+// UpdateTPS -
+func (im *IndexerMock) UpdateTPS(_ statistics.TPSBenchmark) {
 	panic("implement me")
 }
 
-func (im *IndexerMock) UpdateTPS(tpsBenchmark statistics.TPSBenchmark) {
+// SaveRoundsInfo -
+func (im *IndexerMock) SaveRoundsInfo(_ []workItems.RoundInfo) {
 	panic("implement me")
 }
 
-func (im *IndexerMock) SaveRoundInfo(roundInfo indexer.RoundInfo) {
+// SaveValidatorsRating --
+func (im *IndexerMock) SaveValidatorsRating(_ string, _ []workItems.ValidatorRatingInfo) {
+
+}
+
+// SaveValidatorsPubKeys -
+func (im *IndexerMock) SaveValidatorsPubKeys(_ map[uint32][][]byte, _ uint32) {
 	panic("implement me")
 }
 
-func (im *IndexerMock) SaveValidatorsPubKeys(validatorsPubKeys map[uint32][][]byte) {
-	panic("implement me")
+// RevertIndexedBlock -
+func (im *IndexerMock) RevertIndexedBlock(_ data.HeaderHandler, _ data.BodyHandler) {
+}
+
+// SaveAccounts -
+func (im *IndexerMock) SaveAccounts(_ uint64, _ []state.UserAccountHandler) {
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (im *IndexerMock) IsInterfaceNil() bool {
-	if im == nil {
-		return true
-	}
-	return false
+	return im == nil
 }
 
+// IsNilIndexer -
 func (im *IndexerMock) IsNilIndexer() bool {
 	return false
 }

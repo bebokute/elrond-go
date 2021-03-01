@@ -3,80 +3,113 @@ package broadcast
 import (
 	"github.com/ElrondNetwork/elrond-go/consensus"
 	"github.com/ElrondNetwork/elrond-go/consensus/spos"
-	"github.com/ElrondNetwork/elrond-go/crypto"
+	"github.com/ElrondNetwork/elrond-go/core"
+	"github.com/ElrondNetwork/elrond-go/core/check"
 	"github.com/ElrondNetwork/elrond-go/data"
-	"github.com/ElrondNetwork/elrond-go/marshal"
+	"github.com/ElrondNetwork/elrond-go/data/block"
 	"github.com/ElrondNetwork/elrond-go/process/factory"
-	"github.com/ElrondNetwork/elrond-go/sharding"
 )
+
+var _ consensus.BroadcastMessenger = (*metaChainMessenger)(nil)
 
 type metaChainMessenger struct {
 	*commonMessenger
-	marshalizer marshal.Marshalizer
-	messenger   consensus.P2PMessenger
+}
+
+// MetaChainMessengerArgs holds the arguments for creating a metaChainMessenger instance
+type MetaChainMessengerArgs struct {
+	CommonMessengerArgs
 }
 
 // NewMetaChainMessenger creates a new metaChainMessenger object
 func NewMetaChainMessenger(
-	marshalizer marshal.Marshalizer,
-	messenger consensus.P2PMessenger,
-	privateKey crypto.PrivateKey,
-	shardCoordinator sharding.Coordinator,
-	singleSigner crypto.SingleSigner,
+	args MetaChainMessengerArgs,
 ) (*metaChainMessenger, error) {
 
-	err := checkMetaChainNilParameters(marshalizer, messenger, privateKey, shardCoordinator, singleSigner)
+	err := checkMetaChainNilParameters(args)
+	if err != nil {
+		return nil, err
+	}
+
+	dbbArgs := &ArgsDelayedBlockBroadcaster{
+		InterceptorsContainer: args.InterceptorsContainer,
+		HeadersSubscriber:     args.HeadersSubscriber,
+		LeaderCacheSize:       args.MaxDelayCacheSize,
+		ValidatorCacheSize:    args.MaxValidatorDelayCacheSize,
+		ShardCoordinator:      args.ShardCoordinator,
+	}
+
+	dbb, err := NewDelayedBlockBroadcaster(dbbArgs)
 	if err != nil {
 		return nil, err
 	}
 
 	cm := &commonMessenger{
-		marshalizer:      marshalizer,
-		messenger:        messenger,
-		privateKey:       privateKey,
-		shardCoordinator: shardCoordinator,
-		singleSigner:     singleSigner,
+		marshalizer:             args.Marshalizer,
+		hasher:                  args.Hasher,
+		messenger:               args.Messenger,
+		privateKey:              args.PrivateKey,
+		shardCoordinator:        args.ShardCoordinator,
+		peerSignatureHandler:    args.PeerSignatureHandler,
+		delayedBlockBroadcaster: dbb,
 	}
 
 	mcm := &metaChainMessenger{
 		commonMessenger: cm,
-		marshalizer:     marshalizer,
-		messenger:       messenger,
+	}
+
+	err = dbb.SetBroadcastHandlers(mcm.BroadcastMiniBlocks, mcm.BroadcastTransactions, mcm.BroadcastHeader)
+	if err != nil {
+		return nil, err
 	}
 
 	return mcm, nil
 }
 
 func checkMetaChainNilParameters(
-	marshalizer marshal.Marshalizer,
-	messenger consensus.P2PMessenger,
-	privateKey crypto.PrivateKey,
-	shardCoordinator sharding.Coordinator,
-	singleSigner crypto.SingleSigner,
+	args MetaChainMessengerArgs,
 ) error {
-	if marshalizer == nil || marshalizer.IsInterfaceNil() {
-		return spos.ErrNilMarshalizer
-	}
-	if messenger == nil || messenger.IsInterfaceNil() {
-		return spos.ErrNilMessenger
-	}
-	if privateKey == nil || privateKey.IsInterfaceNil() {
-		return spos.ErrNilPrivateKey
-	}
-	if shardCoordinator == nil || shardCoordinator.IsInterfaceNil() {
-		return spos.ErrNilShardCoordinator
-	}
-	if singleSigner == nil || singleSigner.IsInterfaceNil() {
-		return spos.ErrNilSingleSigner
-	}
-
-	return nil
+	return checkCommonMessengerNilParameters(args.CommonMessengerArgs)
 }
 
 // BroadcastBlock will send on metachain blocks topic the header
 func (mcm *metaChainMessenger) BroadcastBlock(blockBody data.BodyHandler, header data.HeaderHandler) error {
-	if header == nil || header.IsInterfaceNil() {
+	if check.IfNil(blockBody) {
+		return spos.ErrNilBody
+	}
+
+	err := blockBody.IntegrityAndValidity()
+	if err != nil {
+		return err
+	}
+
+	if check.IfNil(header) {
 		return spos.ErrNilMetaHeader
+	}
+
+	msgHeader, err := mcm.marshalizer.Marshal(header)
+	if err != nil {
+		return err
+	}
+
+	b := blockBody.(*block.Body)
+	msgBlockBody, err := mcm.marshalizer.Marshal(b)
+	if err != nil {
+		return err
+	}
+
+	selfIdentifier := mcm.shardCoordinator.CommunicationIdentifier(mcm.shardCoordinator.SelfId())
+
+	go mcm.messenger.Broadcast(factory.MetachainBlocksTopic, msgHeader)
+	go mcm.messenger.Broadcast(factory.MiniBlocksTopic+selfIdentifier, msgBlockBody)
+
+	return nil
+}
+
+// BroadcastHeader will send on metachain blocks topic the header
+func (mcm *metaChainMessenger) BroadcastHeader(header data.HeaderHandler) error {
+	if check.IfNil(header) {
+		return spos.ErrNilHeader
 	}
 
 	msgHeader, err := mcm.marshalizer.Marshal(header)
@@ -89,31 +122,59 @@ func (mcm *metaChainMessenger) BroadcastBlock(blockBody data.BodyHandler, header
 	return nil
 }
 
-// BroadcastHeader will send on meta-to-shards topic the header
-func (mcm *metaChainMessenger) BroadcastHeader(header data.HeaderHandler) error {
-	// meta chain does not need to broadcast separately the header, as it have no body and BroadcastBlock does all
-	// the job for it, but this method is created to satisfy the BroadcastMessenger interface
+// BroadcastBlockDataLeader broadcasts the block data as consensus group leader
+func (mcm *metaChainMessenger) BroadcastBlockDataLeader(
+	_ data.HeaderHandler,
+	miniBlocks map[uint32][]byte,
+	transactions map[string][][]byte,
+) error {
+	go mcm.BroadcastBlockData(miniBlocks, transactions, core.ExtraDelayForBroadcastBlockInfo)
 	return nil
 }
 
-// BroadcastMiniBlocks will send on miniblocks topic the miniblocks
-func (mcm *metaChainMessenger) BroadcastMiniBlocks(miniBlocks map[uint32][]byte) error {
-	// meta chain does not need to broadcast miniblocks but this method is created to satisfy the BroadcastMessenger
-	// interface
-	return nil
+// PrepareBroadcastHeaderValidator prepares the validator header broadcast in case leader broadcast fails
+func (mcm *metaChainMessenger) PrepareBroadcastHeaderValidator(
+	header data.HeaderHandler,
+	miniBlocks map[uint32][]byte,
+	transactions map[string][][]byte,
+	idx int,
+) {
+	if check.IfNil(header) {
+		log.Error("metaChainMessenger.PrepareBroadcastHeaderValidator", "error", spos.ErrNilHeader)
+		return
+	}
+
+	headerHash, err := core.CalculateHash(mcm.marshalizer, mcm.hasher, header)
+	if err != nil {
+		log.Error("metaChainMessenger.PrepareBroadcastHeaderValidator", "error", err)
+		return
+	}
+
+	vData := &validatorHeaderBroadcastData{
+		headerHash:           headerHash,
+		header:               header,
+		metaMiniBlocksData:   miniBlocks,
+		metaTransactionsData: transactions,
+		order:                uint32(idx),
+	}
+
+	err = mcm.delayedBlockBroadcaster.SetHeaderForValidator(vData)
+	if err != nil {
+		log.Error("metaChainMessenger.PrepareBroadcastHeaderValidator", "error", err)
+		return
+	}
 }
 
-// BroadcastTransactions will send on transaction topic the transactions
-func (mcm *metaChainMessenger) BroadcastTransactions(transactions map[string][][]byte) error {
-	// meta chain does not need to broadcast transactions but this method is created to satisfy the BroadcastMessenger
-	// interface
-	return nil
+// PrepareBroadcastBlockDataValidator prepares the validator fallback broadcast in case leader broadcast fails
+func (mcm *metaChainMessenger) PrepareBroadcastBlockDataValidator(
+	_ data.HeaderHandler,
+	_ map[uint32][]byte,
+	_ map[string][][]byte,
+	_ int,
+) {
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (mcm *metaChainMessenger) IsInterfaceNil() bool {
-	if mcm == nil {
-		return true
-	}
-	return false
+	return mcm == nil
 }

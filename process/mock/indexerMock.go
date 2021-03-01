@@ -1,9 +1,11 @@
 package mock
 
 import (
-	"github.com/ElrondNetwork/elrond-go/core/indexer"
+	"github.com/ElrondNetwork/elastic-indexer-go/workItems"
 	"github.com/ElrondNetwork/elrond-go/core/statistics"
 	"github.com/ElrondNetwork/elrond-go/data"
+	"github.com/ElrondNetwork/elrond-go/data/state"
+	"github.com/ElrondNetwork/elrond-go/process"
 )
 
 // IndexerMock is a mock implementation fot the Indexer interface
@@ -11,36 +13,58 @@ type IndexerMock struct {
 	SaveBlockCalled func(body data.BodyHandler, header data.HeaderHandler, txPool map[string]data.TransactionHandler)
 }
 
-func (im *IndexerMock) SaveBlock(body data.BodyHandler, header data.HeaderHandler, txPool map[string]data.TransactionHandler, signersIndexes []uint64) {
+// SaveBlock -
+func (im *IndexerMock) SaveBlock(body data.BodyHandler, header data.HeaderHandler, txPool map[string]data.TransactionHandler, _ []uint64, _ []string, _ []byte) {
 	if im.SaveBlockCalled != nil {
 		im.SaveBlockCalled(body, header, txPool)
 	}
 }
 
-func (im *IndexerMock) SaveMetaBlock(header data.HeaderHandler, signersIndexes []uint64) {
-	return
+// SetTxLogsProcessor will do nothing
+func (im *IndexerMock) SetTxLogsProcessor(_ process.TransactionLogProcessorDatabase) {
 }
 
-func (im *IndexerMock) UpdateTPS(tpsBenchmark statistics.TPSBenchmark) {
+// Close will do nothing
+func (im *IndexerMock) Close() error {
+	return nil
+}
+
+// SaveValidatorsRating --
+func (im *IndexerMock) SaveValidatorsRating(_ string, _ []workItems.ValidatorRatingInfo) {
+
+}
+
+// SaveMetaBlock -
+func (im *IndexerMock) SaveMetaBlock(_ data.HeaderHandler, _ []uint64) {
+}
+
+// UpdateTPS -
+func (im *IndexerMock) UpdateTPS(_ statistics.TPSBenchmark) {
+}
+
+// SaveRoundsInfo -
+func (im *IndexerMock) SaveRoundsInfo(_ []workItems.RoundInfo) {
+}
+
+// SaveValidatorsPubKeys -
+func (im *IndexerMock) SaveValidatorsPubKeys(_ map[uint32][][]byte, _ uint32) {
 	panic("implement me")
 }
 
-func (im *IndexerMock) SaveRoundInfo(roundInfo indexer.RoundInfo) {
-	return
+// RevertIndexedBlock -
+func (im *IndexerMock) RevertIndexedBlock(_ data.HeaderHandler, _ data.BodyHandler) {
 }
 
-func (im *IndexerMock) SaveValidatorsPubKeys(validatorsPubKeys map[uint32][][]byte) {
-	panic("implement me")
+// SaveAccounts -
+func (im *IndexerMock) SaveAccounts(_ uint64, _ []state.UserAccountHandler) {
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (im *IndexerMock) IsInterfaceNil() bool {
-	if im == nil {
-		return true
-	}
-	return false
+	return im == nil
 }
 
+// IsNilIndexer -
 func (im *IndexerMock) IsNilIndexer() bool {
-	return true
+	return false
 }

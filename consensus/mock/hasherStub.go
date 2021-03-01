@@ -1,5 +1,6 @@
 package mock
 
+// HasherStub -
 type HasherStub struct {
 	ComputeCalled   func(s string) []byte
 	EmptyHashCalled func() []byte
@@ -23,8 +24,5 @@ func (hs *HasherStub) Size() int {
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (hs *HasherStub) IsInterfaceNil() bool {
-	if hs == nil {
-		return true
-	}
-	return false
+	return hs == nil
 }

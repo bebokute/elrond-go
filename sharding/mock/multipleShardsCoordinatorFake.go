@@ -3,8 +3,6 @@ package mock
 import (
 	"fmt"
 	"math"
-
-	"github.com/ElrondNetwork/elrond-go/data/state"
 )
 
 type multipleShardsCoordinatorFake struct {
@@ -14,6 +12,7 @@ type multipleShardsCoordinatorFake struct {
 	maskLow      uint32
 }
 
+// NewMultipleShardsCoordinatorFake -
 func NewMultipleShardsCoordinatorFake(numOfShards uint32, currentShard uint32) *multipleShardsCoordinatorFake {
 	mscf := &multipleShardsCoordinatorFake{
 		numOfShards:  numOfShards,
@@ -28,18 +27,20 @@ func (mscf *multipleShardsCoordinatorFake) calculateMasks() (uint32, uint32) {
 	return (1 << uint(n)) - 1, (1 << uint(n-1)) - 1
 }
 
+// NumberOfShards -
 func (mscf *multipleShardsCoordinatorFake) NumberOfShards() uint32 {
 	return mscf.numOfShards
 }
 
-func (mscf *multipleShardsCoordinatorFake) ComputeId(address state.AddressContainer) uint32 {
+// ComputeId -
+func (mscf *multipleShardsCoordinatorFake) ComputeId(address []byte) uint32 {
 	bytesNeed := int(mscf.numOfShards/256) + 1
 	startingIndex := 0
-	if len(address.Bytes()) > bytesNeed {
-		startingIndex = len(address.Bytes()) - bytesNeed
+	if len(address) > bytesNeed {
+		startingIndex = len(address) - bytesNeed
 	}
 
-	buffNeeded := address.Bytes()[startingIndex:]
+	buffNeeded := address[startingIndex:]
 
 	addr := uint32(0)
 	for i := 0; i < len(buffNeeded); i++ {
@@ -53,18 +54,22 @@ func (mscf *multipleShardsCoordinatorFake) ComputeId(address state.AddressContai
 	return shard
 }
 
+// SelfId -
 func (mscf *multipleShardsCoordinatorFake) SelfId() uint32 {
 	return mscf.CurrentShard
 }
 
-func (mscf *multipleShardsCoordinatorFake) SetSelfId(shardId uint32) error {
+// SetSelfId -
+func (mscf *multipleShardsCoordinatorFake) SetSelfId(_ uint32) error {
 	return nil
 }
 
-func (mscf *multipleShardsCoordinatorFake) SameShard(firstAddress, secondAddress state.AddressContainer) bool {
+// SameShard -
+func (mscf *multipleShardsCoordinatorFake) SameShard(_, _ []byte) bool {
 	return true
 }
 
+// SetNoShards -
 func (mscf *multipleShardsCoordinatorFake) SetNoShards(numOfShards uint32) {
 	mscf.numOfShards = numOfShards
 }
@@ -85,8 +90,5 @@ func (mscf *multipleShardsCoordinatorFake) CommunicationIdentifier(destShardID u
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (mscf *multipleShardsCoordinatorFake) IsInterfaceNil() bool {
-	if mscf == nil {
-		return true
-	}
-	return false
+	return mscf == nil
 }

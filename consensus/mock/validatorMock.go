@@ -1,40 +1,44 @@
 package mock
 
-import (
-	"math/big"
-)
+const uint32Size = 4
+const numUint32 = 2
 
-type ValidatorMock struct {
-	stake   *big.Int
-	rating  int32
+type validator struct {
 	pubKey  []byte
-	address []byte
+	chances uint32
+	index   uint32
 }
 
-func NewValidatorMock(stake *big.Int, rating int32, pubKey []byte, address []byte) *ValidatorMock {
-	return &ValidatorMock{stake: stake, rating: rating, pubKey: pubKey, address: address}
+// NewValidator creates a new instance of a validator
+func NewValidator(pubKey []byte, chances uint32, index uint32) *validator {
+	return &validator{
+		pubKey:  pubKey,
+		chances: chances,
+		index:   index,
+	}
 }
 
-func (vm *ValidatorMock) Stake() *big.Int {
-	return vm.stake
+// PubKey returns the validator's public key
+func (v *validator) PubKey() []byte {
+	return v.pubKey
 }
 
-func (vm *ValidatorMock) Rating() int32 {
-	return vm.rating
+// Chances returns the validator's chances
+func (v *validator) Chances() uint32 {
+	return v.chances
 }
 
-func (vm *ValidatorMock) PubKey() []byte {
-	return vm.pubKey
+// Index returns the validators index
+func (v *validator) Index() uint32 {
+	return v.index
 }
 
-func (vm *ValidatorMock) Address() []byte {
-	return vm.address
+// Size -
+func (v *validator) Size() int {
+	return len(v.pubKey) + uint32Size*numUint32
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
-func (vm *ValidatorMock) IsInterfaceNil() bool {
-	if vm == nil {
-		return true
-	}
-	return false
+func (v *validator) IsInterfaceNil() bool {
+	return v == nil
 }

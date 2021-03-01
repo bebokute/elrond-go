@@ -1,22 +1,24 @@
 package dataValidators
 
 import (
-	"encoding/hex"
 	"fmt"
 
-	"github.com/ElrondNetwork/elrond-go/core/logger"
+	"github.com/ElrondNetwork/elrond-go/core"
+	"github.com/ElrondNetwork/elrond-go/core/check"
 	"github.com/ElrondNetwork/elrond-go/data/state"
 	"github.com/ElrondNetwork/elrond-go/process"
+	"github.com/ElrondNetwork/elrond-go/process/interceptors/processor"
 	"github.com/ElrondNetwork/elrond-go/sharding"
 )
 
-var log = logger.DefaultLogger()
+var _ process.TxValidator = (*txValidator)(nil)
 
 // txValidator represents a tx handler validator that doesn't check the validity of provided txHandler
 type txValidator struct {
-	accounts         state.AccountsAdapter
-	shardCoordinator sharding.Coordinator
-	rejectedTxs      uint64
+	accounts             state.AccountsAdapter
+	shardCoordinator     sharding.Coordinator
+	whiteListHandler     process.WhiteListHandler
+	pubkeyConverter      core.PubkeyConverter
 	maxNonceDeltaAllowed int
 }
 
@@ -24,77 +26,117 @@ type txValidator struct {
 func NewTxValidator(
 	accounts state.AccountsAdapter,
 	shardCoordinator sharding.Coordinator,
+	whiteListHandler process.WhiteListHandler,
+	pubkeyConverter core.PubkeyConverter,
 	maxNonceDeltaAllowed int,
-	) (*txValidator, error) {
-
-	if accounts == nil || accounts.IsInterfaceNil() {
+) (*txValidator, error) {
+	if check.IfNil(accounts) {
 		return nil, process.ErrNilAccountsAdapter
 	}
-	if shardCoordinator == nil || shardCoordinator.IsInterfaceNil() {
+	if check.IfNil(shardCoordinator) {
 		return nil, process.ErrNilShardCoordinator
+	}
+	if check.IfNil(whiteListHandler) {
+		return nil, process.ErrNilWhiteListHandler
+	}
+	if check.IfNil(pubkeyConverter) {
+		return nil, fmt.Errorf("%w in NewTxValidator", process.ErrNilPubkeyConverter)
 	}
 
 	return &txValidator{
-		accounts:         accounts,
-		shardCoordinator: shardCoordinator,
-		rejectedTxs:      uint64(0),
+		accounts:             accounts,
+		shardCoordinator:     shardCoordinator,
+		whiteListHandler:     whiteListHandler,
 		maxNonceDeltaAllowed: maxNonceDeltaAllowed,
+		pubkeyConverter:      pubkeyConverter,
 	}, nil
 }
 
-// IsTxValidForProcessing will filter transactions that needs to be added in pools
-func (tv *txValidator) IsTxValidForProcessing(interceptedTx process.TxValidatorHandler) bool {
-	shardId := tv.shardCoordinator.SelfId()
-	txShardId := interceptedTx.SenderShardId()
-	senderIsInAnotherShard := shardId != txShardId
-	if senderIsInAnotherShard {
-		return true
+// CheckTxValidity will filter transactions that needs to be added in pools
+func (txv *txValidator) CheckTxValidity(interceptedTx process.TxValidatorHandler) error {
+	// TODO: Refactor, extract methods.
+
+	interceptedData, ok := interceptedTx.(process.InterceptedData)
+	if ok {
+		if txv.whiteListHandler.IsWhiteListed(interceptedData) {
+			return nil
+		}
 	}
 
-	sndAddr := interceptedTx.SenderAddress()
-	accountHandler, err := tv.accounts.GetExistingAccount(sndAddr)
+	shardID := txv.shardCoordinator.SelfId()
+	txShardID := interceptedTx.SenderShardId()
+	senderIsInAnotherShard := shardID != txShardID
+	if senderIsInAnotherShard {
+		return nil
+	}
+
+	senderAddress := interceptedTx.SenderAddress()
+	accountHandler, err := txv.accounts.GetExistingAccount(senderAddress)
 	if err != nil {
-		log.Debug(fmt.Sprintf("Transaction's sender address %s does not exist in current shard %d", sndAddr, shardId))
-		tv.rejectedTxs++
-		return false
+		return fmt.Errorf("%w for address %s and shard %d, err: %s",
+			process.ErrAccountNotFound,
+			txv.pubkeyConverter.Encode(senderAddress),
+			shardID,
+			err.Error(),
+		)
 	}
 
 	accountNonce := accountHandler.GetNonce()
 	txNonce := interceptedTx.Nonce()
 	lowerNonceInTx := txNonce < accountNonce
-	veryHighNonceInTx := txNonce > accountNonce+uint64(tv.maxNonceDeltaAllowed)
+	veryHighNonceInTx := txNonce > accountNonce+uint64(txv.maxNonceDeltaAllowed)
 	isTxRejected := lowerNonceInTx || veryHighNonceInTx
 	if isTxRejected {
-		tv.rejectedTxs++
-		return false
+		return fmt.Errorf("%w lowerNonceInTx: %v, veryHighNonceInTx: %v",
+			process.ErrWrongTransaction,
+			lowerNonceInTx,
+			veryHighNonceInTx,
+		)
 	}
 
-	account, ok := accountHandler.(*state.Account)
+	account, ok := accountHandler.(state.UserAccountHandler)
 	if !ok {
-		hexSenderAddr := hex.EncodeToString(sndAddr.Bytes())
-		log.Error(fmt.Sprintf("Cannot convert account handler in a state.Account %s", hexSenderAddr))
-		return false
+		return fmt.Errorf("%w, account is not of type *state.Account, address: %s",
+			process.ErrWrongTypeAssertion,
+			txv.pubkeyConverter.Encode(senderAddress),
+		)
 	}
 
-	accountBalance := account.Balance
-	txTotalValue := interceptedTx.TotalValue()
-	if accountBalance.Cmp(txTotalValue) < 0 {
-		tv.rejectedTxs++
-		return false
+	accountBalance := account.GetBalance()
+	txFee := interceptedTx.Fee()
+	if accountBalance.Cmp(txFee) < 0 {
+		return fmt.Errorf("%w, for address: %s, wanted %v, have %v",
+			process.ErrInsufficientFunds,
+			txv.pubkeyConverter.Encode(senderAddress),
+			txFee,
+			accountBalance,
+		)
 	}
 
-	return true
+	return nil
 }
 
-// NumRejectedTxs will return number of rejected transaction
-func (tv *txValidator) NumRejectedTxs() uint64 {
-	return tv.rejectedTxs
+// CheckTxWhiteList will check if the cross shard transactions are whitelisted and could be added in pools
+func (txv *txValidator) CheckTxWhiteList(data process.InterceptedData) error {
+	interceptedTx, ok := data.(processor.InterceptedTransactionHandler)
+	if !ok {
+		return process.ErrWrongTypeAssertion
+	}
+
+	isTxCrossShardDestMe := interceptedTx.SenderShardId() != txv.shardCoordinator.SelfId() &&
+		interceptedTx.ReceiverShardId() == txv.shardCoordinator.SelfId()
+	if !isTxCrossShardDestMe {
+		return nil
+	}
+
+	if txv.whiteListHandler.IsWhiteListed(data) {
+		return nil
+	}
+
+	return process.ErrTransactionIsNotWhitelisted
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
-func (tv *txValidator) IsInterfaceNil() bool {
-	if tv == nil {
-		return true
-	}
-	return false
+func (txv *txValidator) IsInterfaceNil() bool {
+	return txv == nil
 }

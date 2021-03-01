@@ -15,11 +15,11 @@ type MemDbMock struct {
 }
 
 // NewMemDbMock creates a new memorydb object
-func NewMemDbMock() (*MemDbMock, error) {
+func NewMemDbMock() *MemDbMock {
 	return &MemDbMock{
 		db:   make(map[string][]byte),
 		mutx: sync.RWMutex{},
-	}, nil
+	}
 }
 
 // Put adds the value to the (key, val) storage medium
@@ -40,20 +40,23 @@ func (s *MemDbMock) Get(key []byte) ([]byte, error) {
 	val, ok := s.db[string(key)]
 
 	if !ok {
-		return nil, errors.New(fmt.Sprintf("key: %s not found", base64.StdEncoding.EncodeToString(key)))
+		return nil, fmt.Errorf("key: %s not found", base64.StdEncoding.EncodeToString(key))
 	}
 
 	return val, nil
 }
 
 // Has returns true if the given key is present in the persistence medium, false otherwise
-func (s *MemDbMock) Has(key []byte) (bool, error) {
+func (s *MemDbMock) Has(key []byte) error {
 	s.mutx.RLock()
 	defer s.mutx.RUnlock()
 
 	_, ok := s.db[string(key)]
+	if !ok {
+		return errors.New("key not present")
+	}
 
-	return ok, nil
+	return nil
 }
 
 // Init initializes the storage medium and prepares it for usage
@@ -88,10 +91,29 @@ func (s *MemDbMock) Destroy() error {
 	return nil
 }
 
+// DestroyClosed removes the already closed storage medium stored data
+func (s *MemDbMock) DestroyClosed() error {
+	return nil
+}
+
+// RangeKeys will iterate over all contained (key, value) pairs calling the handler for each pair
+func (s *MemDbMock) RangeKeys(handler func(key []byte, value []byte) bool) {
+	if handler == nil {
+		return
+	}
+
+	s.mutx.RLock()
+	defer s.mutx.RUnlock()
+
+	for k, v := range s.db {
+		shouldContinue := handler([]byte(k), v)
+		if !shouldContinue {
+			return
+		}
+	}
+}
+
 // IsInterfaceNil returns true if there is no value under the interface
 func (s *MemDbMock) IsInterfaceNil() bool {
-	if s == nil {
-		return true
-	}
-	return false
+	return s == nil
 }

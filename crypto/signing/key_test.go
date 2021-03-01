@@ -1,7 +1,6 @@
 package signing_test
 
 import (
-	"crypto/cipher"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -64,20 +63,27 @@ func createPoint() crypto.Point {
 	}
 }
 
-func createKeyPair(_ cipher.Stream) (crypto.Scalar, crypto.Point) {
+func createKeyPair() (crypto.Scalar, crypto.Point) {
 	scalar := createScalar()
 	point, _ := createPoint().Mul(scalar)
 	return scalar, point
 }
 
-func createMockSuite() crypto.Suite {
+func createMockSuite() *mock.SuiteMock {
 	suite := &mock.SuiteMock{
-		CreateKeyPairStub: createKeyPair,
-		CreateScalarStub:  createScalar,
-		CreatePointStub:   createPoint,
+		CreateKeyPairStub:        createKeyPair,
+		CreateScalarStub:         createScalar,
+		CreatePointStub:          createPoint,
+		CreatePointForScalarStub: createPointForScalar,
 	}
 
 	return suite
+}
+
+func createPointForScalar(scalar crypto.Scalar) (crypto.Point, error) {
+	point, _ := createPoint().Mul(scalar)
+
+	return point, nil
 }
 
 func TestNewKeyGenerator(t *testing.T) {
@@ -184,6 +190,9 @@ func TestKeyGenerator_PublicKeyFromByteArrayInvalidArrayShouldErr(t *testing.T) 
 	suite := createMockSuite()
 	kg := signing.NewKeyGenerator(suite)
 	pubKeyBytes := invalidStr
+	suite.PointLenStub = func() int {
+		return len(pubKeyBytes)
+	}
 	pubKey, err := kg.PublicKeyFromByteArray(pubKeyBytes)
 
 	assert.Nil(t, pubKey)
@@ -196,6 +205,9 @@ func TestKeyGenerator_PublicKeyFromByteArrayOK(t *testing.T) {
 	suite := createMockSuite()
 	kg := signing.NewKeyGenerator(suite)
 	pubKeyBytes := []byte("valid key")
+	suite.PointLenStub = func() int {
+		return len(pubKeyBytes)
+	}
 	pubKey, err := kg.PublicKeyFromByteArray(pubKeyBytes)
 
 	assert.Nil(t, err)
@@ -237,7 +249,8 @@ func TestPrivateKey_GeneratePublicOK(t *testing.T) {
 	pubkey := privKey.GeneratePublic() // pubKey = privKey * BasePoint.Y
 	pubKeyBytes, _ := pubkey.Point().MarshalBinary()
 
-	assert.Equal(t, []byte(fmt.Sprintf("%d%d", initScalar, initScalar)), pubKeyBytes)
+	expectedResult, _ := marshalPublic(initScalar*initPointX, initScalar*initPointY)
+	assert.Equal(t, expectedResult, pubKeyBytes)
 }
 
 func TestPrivateKey_SuiteOK(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"github.com/ElrondNetwork/elrond-go/consensus"
 	"github.com/ElrondNetwork/elrond-go/crypto"
 	"github.com/ElrondNetwork/elrond-go/data"
+	"github.com/ElrondNetwork/elrond-go/epochStart"
 	"github.com/ElrondNetwork/elrond-go/hashing"
 	"github.com/ElrondNetwork/elrond-go/marshal"
 	"github.com/ElrondNetwork/elrond-go/ntp"
@@ -11,131 +12,217 @@ import (
 	"github.com/ElrondNetwork/elrond-go/sharding"
 )
 
+// ConsensusCoreMock -
 type ConsensusCoreMock struct {
-	blockChain             data.ChainHandler
-	blockProcessor         process.BlockProcessor
-	bootstrapper           process.Bootstrapper
-	broadcastMessenger     consensus.BroadcastMessenger
-	chronologyHandler      consensus.ChronologyHandler
-	hasher                 hashing.Hasher
-	marshalizer            marshal.Marshalizer
-	blsPrivateKey          crypto.PrivateKey
-	blsSingleSigner        crypto.SingleSigner
-	multiSigner            crypto.MultiSigner
-	rounder                consensus.Rounder
-	shardCoordinator       sharding.Coordinator
-	syncTimer              ntp.SyncTimer
-	validatorGroupSelector sharding.NodesCoordinator
+	blockChain              data.ChainHandler
+	blockProcessor          process.BlockProcessor
+	headersSubscriber       consensus.HeadersPoolSubscriber
+	bootstrapper            process.Bootstrapper
+	broadcastMessenger      consensus.BroadcastMessenger
+	chronologyHandler       consensus.ChronologyHandler
+	hasher                  hashing.Hasher
+	marshalizer             marshal.Marshalizer
+	blsPrivateKey           crypto.PrivateKey
+	blsSingleSigner         crypto.SingleSigner
+	multiSigner             crypto.MultiSigner
+	rounder                 consensus.Rounder
+	shardCoordinator        sharding.Coordinator
+	syncTimer               ntp.SyncTimer
+	validatorGroupSelector  sharding.NodesCoordinator
+	epochStartNotifier      epochStart.RegistrationHandler
+	antifloodHandler        consensus.P2PAntifloodHandler
+	peerHonestyHandler      consensus.PeerHonestyHandler
+	headerSigVerifier       consensus.HeaderSigVerifier
+	fallbackHeaderValidator consensus.FallbackHeaderValidator
+	nodeRedundancyHandler   consensus.NodeRedundancyHandler
 }
 
-func (cdc *ConsensusCoreMock) Blockchain() data.ChainHandler {
-	return cdc.blockChain
+// GetAntiFloodHandler -
+func (ccm *ConsensusCoreMock) GetAntiFloodHandler() consensus.P2PAntifloodHandler {
+	return ccm.antifloodHandler
 }
 
-func (cdc *ConsensusCoreMock) BlockProcessor() process.BlockProcessor {
-	return cdc.blockProcessor
+// Blockchain -
+func (ccm *ConsensusCoreMock) Blockchain() data.ChainHandler {
+	return ccm.blockChain
 }
 
-func (cdc *ConsensusCoreMock) BootStrapper() process.Bootstrapper {
-	return cdc.bootstrapper
+// BlockProcessor -
+func (ccm *ConsensusCoreMock) BlockProcessor() process.BlockProcessor {
+	return ccm.blockProcessor
 }
 
-func (cdc *ConsensusCoreMock) BroadcastMessenger() consensus.BroadcastMessenger {
-	return cdc.broadcastMessenger
+// HeadersPoolSubscriber -
+func (ccm *ConsensusCoreMock) HeadersPoolSubscriber() consensus.HeadersPoolSubscriber {
+	return ccm.headersSubscriber
 }
 
-func (cdc *ConsensusCoreMock) Chronology() consensus.ChronologyHandler {
-	return cdc.chronologyHandler
+// BootStrapper -
+func (ccm *ConsensusCoreMock) BootStrapper() process.Bootstrapper {
+	return ccm.bootstrapper
 }
 
-func (cdc *ConsensusCoreMock) Hasher() hashing.Hasher {
-	return cdc.hasher
+// BroadcastMessenger -
+func (ccm *ConsensusCoreMock) BroadcastMessenger() consensus.BroadcastMessenger {
+	return ccm.broadcastMessenger
 }
 
-func (cdc *ConsensusCoreMock) Marshalizer() marshal.Marshalizer {
-	return cdc.marshalizer
+// Chronology -
+func (ccm *ConsensusCoreMock) Chronology() consensus.ChronologyHandler {
+	return ccm.chronologyHandler
 }
 
-func (cdc *ConsensusCoreMock) MultiSigner() crypto.MultiSigner {
-	return cdc.multiSigner
+// Hasher -
+func (ccm *ConsensusCoreMock) Hasher() hashing.Hasher {
+	return ccm.hasher
 }
 
-func (cdc *ConsensusCoreMock) Rounder() consensus.Rounder {
-	return cdc.rounder
+// Marshalizer -
+func (ccm *ConsensusCoreMock) Marshalizer() marshal.Marshalizer {
+	return ccm.marshalizer
 }
 
-func (cdc *ConsensusCoreMock) ShardCoordinator() sharding.Coordinator {
-	return cdc.shardCoordinator
+// MultiSigner -
+func (ccm *ConsensusCoreMock) MultiSigner() crypto.MultiSigner {
+	return ccm.multiSigner
 }
 
-func (cdc *ConsensusCoreMock) SyncTimer() ntp.SyncTimer {
-	return cdc.syncTimer
+// Rounder -
+func (ccm *ConsensusCoreMock) Rounder() consensus.Rounder {
+	return ccm.rounder
 }
 
-func (cdc *ConsensusCoreMock) NodesCoordinator() sharding.NodesCoordinator {
-	return cdc.validatorGroupSelector
+// ShardCoordinator -
+func (ccm *ConsensusCoreMock) ShardCoordinator() sharding.Coordinator {
+	return ccm.shardCoordinator
 }
 
-func (cdc *ConsensusCoreMock) SetBlockchain(blockChain data.ChainHandler) {
-	cdc.blockChain = blockChain
+// SyncTimer -
+func (ccm *ConsensusCoreMock) SyncTimer() ntp.SyncTimer {
+	return ccm.syncTimer
 }
 
-func (cdc *ConsensusCoreMock) SetBlockProcessor(blockProcessor process.BlockProcessor) {
-	cdc.blockProcessor = blockProcessor
+// NodesCoordinator -
+func (ccm *ConsensusCoreMock) NodesCoordinator() sharding.NodesCoordinator {
+	return ccm.validatorGroupSelector
 }
 
-func (cdc *ConsensusCoreMock) SetBootStrapper(bootstrapper process.Bootstrapper) {
-	cdc.bootstrapper = bootstrapper
+// EpochStartRegistrationHandler -
+func (ccm *ConsensusCoreMock) EpochStartRegistrationHandler() epochStart.RegistrationHandler {
+	return ccm.epochStartNotifier
 }
 
-func (cdc *ConsensusCoreMock) SetBroadcastMessenger(broadcastMessenger consensus.BroadcastMessenger) {
-	cdc.broadcastMessenger = broadcastMessenger
+// SetBlockchain -
+func (ccm *ConsensusCoreMock) SetBlockchain(blockChain data.ChainHandler) {
+	ccm.blockChain = blockChain
 }
 
-func (cdc *ConsensusCoreMock) SetChronology(chronologyHandler consensus.ChronologyHandler) {
-	cdc.chronologyHandler = chronologyHandler
+// SetSingleSigner -
+func (ccm *ConsensusCoreMock) SetSingleSigner(signer crypto.SingleSigner) {
+	ccm.blsSingleSigner = signer
 }
 
-func (cdc *ConsensusCoreMock) SetHasher(hasher hashing.Hasher) {
-	cdc.hasher = hasher
+// SetBlockProcessor -
+func (ccm *ConsensusCoreMock) SetBlockProcessor(blockProcessor process.BlockProcessor) {
+	ccm.blockProcessor = blockProcessor
 }
 
-func (cdc *ConsensusCoreMock) SetMarshalizer(marshalizer marshal.Marshalizer) {
-	cdc.marshalizer = marshalizer
+// SetBootStrapper -
+func (ccm *ConsensusCoreMock) SetBootStrapper(bootstrapper process.Bootstrapper) {
+	ccm.bootstrapper = bootstrapper
 }
 
-func (cdc *ConsensusCoreMock) SetMultiSigner(multiSigner crypto.MultiSigner) {
-	cdc.multiSigner = multiSigner
+// SetBroadcastMessenger -
+func (ccm *ConsensusCoreMock) SetBroadcastMessenger(broadcastMessenger consensus.BroadcastMessenger) {
+	ccm.broadcastMessenger = broadcastMessenger
 }
 
-func (cdc *ConsensusCoreMock) SetRounder(rounder consensus.Rounder) {
-	cdc.rounder = rounder
-}
-func (cdc *ConsensusCoreMock) SetShardCoordinator(shardCoordinator sharding.Coordinator) {
-	cdc.shardCoordinator = shardCoordinator
+// SetChronology -
+func (ccm *ConsensusCoreMock) SetChronology(chronologyHandler consensus.ChronologyHandler) {
+	ccm.chronologyHandler = chronologyHandler
 }
 
-func (cdc *ConsensusCoreMock) SetSyncTimer(syncTimer ntp.SyncTimer) {
-	cdc.syncTimer = syncTimer
+// SetHasher -
+func (ccm *ConsensusCoreMock) SetHasher(hasher hashing.Hasher) {
+	ccm.hasher = hasher
 }
 
-func (cdc *ConsensusCoreMock) SetValidatorGroupSelector(validatorGroupSelector sharding.NodesCoordinator) {
-	cdc.validatorGroupSelector = validatorGroupSelector
+// SetMarshalizer -
+func (ccm *ConsensusCoreMock) SetMarshalizer(marshalizer marshal.Marshalizer) {
+	ccm.marshalizer = marshalizer
 }
 
-func (cdc *ConsensusCoreMock) RandomnessPrivateKey() crypto.PrivateKey {
-	return cdc.blsPrivateKey
+// SetMultiSigner -
+func (ccm *ConsensusCoreMock) SetMultiSigner(multiSigner crypto.MultiSigner) {
+	ccm.multiSigner = multiSigner
 }
 
-// RandomnessSingleSigner returns the bls single signer stored in the ConsensusStore
-func (cdc *ConsensusCoreMock) RandomnessSingleSigner() crypto.SingleSigner {
-	return cdc.blsSingleSigner
+// SetRounder -
+func (ccm *ConsensusCoreMock) SetRounder(rounder consensus.Rounder) {
+	ccm.rounder = rounder
+}
+
+// SetShardCoordinator -
+func (ccm *ConsensusCoreMock) SetShardCoordinator(shardCoordinator sharding.Coordinator) {
+	ccm.shardCoordinator = shardCoordinator
+}
+
+// SetSyncTimer -
+func (ccm *ConsensusCoreMock) SetSyncTimer(syncTimer ntp.SyncTimer) {
+	ccm.syncTimer = syncTimer
+}
+
+// SetValidatorGroupSelector -
+func (ccm *ConsensusCoreMock) SetValidatorGroupSelector(validatorGroupSelector sharding.NodesCoordinator) {
+	ccm.validatorGroupSelector = validatorGroupSelector
+}
+
+// PrivateKey -
+func (ccm *ConsensusCoreMock) PrivateKey() crypto.PrivateKey {
+	return ccm.blsPrivateKey
+}
+
+// SingleSigner returns the bls single signer stored in the ConsensusStore
+func (ccm *ConsensusCoreMock) SingleSigner() crypto.SingleSigner {
+	return ccm.blsSingleSigner
+}
+
+// PeerHonestyHandler -
+func (ccm *ConsensusCoreMock) PeerHonestyHandler() consensus.PeerHonestyHandler {
+	return ccm.peerHonestyHandler
+}
+
+// HeaderSigVerifier -
+func (ccm *ConsensusCoreMock) HeaderSigVerifier() consensus.HeaderSigVerifier {
+	return ccm.headerSigVerifier
+}
+
+// SetHeaderSigVerifier -
+func (ccm *ConsensusCoreMock) SetHeaderSigVerifier(headerSigVerifier consensus.HeaderSigVerifier) {
+	ccm.headerSigVerifier = headerSigVerifier
+}
+
+// FallbackHeaderValidator -
+func (ccm *ConsensusCoreMock) FallbackHeaderValidator() consensus.FallbackHeaderValidator {
+	return ccm.fallbackHeaderValidator
+}
+
+// SetFallbackHeaderValidator -
+func (ccm *ConsensusCoreMock) SetFallbackHeaderValidator(fallbackHeaderValidator consensus.FallbackHeaderValidator) {
+	ccm.fallbackHeaderValidator = fallbackHeaderValidator
+}
+
+// NodeRedundancyHandler -
+func (ccm *ConsensusCoreMock) NodeRedundancyHandler() consensus.NodeRedundancyHandler {
+	return ccm.nodeRedundancyHandler
+}
+
+// SetNodeRedundancyHandler -
+func (ccm *ConsensusCoreMock) SetNodeRedundancyHandler(nodeRedundancyHandler consensus.NodeRedundancyHandler) {
+	ccm.nodeRedundancyHandler = nodeRedundancyHandler
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
-func (cdc *ConsensusCoreMock) IsInterfaceNil() bool {
-	if cdc == nil {
-		return true
-	}
-	return false
+func (ccm *ConsensusCoreMock) IsInterfaceNil() bool {
+	return ccm == nil
 }

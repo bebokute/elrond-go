@@ -3,12 +3,50 @@ package shard_test
 import (
 	"testing"
 
+	"github.com/ElrondNetwork/elrond-go/dataRetriever"
 	"github.com/ElrondNetwork/elrond-go/process"
-	"github.com/ElrondNetwork/elrond-go/process/economics"
 	"github.com/ElrondNetwork/elrond-go/process/factory/shard"
 	"github.com/ElrondNetwork/elrond-go/process/mock"
+	"github.com/ElrondNetwork/elrond-go/storage"
+	"github.com/ElrondNetwork/elrond-go/testscommon"
 	"github.com/stretchr/testify/assert"
 )
+
+func createDataPools() dataRetriever.PoolsHolder {
+	pools := testscommon.NewPoolsHolderStub()
+	pools.TransactionsCalled = func() dataRetriever.ShardedDataCacherNotifier {
+		return testscommon.NewShardedDataStub()
+	}
+	pools.HeadersCalled = func() dataRetriever.HeadersPool {
+		return &mock.HeadersCacherStub{}
+	}
+	pools.MiniBlocksCalled = func() storage.Cacher {
+		return testscommon.NewCacherStub()
+	}
+	pools.PeerChangesBlocksCalled = func() storage.Cacher {
+		return testscommon.NewCacherStub()
+	}
+	pools.MetaBlocksCalled = func() storage.Cacher {
+		return testscommon.NewCacherStub()
+	}
+	pools.UnsignedTransactionsCalled = func() dataRetriever.ShardedDataCacherNotifier {
+		return testscommon.NewShardedDataStub()
+	}
+	pools.RewardTransactionsCalled = func() dataRetriever.ShardedDataCacherNotifier {
+		return testscommon.NewShardedDataStub()
+	}
+	pools.TrieNodesCalled = func() storage.Cacher {
+		return testscommon.NewCacherStub()
+	}
+	pools.CurrBlockTxsCalled = func() dataRetriever.TransactionCacher {
+		return &mock.TxForCurrentBlockStub{}
+	}
+	return pools
+}
+
+func createMockPubkeyConverter() *mock.PubkeyConverterMock {
+	return mock.NewPubkeyConverterMock(32)
+}
 
 func TestNewIntermediateProcessorsContainerFactory_NilShardCoord(t *testing.T) {
 	t.Parallel()
@@ -18,11 +56,9 @@ func TestNewIntermediateProcessorsContainerFactory_NilShardCoord(t *testing.T) {
 		nil,
 		&mock.MarshalizerMock{},
 		&mock.HasherMock{},
-		&mock.AddressConverterMock{},
-		&mock.SpecialAddressHandlerMock{},
+		createMockPubkeyConverter(),
 		&mock.ChainStorerMock{},
 		dPool,
-		&economics.EconomicsData{},
 	)
 
 	assert.Nil(t, ipcf)
@@ -37,11 +73,9 @@ func TestNewIntermediateProcessorsContainerFactory_NilMarshalizer(t *testing.T) 
 		mock.NewMultiShardsCoordinatorMock(3),
 		nil,
 		&mock.HasherMock{},
-		&mock.AddressConverterMock{},
-		&mock.SpecialAddressHandlerMock{},
+		createMockPubkeyConverter(),
 		&mock.ChainStorerMock{},
 		dPool,
-		&economics.EconomicsData{},
 	)
 
 	assert.Nil(t, ipcf)
@@ -56,11 +90,9 @@ func TestNewIntermediateProcessorsContainerFactory_NilHasher(t *testing.T) {
 		mock.NewMultiShardsCoordinatorMock(3),
 		&mock.MarshalizerMock{},
 		nil,
-		&mock.AddressConverterMock{},
-		&mock.SpecialAddressHandlerMock{},
+		createMockPubkeyConverter(),
 		&mock.ChainStorerMock{},
 		dPool,
-		&economics.EconomicsData{},
 	)
 
 	assert.Nil(t, ipcf)
@@ -76,14 +108,12 @@ func TestNewIntermediateProcessorsContainerFactory_NilAdrConv(t *testing.T) {
 		&mock.MarshalizerMock{},
 		&mock.HasherMock{},
 		nil,
-		&mock.SpecialAddressHandlerMock{},
 		&mock.ChainStorerMock{},
 		dPool,
-		&economics.EconomicsData{},
 	)
 
 	assert.Nil(t, ipcf)
-	assert.Equal(t, process.ErrNilAddressConverter, err)
+	assert.Equal(t, process.ErrNilPubkeyConverter, err)
 }
 
 func TestNewIntermediateProcessorsContainerFactory_NilStorer(t *testing.T) {
@@ -94,11 +124,9 @@ func TestNewIntermediateProcessorsContainerFactory_NilStorer(t *testing.T) {
 		mock.NewMultiShardsCoordinatorMock(3),
 		&mock.MarshalizerMock{},
 		&mock.HasherMock{},
-		&mock.AddressConverterMock{},
-		&mock.SpecialAddressHandlerMock{},
+		createMockPubkeyConverter(),
 		nil,
 		dPool,
-		&economics.EconomicsData{},
 	)
 
 	assert.Nil(t, ipcf)
@@ -113,15 +141,14 @@ func TestNewIntermediateProcessorsContainerFactory(t *testing.T) {
 		mock.NewMultiShardsCoordinatorMock(3),
 		&mock.MarshalizerMock{},
 		&mock.HasherMock{},
-		&mock.AddressConverterMock{},
-		&mock.SpecialAddressHandlerMock{},
+		createMockPubkeyConverter(),
 		&mock.ChainStorerMock{},
 		dPool,
-		&economics.EconomicsData{},
 	)
 
 	assert.Nil(t, err)
 	assert.NotNil(t, ipcf)
+	assert.False(t, ipcf.IsInterfaceNil())
 }
 
 func TestIntermediateProcessorsContainerFactory_Create(t *testing.T) {
@@ -132,11 +159,9 @@ func TestIntermediateProcessorsContainerFactory_Create(t *testing.T) {
 		mock.NewMultiShardsCoordinatorMock(3),
 		&mock.MarshalizerMock{},
 		&mock.HasherMock{},
-		&mock.AddressConverterMock{},
-		&mock.SpecialAddressHandlerMock{},
+		createMockPubkeyConverter(),
 		&mock.ChainStorerMock{},
 		dPool,
-		&economics.EconomicsData{},
 	)
 
 	assert.Nil(t, err)
@@ -144,5 +169,5 @@ func TestIntermediateProcessorsContainerFactory_Create(t *testing.T) {
 
 	container, err := ipcf.Create()
 	assert.Nil(t, err)
-	assert.Equal(t, 2, container.Len())
+	assert.Equal(t, 3, container.Len())
 }

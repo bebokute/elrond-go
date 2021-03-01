@@ -1,8 +1,9 @@
-package vmValues_test
+package vmValues
 
 import (
 	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,361 +13,369 @@ import (
 	"testing"
 
 	apiErrors "github.com/ElrondNetwork/elrond-go/api/errors"
-	"github.com/ElrondNetwork/elrond-go/api/middleware"
 	"github.com/ElrondNetwork/elrond-go/api/mock"
-	"github.com/ElrondNetwork/elrond-go/api/vmValues"
+	"github.com/ElrondNetwork/elrond-go/api/shared"
+	"github.com/ElrondNetwork/elrond-go/api/wrapper"
+	"github.com/ElrondNetwork/elrond-go/config"
+	"github.com/ElrondNetwork/elrond-go/core/vmcommon"
+	"github.com/ElrondNetwork/elrond-go/data/vm"
+	"github.com/ElrondNetwork/elrond-go/process"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/gin-gonic/gin/json"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-type GeneralResponse struct {
+type simpleResponse struct {
 	Data  string `json:"data"`
 	Error string `json:"error"`
+}
+
+type vmOutputResponse struct {
+	Data  *vmcommon.VMOutput `json:"data"`
+	Error string             `json:"error"`
 }
 
 func init() {
 	gin.SetMode(gin.TestMode)
 }
 
-func loadResponse(rsp io.Reader, destination interface{}) {
-	jsonParser := json.NewDecoder(rsp)
-	err := jsonParser.Decode(destination)
-	if err != nil {
-		logError(err)
+const DummyScAddress = "00000000000000000500fabd9501b7e5353de57a4e319857c2fb99089770720a"
+
+func TestGetHex_ShouldWork(t *testing.T) {
+	t.Parallel()
+
+	valueBuff, _ := hex.DecodeString("DEADBEEF")
+
+	facade := mock.Facade{
+		ExecuteSCQueryHandler: func(query *process.SCQuery) (vmOutput *vm.VMOutputApi, e error) {
+			return &vm.VMOutputApi{
+				ReturnData: [][]byte{valueBuff},
+			}, nil
+		},
 	}
+
+	request := VMValueRequest{
+		ScAddress: DummyScAddress,
+		FuncName:  "function",
+		Args:      []string{},
+	}
+
+	response := simpleResponse{}
+	statusCode := doPost(&facade, "/vm-values/hex", request, &response)
+
+	require.Equal(t, http.StatusOK, statusCode)
+	require.Equal(t, "", response.Error)
+	require.Equal(t, hex.EncodeToString(valueBuff), response.Data)
 }
 
-func logError(err error) {
+func TestGetString_ShouldWork(t *testing.T) {
+	t.Parallel()
+
+	valueBuff := "DEADBEEF"
+
+	facade := mock.Facade{
+		ExecuteSCQueryHandler: func(query *process.SCQuery) (vmOutput *vm.VMOutputApi, e error) {
+			return &vm.VMOutputApi{
+				ReturnData: [][]byte{[]byte(valueBuff)},
+			}, nil
+		},
+	}
+
+	request := VMValueRequest{
+		ScAddress: DummyScAddress,
+		FuncName:  "function",
+		Args:      []string{},
+	}
+
+	response := simpleResponse{}
+	statusCode := doPost(&facade, "/vm-values/string", request, &response)
+
+	require.Equal(t, http.StatusOK, statusCode)
+	require.Equal(t, "", response.Error)
+	require.Equal(t, valueBuff, response.Data)
+}
+
+func TestGetInt_ShouldWork(t *testing.T) {
+	t.Parallel()
+
+	value := "1234567"
+
+	facade := mock.Facade{
+		ExecuteSCQueryHandler: func(query *process.SCQuery) (vmOutput *vm.VMOutputApi, e error) {
+			returnData := big.NewInt(0)
+			returnData.SetString(value, 10)
+			return &vm.VMOutputApi{
+				ReturnData: [][]byte{returnData.Bytes()},
+			}, nil
+		},
+	}
+
+	request := VMValueRequest{
+		ScAddress: DummyScAddress,
+		FuncName:  "function",
+		Args:      []string{},
+	}
+
+	response := simpleResponse{}
+	statusCode := doPost(&facade, "/vm-values/int", request, &response)
+
+	require.Equal(t, http.StatusOK, statusCode)
+	require.Equal(t, "", response.Error)
+	require.Equal(t, value, response.Data)
+}
+
+func TestQuery_ShouldWork(t *testing.T) {
+	t.Parallel()
+
+	facade := mock.Facade{
+		ExecuteSCQueryHandler: func(query *process.SCQuery) (vmOutput *vm.VMOutputApi, e error) {
+
+			return &vm.VMOutputApi{
+				ReturnData: [][]byte{big.NewInt(42).Bytes()},
+			}, nil
+		},
+	}
+
+	request := VMValueRequest{
+		ScAddress: DummyScAddress,
+		FuncName:  "function",
+		Args:      []string{},
+	}
+
+	response := vmOutputResponse{}
+	statusCode := doPost(&facade, "/vm-values/query", request, &response)
+
+	require.Equal(t, http.StatusOK, statusCode)
+	require.Equal(t, "", response.Error)
+	require.Equal(t, int64(42), big.NewInt(0).SetBytes(response.Data.ReturnData[0]).Int64())
+}
+
+func TestCreateSCQuery_ArgumentIsNotHexShouldErr(t *testing.T) {
+	request := VMValueRequest{
+		ScAddress: DummyScAddress,
+		FuncName:  "function",
+		Args:      []string{"bad arg"},
+	}
+
+	_, err := createSCQuery(&mock.Facade{}, &request)
+	require.NotNil(t, err)
+	require.Contains(t, err.Error(), "'bad arg' is not a valid hex string")
+}
+
+func TestAllRoutes_FacadeErrorsShouldErr(t *testing.T) {
+	t.Parallel()
+
+	errExpected := errors.New("some random error")
+	facade := mock.Facade{
+		ExecuteSCQueryHandler: func(query *process.SCQuery) (vmOutput *vm.VMOutputApi, e error) {
+			return nil, errExpected
+		},
+	}
+
+	request := VMValueRequest{
+		ScAddress: DummyScAddress,
+		FuncName:  "function",
+		Args:      []string{},
+	}
+
+	requireErrorOnAllRoutes(t, &facade, request, errExpected)
+}
+
+func TestAllRoutes_WhenBadAddressShouldErr(t *testing.T) {
+	t.Parallel()
+
+	errExpected := errors.New("not a valid address")
+	facade := mock.Facade{
+		ExecuteSCQueryHandler: func(query *process.SCQuery) (vmOutput *vm.VMOutputApi, e error) {
+			return &vm.VMOutputApi{}, nil
+		},
+	}
+
+	request := VMValueRequest{
+		ScAddress: "DUMMY",
+		FuncName:  "function",
+		Args:      []string{},
+	}
+
+	requireErrorOnAllRoutes(t, &facade, request, errExpected)
+}
+
+func TestAllRoutes_WhenBadArgumentsShouldErr(t *testing.T) {
+	t.Parallel()
+
+	errExpected := errors.New("not a valid hex string")
+	facade := mock.Facade{
+		ExecuteSCQueryHandler: func(query *process.SCQuery) (vmOutput *vm.VMOutputApi, e error) {
+			return &vm.VMOutputApi{}, nil
+		},
+	}
+
+	request := VMValueRequest{
+		ScAddress: DummyScAddress,
+		FuncName:  "function",
+		Args:      []string{"AA", "ZZ"},
+	}
+
+	requireErrorOnAllRoutes(t, &facade, request, errExpected)
+}
+
+func TestAllRoutes_WhenNoVMReturnDataShouldErr(t *testing.T) {
+	t.Parallel()
+
+	errExpected := errors.New("no return data")
+	facade := &mock.Facade{
+		ExecuteSCQueryHandler: func(query *process.SCQuery) (vmOutput *vm.VMOutputApi, e error) {
+			return &vm.VMOutputApi{}, nil
+		},
+	}
+
+	request := VMValueRequest{
+		ScAddress: DummyScAddress,
+		FuncName:  "function",
+		Args:      []string{},
+	}
+
+	response := simpleResponse{}
+
+	statusCode := doPost(facade, "/vm-values/hex", request, &response)
+	require.Equal(t, http.StatusOK, statusCode)
+	require.Contains(t, response.Error, errExpected.Error())
+
+	statusCode = doPost(facade, "/vm-values/string", request, &response)
+	require.Equal(t, http.StatusOK, statusCode)
+	require.Contains(t, response.Error, errExpected.Error())
+
+	statusCode = doPost(facade, "/vm-values/int", request, &response)
+	require.Equal(t, http.StatusOK, statusCode)
+	require.Contains(t, response.Error, errExpected.Error())
+}
+
+func TestAllRoutes_WhenBadJsonShouldErr(t *testing.T) {
+	t.Parallel()
+
+	facade := mock.Facade{
+		ExecuteSCQueryHandler: func(query *process.SCQuery) (vmOutput *vm.VMOutputApi, e error) {
+			return &vm.VMOutputApi{}, nil
+		},
+	}
+
+	requireErrorOnGetSingleValueRoutes(t, &facade, []byte("dummy"), apiErrors.ErrInvalidJSONRequest)
+}
+
+func TestAllRoutes_WhenNilFacadeShouldErr(t *testing.T) {
+	t.Parallel()
+
+	request := VMValueRequest{
+		ScAddress: DummyScAddress,
+		FuncName:  "function",
+		Args:      []string{},
+	}
+
+	requireErrorOnAllRoutes(t, nil, request, apiErrors.ErrNilAppContext)
+}
+
+func TestAllRoutes_WhenBadFacadeShouldErr(t *testing.T) {
+	t.Parallel()
+
+	var facade interface{}
+
+	request := VMValueRequest{
+		ScAddress: DummyScAddress,
+		FuncName:  "function",
+		Args:      []string{},
+	}
+
+	requireErrorOnAllRoutes(t, &facade, request, apiErrors.ErrInvalidAppContext)
+}
+
+func doPost(facade interface{}, url string, request interface{}, response interface{}) int {
+	// Serialize if not already
+	requestAsBytes, ok := request.([]byte)
+	if !ok {
+		requestAsBytes, _ = json.Marshal(request)
+	}
+
+	server := startNodeServer(facade)
+	httpRequest, _ := http.NewRequest("POST", url, bytes.NewBuffer(requestAsBytes))
+
+	responseRecorder := httptest.NewRecorder()
+	server.ServeHTTP(responseRecorder, httpRequest)
+
+	responseI := shared.GenericAPIResponse{}
+	parseResponse(responseRecorder.Body, &responseI)
+	if responseI.Error == "" {
+		responseDataMap := responseI.Data.(map[string]interface{})
+		responseDataMapBytes, _ := json.Marshal(responseDataMap)
+		_ = json.Unmarshal(responseDataMapBytes, response)
+	} else {
+		resp := response.(*simpleResponse)
+		resp.Error = responseI.Error
+	}
+
+	return responseRecorder.Code
+}
+
+func startNodeServer(handler interface{}) *gin.Engine {
+	ws := gin.New()
+	ws.Use(cors.Default())
+	getValuesRoute := ws.Group("/vm-values")
+	if handler != nil {
+		getValuesRoute.Use(func(c *gin.Context) {
+			c.Set("facade", handler)
+			c.Next()
+		})
+	}
+	vmValuesRoute, _ := wrapper.NewRouterWrapper("vm-values", getValuesRoute, getRoutesConfig())
+	Routes(vmValuesRoute)
+
+	return ws
+}
+
+func parseResponse(responseBody io.Reader, destination interface{}) {
+	jsonParser := json.NewDecoder(responseBody)
+
+	err := jsonParser.Decode(destination)
 	if err != nil {
 		fmt.Println(err)
 	}
 }
 
-func startNodeServer(handler vmValues.FacadeHandler) *gin.Engine {
-	ws := gin.New()
-	ws.Use(cors.Default())
-	getValuesRoute := ws.Group("/get-values")
+func requireErrorOnAllRoutes(t *testing.T, facade interface{}, request interface{}, errExpected error) {
+	requireErrorOnGetSingleValueRoutes(t, facade, request, errExpected)
 
-	if handler != nil {
-		getValuesRoute.Use(middleware.WithElrondFacade(handler))
-	}
-	vmValues.Routes(getValuesRoute)
-
-	return ws
+	response := simpleResponse{}
+	statusCode := doPost(facade, "/vm-values/query", request, &response)
+	require.Equal(t, http.StatusBadRequest, statusCode)
+	require.Contains(t, response.Error, errExpected.Error())
 }
 
-func startNodeServerWrongFacade() *gin.Engine {
-	ws := gin.New()
-	ws.Use(cors.Default())
-	ws.Use(func(c *gin.Context) {
-		c.Set("elrondFacade", mock.WrongFacade{})
-	})
-	getValuesRoute := ws.Group("/get-values")
-	vmValues.Routes(getValuesRoute)
+func requireErrorOnGetSingleValueRoutes(t *testing.T, facade interface{}, request interface{}, errExpected error) {
+	response := simpleResponse{}
 
-	return ws
+	statusCode := doPost(facade, "/vm-values/hex", request, &response)
+	require.Equal(t, http.StatusBadRequest, statusCode)
+	require.Contains(t, response.Error, errExpected.Error())
+
+	statusCode = doPost(facade, "/vm-values/string", request, &response)
+	require.Equal(t, http.StatusBadRequest, statusCode)
+	require.Contains(t, response.Error, errExpected.Error())
+
+	statusCode = doPost(facade, "/vm-values/int", request, &response)
+	require.Equal(t, http.StatusBadRequest, statusCode)
+	require.Contains(t, response.Error, errExpected.Error())
 }
 
-//------- GetDataValueAsHexBytes
-
-func TestGetDataValueAsHexBytes_WithWrongFacadeShouldErr(t *testing.T) {
-	t.Parallel()
-
-	ws := startNodeServerWrongFacade()
-
-	jsonStr := `{"scAddress":"DEADBEEF","funcName":"DEADBEEF","args":[]}`
-	req, _ := http.NewRequest("POST", "/get-values/hex", bytes.NewBuffer([]byte(jsonStr)))
-
-	resp := httptest.NewRecorder()
-	ws.ServeHTTP(resp, req)
-
-	response := GeneralResponse{}
-	loadResponse(resp.Body, &response)
-
-	assert.Contains(t, response.Error, apiErrors.ErrInvalidAppContext.Error())
-}
-
-func TestGetDataValueAsHexBytes_BadRequestShouldErr(t *testing.T) {
-	t.Parallel()
-
-	facade := mock.Facade{
-		GetDataValueHandler: func(address string, funcName string, argsBuff ...[]byte) (bytes []byte, e error) {
-			assert.Fail(t, "should have not called this")
-			return nil, nil
+func getRoutesConfig() config.ApiRoutesConfig {
+	return config.ApiRoutesConfig{
+		APIPackages: map[string]config.APIPackageConfig{
+			"vm-values": {
+				Routes: []config.RouteConfig{
+					{Name: "/hex", Open: true},
+					{Name: "/string", Open: true},
+					{Name: "/int", Open: true},
+					{Name: "/query", Open: true},
+				},
+			},
 		},
 	}
-	ws := startNodeServer(&facade)
-
-	jsonStr := `{"this should error"}`
-	req, _ := http.NewRequest("POST", "/get-values/hex", bytes.NewBuffer([]byte(jsonStr)))
-
-	resp := httptest.NewRecorder()
-	ws.ServeHTTP(resp, req)
-
-	response := GeneralResponse{}
-	loadResponse(resp.Body, &response)
-
-	assert.Contains(t, response.Error, "invalid character")
-}
-
-func TestGetDataValueAsHexBytes_ArgumentIsNotHexShouldErr(t *testing.T) {
-	t.Parallel()
-
-	scAddress := "sc address"
-	fName := "function"
-	args := []string{"not a hex argument"}
-	errUnexpected := errors.New("unexpected error")
-	valueBuff, _ := hex.DecodeString("DEADBEEF")
-
-	facade := mock.Facade{
-		GetDataValueHandler: func(address string, funcName string, argsBuff ...[]byte) (bytes []byte, e error) {
-			if address == scAddress && funcName == fName && len(argsBuff) == len(args) {
-				paramsOk := true
-				for idx, arg := range args {
-					if arg != string(argsBuff[idx]) {
-						paramsOk = false
-					}
-				}
-
-				if paramsOk {
-					return valueBuff, nil
-				}
-			}
-
-			return nil, errUnexpected
-		},
-	}
-
-	ws := startNodeServer(&facade)
-
-	argsJson, _ := json.Marshal(args)
-
-	jsonStr := fmt.Sprintf(`{"scAddress":"%s", "funcName":"%s", "args":%s}`, scAddress, fName, argsJson)
-	fmt.Printf("Request: %s\n", jsonStr)
-
-	req, _ := http.NewRequest("POST", "/get-values/hex", bytes.NewBuffer([]byte(jsonStr)))
-
-	resp := httptest.NewRecorder()
-	ws.ServeHTTP(resp, req)
-
-	response := GeneralResponse{}
-	loadResponse(resp.Body, &response)
-
-	assert.Equal(t, http.StatusBadRequest, resp.Code)
-	assert.Contains(t, response.Error, "not a hex argument")
-}
-
-func testGetValueFacadeErrors(t *testing.T, route string) {
-	t.Parallel()
-
-	errExpected := errors.New("expected error")
-	facade := mock.Facade{
-		GetDataValueHandler: func(address string, funcName string, argsBuff ...[]byte) (bytes []byte, e error) {
-			return nil, errExpected
-		},
-	}
-
-	ws := startNodeServer(&facade)
-
-	jsonStr := `{}`
-	fmt.Printf("Request: %s\n", jsonStr)
-
-	req, _ := http.NewRequest("POST", route, bytes.NewBuffer([]byte(jsonStr)))
-
-	resp := httptest.NewRecorder()
-	ws.ServeHTTP(resp, req)
-
-	response := GeneralResponse{}
-	loadResponse(resp.Body, &response)
-
-	assert.Equal(t, http.StatusBadRequest, resp.Code)
-	assert.Contains(t, response.Error, errExpected.Error())
-}
-
-func TestGetDataValueAsHexBytes_FacadeErrorsShouldErr(t *testing.T) {
-	testGetValueFacadeErrors(t, "/get-values/hex")
-}
-
-func TestGetDataValueAsHexBytes_WithParametersShouldReturnValueAsHex(t *testing.T) {
-	t.Parallel()
-
-	scAddress := "aaaa"
-	fName := "function"
-	args := []string{"argument 1", "argument 2"}
-	errUnexpected := errors.New("unexpected error")
-	valueBuff, _ := hex.DecodeString("DEADBEEF")
-
-	facade := mock.Facade{
-		GetDataValueHandler: func(address string, funcName string, argsBuff ...[]byte) (bytes []byte, e error) {
-			areArgumentsCorrect := hex.EncodeToString([]byte(address)) == scAddress &&
-				funcName == fName &&
-				len(argsBuff) == len(args)
-
-			if areArgumentsCorrect {
-				paramsOk := true
-				for idx, arg := range args {
-					if arg != string(argsBuff[idx]) {
-						paramsOk = false
-					}
-				}
-
-				if paramsOk {
-					return valueBuff, nil
-				}
-			}
-
-			return nil, errUnexpected
-		},
-	}
-
-	ws := startNodeServer(&facade)
-
-	argsHex := make([]string, len(args))
-	for i := 0; i < len(args); i++ {
-		argsHex[i] = hex.EncodeToString([]byte(args[i]))
-	}
-	argsJson, _ := json.Marshal(argsHex)
-
-	jsonStr := fmt.Sprintf(`{"scAddress":"%s", "funcName":"%s", "args":%s}`, scAddress, fName, argsJson)
-	fmt.Printf("Request: %s\n", jsonStr)
-
-	req, _ := http.NewRequest("POST", "/get-values/hex", bytes.NewBuffer([]byte(jsonStr)))
-
-	resp := httptest.NewRecorder()
-	ws.ServeHTTP(resp, req)
-
-	response := GeneralResponse{}
-	loadResponse(resp.Body, &response)
-
-	assert.Equal(t, http.StatusOK, resp.Code)
-	assert.Equal(t, "", response.Error)
-	assert.Equal(t, hex.EncodeToString(valueBuff), response.Data)
-}
-
-//------- GetDataValueAsString
-
-func TestGetDataValueAsString_FacadeErrorsShouldErr(t *testing.T) {
-	testGetValueFacadeErrors(t, "/get-values/string")
-}
-
-func TestGetDataValueAsString_WithParametersShouldReturnValueAsHex(t *testing.T) {
-	t.Parallel()
-
-	scAddress := "aaaa"
-	fName := "function"
-	args := []string{"argument 1", "argument 2"}
-	errUnexpected := errors.New("unexpected error")
-	valueBuff := "DEADBEEF"
-
-	facade := mock.Facade{
-		GetDataValueHandler: func(address string, funcName string, argsBuff ...[]byte) (bytes []byte, e error) {
-			areArgumentsCorrect := hex.EncodeToString([]byte(address)) == scAddress &&
-				funcName == fName &&
-				len(argsBuff) == len(args)
-
-			if areArgumentsCorrect {
-				paramsOk := true
-				for idx, arg := range args {
-					if arg != string(argsBuff[idx]) {
-						paramsOk = false
-					}
-				}
-
-				if paramsOk {
-					return []byte(valueBuff), nil
-				}
-			}
-
-			return nil, errUnexpected
-		},
-	}
-
-	ws := startNodeServer(&facade)
-
-	argsHex := make([]string, len(args))
-	for i := 0; i < len(args); i++ {
-		argsHex[i] = hex.EncodeToString([]byte(args[i]))
-	}
-	argsJson, _ := json.Marshal(argsHex)
-
-	jsonStr := fmt.Sprintf(`{"scAddress":"%s", "funcName":"%s", "args":%s}`, scAddress, fName, argsJson)
-	fmt.Printf("Request: %s\n", jsonStr)
-
-	req, _ := http.NewRequest("POST", "/get-values/string", bytes.NewBuffer([]byte(jsonStr)))
-
-	resp := httptest.NewRecorder()
-	ws.ServeHTTP(resp, req)
-
-	response := GeneralResponse{}
-	loadResponse(resp.Body, &response)
-
-	assert.Equal(t, http.StatusOK, resp.Code)
-	assert.Equal(t, "", response.Error)
-	assert.Equal(t, valueBuff, response.Data)
-}
-
-//------- GetDataValueAsInt
-
-func TestGetDataValueAsInt_FacadeErrorsShouldErr(t *testing.T) {
-	testGetValueFacadeErrors(t, "/get-values/int")
-}
-
-func TestGetDataValueAsInt_WithParametersShouldReturnValueAsHex(t *testing.T) {
-	t.Parallel()
-
-	scAddress := "aaaa"
-	fName := "function"
-	args := []string{"argument 1", "argument 2"}
-	errUnexpected := errors.New("unexpected error")
-	valueBuff := "1234567"
-
-	facade := mock.Facade{
-		GetDataValueHandler: func(address string, funcName string, argsBuff ...[]byte) (bytes []byte, e error) {
-			areArgumentsCorrect := hex.EncodeToString([]byte(address)) == scAddress &&
-				funcName == fName &&
-				len(argsBuff) == len(args)
-
-			if areArgumentsCorrect {
-				paramsOk := true
-				for idx, arg := range args {
-					if arg != string(argsBuff[idx]) {
-						paramsOk = false
-					}
-				}
-
-				if paramsOk {
-					val := big.NewInt(0)
-					val.SetString(valueBuff, 10)
-					return val.Bytes(), nil
-				}
-			}
-
-			return nil, errUnexpected
-		},
-	}
-
-	ws := startNodeServer(&facade)
-
-	argsHex := make([]string, len(args))
-	for i := 0; i < len(args); i++ {
-		argsHex[i] = hex.EncodeToString([]byte(args[i]))
-	}
-	argsJson, _ := json.Marshal(argsHex)
-
-	jsonStr := fmt.Sprintf(`{"scAddress":"%s", "funcName":"%s", "args":%s}`, scAddress, fName, argsJson)
-	fmt.Printf("Request: %s\n", jsonStr)
-
-	req, _ := http.NewRequest("POST", "/get-values/int", bytes.NewBuffer([]byte(jsonStr)))
-
-	resp := httptest.NewRecorder()
-	ws.ServeHTTP(resp, req)
-
-	response := GeneralResponse{}
-	loadResponse(resp.Body, &response)
-
-	assert.Equal(t, http.StatusOK, resp.Code)
-	assert.Equal(t, "", response.Error)
-	assert.Equal(t, valueBuff, response.Data)
 }

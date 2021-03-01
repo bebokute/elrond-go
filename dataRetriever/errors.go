@@ -7,53 +7,20 @@ import (
 // ErrNilMessage signals that a nil message has been received
 var ErrNilMessage = errors.New("nil message")
 
-// ErrNoConnectedPeerToSendRequest signals that the connected peers list is empty and can not send request
-var ErrNoConnectedPeerToSendRequest = errors.New("connected peers list is empty. Can not send request")
-
-// ErrNilAccountsAdapter defines the error when trying to use a nil AccountsAddapter
-var ErrNilAccountsAdapter = errors.New("nil AccountsAdapter")
-
-// ErrNilHasher signals that an operation has been attempted to or with a nil hasher implementation
-var ErrNilHasher = errors.New("nil Hasher")
-
-// ErrNilAddressConverter signals that an operation has been attempted to or with a nil AddressConverter implementation
-var ErrNilAddressConverter = errors.New("nil AddressConverter")
-
-// ErrNilAddressContainer signals that an operation has been attempted to or with a nil AddressContainer implementation
-var ErrNilAddressContainer = errors.New("nil AddressContainer")
+// ErrSendRequest signals that the connected peers list is empty or errors appeared when sending requests
+var ErrSendRequest = errors.New("cannot send request: peer list is empty or errors during the sending")
 
 // ErrNilValue signals the value is nil
 var ErrNilValue = errors.New("nil value")
 
-// ErrNilBlockChain signals that an operation has been attempted to or with a nil blockchain
-var ErrNilBlockChain = errors.New("nil block chain")
-
-// ErrNilTxBlockBody signals that an operation has been attempted to or with a nil block body
-var ErrNilTxBlockBody = errors.New("nil block body")
-
-// ErrNilBlockHeader signals that an operation has been attempted to or with a nil block header
-var ErrNilBlockHeader = errors.New("nil block header")
-
-// ErrNilPublicKey signals that a operation has been attempted with a nil public key
-var ErrNilPublicKey = errors.New("nil public key")
-
-// ErrNilSignature signals that a operation has been attempted with a nil signature
-var ErrNilSignature = errors.New("nil signature")
-
-// ErrEmptyMiniBlockSlice signals that an operation has been attempted with an empty mini block slice
-var ErrEmptyMiniBlockSlice = errors.New("empty mini block slice")
-
-// ErrInvalidShardId signals that the shard id is invalid
-var ErrInvalidShardId = errors.New("invalid shard id")
+// ErrTxNotFoundInBlockPool signals the value is nil
+var ErrTxNotFoundInBlockPool = errors.New("cannot find tx in current block pool")
 
 // ErrNilMarshalizer signals that an operation has been attempted to or with a nil Marshalizer implementation
 var ErrNilMarshalizer = errors.New("nil Marshalizer")
 
 // ErrNilStore signals that the provided storage service is nil
 var ErrNilStore = errors.New("nil data storage service")
-
-// ErrNilRounder signals that an operation has been attempted to or with a nil Rounder implementation
-var ErrNilRounder = errors.New("nil Rounder")
 
 // ErrNilMessenger signals that a nil Messenger object was provided
 var ErrNilMessenger = errors.New("nil Messenger")
@@ -70,14 +37,8 @@ var ErrNilRewardTransactionPool = errors.New("nil reward transaction data pool")
 // ErrNilHeadersDataPool signals that a nil header pool has been provided
 var ErrNilHeadersDataPool = errors.New("nil headers data pool")
 
-// ErrNilHeadersNoncesDataPool signals that a nil header - nonce cache
-var ErrNilHeadersNoncesDataPool = errors.New("nil headers nonces cache")
-
 // ErrNilShardCoordinator signals that an operation has been attempted to or with a nil shard coordinator
 var ErrNilShardCoordinator = errors.New("nil shard coordinator")
-
-// ErrNilSingleSigner signals that a nil single signer is used
-var ErrNilSingleSigner = errors.New("nil single signer")
 
 // ErrNilDataToProcess signals that nil data was provided
 var ErrNilDataToProcess = errors.New("nil data to process")
@@ -101,11 +62,11 @@ var ErrInvalidNonceByteSlice = errors.New("invalid nonce byte slice")
 // ErrResolveTypeUnknown signals that an unknown resolve type was provided
 var ErrResolveTypeUnknown = errors.New("unknown resolve type")
 
-// ErrNilBlockBodyPool signals that a nil block body pool has been provided
-var ErrNilBlockBodyPool = errors.New("nil block body pool")
+// ErrNilMiniblocksPool signals that a nil miniblocks pool has been provided
+var ErrNilMiniblocksPool = errors.New("nil miniblocks pool")
 
-// ErrNilBlockBodyStorage signals that a nil block body storage has been provided
-var ErrNilBlockBodyStorage = errors.New("nil block body storage")
+// ErrNilMiniblocksStorage signals that a nil miniblocks storage has been provided
+var ErrNilMiniblocksStorage = errors.New("nil miniblocks storage")
 
 // ErrNilDataPoolHolder signals that the data pool holder is nil
 var ErrNilDataPoolHolder = errors.New("nil data pool holder")
@@ -125,12 +86,6 @@ var ErrNilUint64ByteSliceConverter = errors.New("nil byte slice converter")
 // ErrNilResolverContainer signals that a nil resolver container was provided
 var ErrNilResolverContainer = errors.New("nil resolver container")
 
-// ErrUnmarshalMBHashes signals the value is nil
-var ErrUnmarshalMBHashes = errors.New("could not unmarshal miniblock hashes")
-
-// ErrInvalidRequestType signals that a request on a topic sends an invalid type
-var ErrInvalidRequestType = errors.New("invalid request type")
-
 // ErrWrongTypeInContainer signals that a wrong type of object was found in container
 var ErrWrongTypeInContainer = errors.New("wrong type of object inside container")
 
@@ -143,20 +98,23 @@ var ErrNilPeerChangeBlockDataPool = errors.New("nil peer change block data pool"
 // ErrNilTxBlockDataPool signals that a nil tx block body pool has been provided
 var ErrNilTxBlockDataPool = errors.New("nil tx block data pool")
 
-// ErrNilCacher signals that a nil cache has been provided
-var ErrNilCacher = errors.New("nil cacher")
+// ErrCacheConfigInvalidSizeInBytes signals that the cache parameter "sizeInBytes" is invalid
+var ErrCacheConfigInvalidSizeInBytes = errors.New("cache parameter [sizeInBytes] is not valid, it must be a positive, and large enough number")
 
-// ErrNilMetaBlockPool signals that a nil meta block data pool was provided
-var ErrNilMetaBlockPool = errors.New("nil meta block data pool")
+// ErrCacheConfigInvalidSize signals that the cache parameter "size" is invalid
+var ErrCacheConfigInvalidSize = errors.New("cache parameter [size] is not valid, it must be a positive number")
 
-// ErrNilMiniBlockHashesPool signals that a nil meta block data pool was provided
-var ErrNilMiniBlockHashesPool = errors.New("nil meta block mini block hashes data pool")
+// ErrCacheConfigInvalidShards signals that the cache parameter "shards" is invalid
+var ErrCacheConfigInvalidShards = errors.New("cache parameter [shards] is not valid, it must be a positive number")
 
-// ErrNilShardHeaderPool signals that a nil meta block data pool was provided
-var ErrNilShardHeaderPool = errors.New("nil meta block shard header data pool")
+// ErrCacheConfigInvalidEconomics signals that an economics parameter required by the cache is invalid
+var ErrCacheConfigInvalidEconomics = errors.New("cache-economics parameter is not valid")
 
-// ErrNilMetaBlockNoncesPool signals that a nil meta block data pool was provided
-var ErrNilMetaBlockNoncesPool = errors.New("nil meta block nonces data pool")
+// ErrCacheConfigInvalidSharding signals that a sharding parameter required by the cache is invalid
+var ErrCacheConfigInvalidSharding = errors.New("cache-sharding parameter is not valid")
+
+// ErrNilTrieNodesPool signals that a nil trie nodes data pool was provided
+var ErrNilTrieNodesPool = errors.New("nil trie nodes data pool")
 
 // ErrNoSuchStorageUnit defines the error for using an invalid storage unit
 var ErrNoSuchStorageUnit = errors.New("no such unit type")
@@ -173,26 +131,68 @@ var ErrNilDataPacker = errors.New("nil data packer provided")
 // ErrNilResolverFinder signals that a nil resolver finder has been provided
 var ErrNilResolverFinder = errors.New("nil resolvers finder")
 
-// ErrEmptyTxRequestTopic signals that an empty transaction topic has been provided
-var ErrEmptyTxRequestTopic = errors.New("empty transaction request topic")
-
-// ErrEmptyScrRequestTopic signals that an empty smart contract result topic has been provided
-var ErrEmptyScrRequestTopic = errors.New("empty smart contract result request topic")
-
-// ErrEmptyRewardTxRequestTopic signals that an empty reward transaction topic has been provided
-var ErrEmptyRewardTxRequestTopic = errors.New("empty rewards transactions request topic")
-
-// ErrEmptyMiniBlockRequestTopic signals that an empty miniblock topic has been provided
-var ErrEmptyMiniBlockRequestTopic = errors.New("empty miniblock request topic")
-
-// ErrEmptyShardHeaderRequestTopic signals that an empty shard header topic has been provided
-var ErrEmptyShardHeaderRequestTopic = errors.New("empty shard header request topic")
-
-// ErrEmptyMetaHeaderRequestTopic signals that an empty meta header topic has been provided
-var ErrEmptyMetaHeaderRequestTopic = errors.New("empty meta header request topic")
-
 // ErrInvalidMaxTxRequest signals that max tx request is too small
 var ErrInvalidMaxTxRequest = errors.New("max tx request number is invalid")
 
 // ErrNilPeerListCreator signals that a nil peer list creator implementation has been provided
 var ErrNilPeerListCreator = errors.New("nil peer list creator provided")
+
+// ErrNilTrieDataGetter signals that a nil trie data getter has been provided
+var ErrNilTrieDataGetter = errors.New("nil trie data getter provided")
+
+// ErrNilCurrBlockTxs signals that nil current blocks txs holder was provided
+var ErrNilCurrBlockTxs = errors.New("nil current block txs holder")
+
+// ErrNilRequestedItemsHandler signals that a nil requested items handler was provided
+var ErrNilRequestedItemsHandler = errors.New("nil requested items handler")
+
+// ErrNilEpochHandler signals that epoch handler is nil
+var ErrNilEpochHandler = errors.New("nil epoch handler")
+
+// ErrBadRequest signals that the request should not have happened
+var ErrBadRequest = errors.New("request should not be done as it doesn't follow the protocol")
+
+// ErrNilAntifloodHandler signals that a nil antiflood handler has been provided
+var ErrNilAntifloodHandler = errors.New("nil antiflood handler")
+
+// ErrSystemBusy signals that the system is busy and can not process more requests
+var ErrSystemBusy = errors.New("system busy")
+
+// ErrNilThrottler signals that a nil throttler has been provided
+var ErrNilThrottler = errors.New("nil throttler")
+
+// ErrEmptyString signals that an empty string has been provided
+var ErrEmptyString = errors.New("empty string")
+
+// ErrInvalidValue signals that an invalid value has been provided
+var ErrInvalidValue = errors.New("invalid value")
+
+// ErrNilWhiteListHandler signals that white list handler is nil
+var ErrNilWhiteListHandler = errors.New("nil white list handler")
+
+// ErrRequestIntervalTooSmall signals that request interval is too small
+var ErrRequestIntervalTooSmall = errors.New("request interval is too small")
+
+// ErrNilResolverDebugHandler signals that a nil resolver debug handler has been provided
+var ErrNilResolverDebugHandler = errors.New("nil resolver debug handler")
+
+// ErrMissingData signals that the required data is missing
+var ErrMissingData = errors.New("missing data")
+
+// ErrNilConfig signals that a nil config has been provided
+var ErrNilConfig = errors.New("nil config provided")
+
+// ErrNilEconomicsData signals that a nil economics data handler has been provided
+var ErrNilEconomicsData = errors.New("nil economics data provided")
+
+// ErrNilTxGasHandler signals that a nil tx gas handler was provided
+var ErrNilTxGasHandler = errors.New("nil tx gas handler provided")
+
+// ErrNilManualEpochStartNotifier signals that a nil manual epoch start notifier has been provided
+var ErrNilManualEpochStartNotifier = errors.New("nil manual epoch start notifier")
+
+// ErrNilGracefullyCloseChannel signals that a nil gracefully close channel has been provided
+var ErrNilGracefullyCloseChannel = errors.New("nil gracefully close channel")
+
+// ErrNilSmartContractsPool signals that a nil smart contracts pool has been provided
+var ErrNilSmartContractsPool = errors.New("nil smart contracts pool")

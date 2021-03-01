@@ -7,43 +7,50 @@ import (
 	"github.com/ElrondNetwork/elrond-go/crypto"
 	"github.com/ElrondNetwork/elrond-go/data"
 	"github.com/ElrondNetwork/elrond-go/data/block"
+	"github.com/ElrondNetwork/elrond-go/testscommon"
 )
 
+// InitChronologyHandlerMock -
 func InitChronologyHandlerMock() consensus.ChronologyHandler {
 	chr := &ChronologyHandlerMock{}
 	return chr
 }
 
+// InitBlockProcessorMock -
 func InitBlockProcessorMock() *BlockProcessorMock {
 	blockProcessorMock := &BlockProcessorMock{}
-	blockProcessorMock.CreateBlockCalled = func(round uint64, haveTime func() bool) (data.BodyHandler, error) {
-		emptyBlock := make(block.Body, 0)
-
-		return emptyBlock, nil
+	blockProcessorMock.CreateBlockCalled = func(header data.HeaderHandler, haveTime func() bool) (data.HeaderHandler, data.BodyHandler, error) {
+		emptyBlock := &block.Body{}
+		header.SetRootHash([]byte{})
+		return header, emptyBlock, nil
 	}
-	blockProcessorMock.CommitBlockCalled = func(blockChain data.ChainHandler, header data.HeaderHandler, body data.BodyHandler) error {
+	blockProcessorMock.CommitBlockCalled = func(header data.HeaderHandler, body data.BodyHandler) error {
 		return nil
 	}
-	blockProcessorMock.RevertAccountStateCalled = func() {}
-	blockProcessorMock.ProcessBlockCalled = func(blockChain data.ChainHandler, header data.HeaderHandler, body data.BodyHandler, haveTime func() time.Duration) error {
+	blockProcessorMock.RevertAccountStateCalled = func(header data.HeaderHandler) {}
+	blockProcessorMock.ProcessBlockCalled = func(header data.HeaderHandler, body data.BodyHandler, haveTime func() time.Duration) error {
 		return nil
-	}
-	blockProcessorMock.CreateBlockHeaderCalled = func(body data.BodyHandler, round uint64, haveTime func() bool) (header data.HeaderHandler, e error) {
-		return &block.Header{RootHash: []byte{}}, nil
 	}
 	blockProcessorMock.DecodeBlockBodyCalled = func(dta []byte) data.BodyHandler {
-		return block.Body{}
+		return &block.Body{}
 	}
 	blockProcessorMock.DecodeBlockHeaderCalled = func(dta []byte) data.HeaderHandler {
 		return &block.Header{}
 	}
 	blockProcessorMock.MarshalizedDataToBroadcastCalled = func(header data.HeaderHandler, body data.BodyHandler) (map[uint32][]byte, map[string][][]byte, error) {
-		return make(map[uint32][]byte, 0), make(map[string][][]byte, 0), nil
+		return make(map[uint32][]byte), make(map[string][][]byte), nil
+	}
+	blockProcessorMock.CreateNewHeaderCalled = func(round uint64, nonce uint64) data.HeaderHandler {
+		return &block.Header{
+			Round: round,
+			Nonce: nonce,
+		}
 	}
 
 	return blockProcessorMock
 }
 
+// InitMultiSignerMock -
 func InitMultiSignerMock() *BelNevMock {
 	multiSigner := NewMultiSigner()
 	multiSigner.CreateCommitmentMock = func() ([]byte, []byte) {
@@ -67,6 +74,7 @@ func InitMultiSignerMock() *BelNevMock {
 	return multiSigner
 }
 
+// InitKeys -
 func InitKeys() (*KeyGenMock, *PrivateKeyMock, *PublicKeyMock) {
 	toByteArrayMock := func() ([]byte, error) {
 		return []byte("byteArray"), nil
@@ -90,6 +98,7 @@ func InitKeys() (*KeyGenMock, *PrivateKeyMock, *PublicKeyMock) {
 	return keyGenMock, privKeyMock, pubKeyMock
 }
 
+// InitConsensusCore -
 func InitConsensusCore() *ConsensusCoreMock {
 
 	blockChain := &BlockChainMock{
@@ -119,22 +128,36 @@ func InitConsensusCore() *ConsensusCoreMock {
 	shardCoordinatorMock := ShardCoordinatorMock{}
 	syncTimerMock := &SyncTimerMock{}
 	validatorGroupSelector := &NodesCoordinatorMock{}
+	epochStartSubscriber := &EpochStartNotifierStub{}
+	antifloodHandler := &P2PAntifloodHandlerStub{}
+	headerPoolSubscriber := &HeadersCacherStub{}
+	peerHonestyHandler := &testscommon.PeerHonestyHandlerStub{}
+	headerSigVerifier := &HeaderSigVerifierStub{}
+	fallbackHeaderValidator := &testscommon.FallBackHeaderValidatorStub{}
+	nodeRedundancyHandler := &NodeRedundancyHandlerStub{}
 
 	container := &ConsensusCoreMock{
-		blockChain,
-		blockProcessorMock,
-		bootstrapperMock,
-		broadcastMessengerMock,
-		chronologyHandlerMock,
-		hasherMock,
-		marshalizerMock,
-		blsPrivateKeyMock,
-		blsSingleSignerMock,
-		multiSignerMock,
-		rounderMock,
-		shardCoordinatorMock,
-		syncTimerMock,
-		validatorGroupSelector,
+		blockChain:              blockChain,
+		blockProcessor:          blockProcessorMock,
+		headersSubscriber:       headerPoolSubscriber,
+		bootstrapper:            bootstrapperMock,
+		broadcastMessenger:      broadcastMessengerMock,
+		chronologyHandler:       chronologyHandlerMock,
+		hasher:                  hasherMock,
+		marshalizer:             marshalizerMock,
+		blsPrivateKey:           blsPrivateKeyMock,
+		blsSingleSigner:         blsSingleSignerMock,
+		multiSigner:             multiSignerMock,
+		rounder:                 rounderMock,
+		shardCoordinator:        shardCoordinatorMock,
+		syncTimer:               syncTimerMock,
+		validatorGroupSelector:  validatorGroupSelector,
+		epochStartNotifier:      epochStartSubscriber,
+		antifloodHandler:        antifloodHandler,
+		peerHonestyHandler:      peerHonestyHandler,
+		headerSigVerifier:       headerSigVerifier,
+		fallbackHeaderValidator: fallbackHeaderValidator,
+		nodeRedundancyHandler:   nodeRedundancyHandler,
 	}
 
 	return container

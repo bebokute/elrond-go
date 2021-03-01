@@ -2,6 +2,7 @@ package mock
 
 import (
 	"context"
+	"errors"
 
 	"github.com/jbenet/goprocess"
 	"github.com/libp2p/go-libp2p-core/network"
@@ -10,81 +11,123 @@ import (
 	"github.com/multiformats/go-multiaddr"
 )
 
+// NetworkStub -
 type NetworkStub struct {
 	ConnsToPeerCalled   func(p peer.ID) []network.Conn
 	ConnsCalled         func() []network.Conn
 	ConnectednessCalled func(peer.ID) network.Connectedness
 	NotifyCalled        func(network.Notifiee)
+	StopNotifyCalled    func(network.Notifiee)
+	PeersCall           func() []peer.ID
+	ClosePeerCall       func(peer.ID) error
 }
 
+// Peerstore -
 func (ns *NetworkStub) Peerstore() peerstore.Peerstore {
-	panic("implement me")
+	return nil
 }
 
+// LocalPeer -
 func (ns *NetworkStub) LocalPeer() peer.ID {
-	panic("implement me")
+	return "not a peer"
 }
 
-func (ns *NetworkStub) DialPeer(ctx context.Context, pid peer.ID) (network.Conn, error) {
-	panic("implement me")
+// DialPeer -
+func (ns *NetworkStub) DialPeer(_ context.Context, _ peer.ID) (network.Conn, error) {
+	return nil, errors.New("dial error")
 }
 
+// ClosePeer -
 func (ns *NetworkStub) ClosePeer(pid peer.ID) error {
-	panic("implement me")
+	if ns.ClosePeerCall != nil {
+		return ns.ClosePeerCall(pid)
+	}
+
+	return nil
 }
 
+// Connectedness -
 func (ns *NetworkStub) Connectedness(pid peer.ID) network.Connectedness {
-	return ns.ConnectednessCalled(pid)
+	if ns.ConnectednessCalled != nil {
+		return ns.ConnectednessCalled(pid)
+	}
+
+	return network.NotConnected
 }
 
+// Peers -
 func (ns *NetworkStub) Peers() []peer.ID {
-	panic("implement me")
+	if ns.PeersCall != nil {
+		return ns.PeersCall()
+	}
+
+	return make([]peer.ID, 0)
 }
 
+// Conns -
 func (ns *NetworkStub) Conns() []network.Conn {
-	return ns.ConnsCalled()
+	if ns.ConnsCalled != nil {
+		return ns.ConnsCalled()
+	}
+
+	return make([]network.Conn, 0)
 }
 
+// ConnsToPeer -
 func (ns *NetworkStub) ConnsToPeer(p peer.ID) []network.Conn {
-	return ns.ConnsToPeerCalled(p)
+	if ns.ConnsToPeerCalled != nil {
+		return ns.ConnsToPeerCalled(p)
+	}
+
+	return make([]network.Conn, 0)
 }
 
+// Notify -
 func (ns *NetworkStub) Notify(notifee network.Notifiee) {
-	ns.NotifyCalled(notifee)
+	if ns.NotifyCalled != nil {
+		ns.NotifyCalled(notifee)
+	}
 }
 
-func (ns *NetworkStub) StopNotify(network.Notifiee) {
-	panic("implement me")
+// StopNotify -
+func (ns *NetworkStub) StopNotify(notifee network.Notifiee) {
+	if ns.StopNotifyCalled != nil {
+		ns.StopNotifyCalled(notifee)
+	}
 }
 
+// Close -
 func (ns *NetworkStub) Close() error {
-	panic("implement me")
+	return nil
 }
 
-func (ns *NetworkStub) SetStreamHandler(network.StreamHandler) {
-	panic("implement me")
-}
+// SetStreamHandler -
+func (ns *NetworkStub) SetStreamHandler(network.StreamHandler) {}
 
-func (ns *NetworkStub) SetConnHandler(network.ConnHandler) {
-	panic("implement me")
-}
+// SetConnHandler -
+func (ns *NetworkStub) SetConnHandler(network.ConnHandler) {}
 
+// NewStream -
 func (ns *NetworkStub) NewStream(context.Context, peer.ID) (network.Stream, error) {
-	panic("implement me")
+	return nil, errors.New("new stream error")
 }
 
+// Listen -
 func (ns *NetworkStub) Listen(...multiaddr.Multiaddr) error {
-	panic("implement me")
+	return nil
 }
 
+// ListenAddresses -
 func (ns *NetworkStub) ListenAddresses() []multiaddr.Multiaddr {
-	panic("implement me")
+	return make([]multiaddr.Multiaddr, 0)
 }
 
+// InterfaceListenAddresses -
 func (ns *NetworkStub) InterfaceListenAddresses() ([]multiaddr.Multiaddr, error) {
-	panic("implement me")
+	return make([]multiaddr.Multiaddr, 0), nil
 }
 
+// Process -
 func (ns *NetworkStub) Process() goprocess.Process {
-	panic("implement me")
+	return nil
 }

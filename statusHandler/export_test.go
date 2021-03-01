@@ -1,15 +1,12 @@
 package statusHandler
 
-import (
-	"errors"
+// StatusMetricsMap will return all metrics in a map
+func (sm *statusMetrics) StatusMetricsMap() map[string]interface{} {
+	statusMetricsMap := make(map[string]interface{})
+	sm.nodeMetrics.Range(func(key, value interface{}) bool {
+		statusMetricsMap[key.(string)] = value
+		return true
+	})
 
-	"github.com/prometheus/client_golang/prometheus"
-)
-
-func (psh *PrometheusStatusHandler) GetPrometheusMetricByKey(key string) (prometheus.Gauge, error) {
-	value, ok := psh.prometheusGaugeMetrics.Load(key)
-	if ok {
-		return value.(prometheus.Gauge), nil
-	}
-	return nil, errors.New("metric does not exist")
+	return statusMetricsMap
 }

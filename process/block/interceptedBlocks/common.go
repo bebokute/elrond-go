@@ -3,74 +3,17 @@ package interceptedBlocks
 import (
 	"github.com/ElrondNetwork/elrond-go/core"
 	"github.com/ElrondNetwork/elrond-go/core/check"
-	"github.com/ElrondNetwork/elrond-go/crypto"
 	"github.com/ElrondNetwork/elrond-go/data"
 	"github.com/ElrondNetwork/elrond-go/data/block"
-	"github.com/ElrondNetwork/elrond-go/hashing"
-	"github.com/ElrondNetwork/elrond-go/marshal"
 	"github.com/ElrondNetwork/elrond-go/process"
 	"github.com/ElrondNetwork/elrond-go/sharding"
 )
 
-// headerMultiSigVerifier is an "abstract" struct that is able to verify the signature of a header handler
-type headerMultiSigVerifier struct {
-	marshalizer          marshal.Marshalizer
-	hasher               hashing.Hasher
-	nodesCoordinator     sharding.NodesCoordinator
-	multiSigVerifier     crypto.MultiSigVerifier
-	copyHeaderWithoutSig func(src data.HeaderHandler) data.HeaderHandler
-}
-
-func (hmsv *headerMultiSigVerifier) verifySig(header data.HeaderHandler) error {
-
-	randSeed := header.GetPrevRandSeed()
-	bitmap := header.GetPubKeysBitmap()
-
-	//TODO: check randSeed = Sig_proposer(prevRandSeed)
-
-	if len(bitmap) == 0 {
-		return process.ErrNilPubKeysBitmap
-	}
-	if bitmap[0]&1 == 0 {
-		return process.ErrBlockProposerSignatureMissing
-	}
-
-	consensusPubKeys, err := hmsv.nodesCoordinator.GetValidatorsPublicKeys(
-		randSeed,
-		header.GetRound(),
-		header.GetShardID(),
-	)
-	if err != nil {
-		return err
-	}
-
-	verifier, err := hmsv.multiSigVerifier.Create(consensusPubKeys, 0)
-	if err != nil {
-		return err
-	}
-
-	err = verifier.SetAggregatedSig(header.GetSignature())
-	if err != nil {
-		return err
-	}
-
-	// get marshalled block header without signature and bitmap
-	// as this is the message that was signed
-	headerCopy := hmsv.copyHeaderWithoutSig(header)
-
-	hash, err := core.CalculateHash(hmsv.marshalizer, hmsv.hasher, headerCopy)
-	if err != nil {
-		return err
-	}
-
-	return verifier.Verify(hash, bitmap)
-}
-
 func checkBlockHeaderArgument(arg *ArgInterceptedBlockHeader) error {
 	if arg == nil {
-		return process.ErrNilArguments
+		return process.ErrNilArgumentStruct
 	}
-	if arg.HdrBuff == nil {
+	if len(arg.HdrBuff) == 0 {
 		return process.ErrNilBuffer
 	}
 	if check.IfNil(arg.Marshalizer) {
@@ -79,24 +22,30 @@ func checkBlockHeaderArgument(arg *ArgInterceptedBlockHeader) error {
 	if check.IfNil(arg.Hasher) {
 		return process.ErrNilHasher
 	}
-	if check.IfNil(arg.MultiSigVerifier) {
-		return process.ErrNilMultiSigVerifier
-	}
-	if check.IfNil(arg.NodesCoordinator) {
-		return process.ErrNilNodesCoordinator
-	}
 	if check.IfNil(arg.ShardCoordinator) {
 		return process.ErrNilShardCoordinator
+	}
+	if check.IfNil(arg.HeaderSigVerifier) {
+		return process.ErrNilHeaderSigVerifier
+	}
+	if check.IfNil(arg.HeaderIntegrityVerifier) {
+		return process.ErrNilHeaderIntegrityVerifier
+	}
+	if check.IfNil(arg.EpochStartTrigger) {
+		return process.ErrNilEpochStartTrigger
+	}
+	if check.IfNil(arg.ValidityAttester) {
+		return process.ErrNilValidityAttester
 	}
 
 	return nil
 }
 
-func checkTxBlockBodyArgument(arg *ArgInterceptedTxBlockBody) error {
+func checkMiniblockArgument(arg *ArgInterceptedMiniblock) error {
 	if arg == nil {
-		return process.ErrNilArguments
+		return process.ErrNilArgumentStruct
 	}
-	if arg.TxBlockBodyBuff == nil {
+	if len(arg.MiniblockBuff) == 0 {
 		return process.ErrNilBuffer
 	}
 	if check.IfNil(arg.Marshalizer) {
@@ -113,22 +62,22 @@ func checkTxBlockBodyArgument(arg *ArgInterceptedTxBlockBody) error {
 }
 
 func checkHeaderHandler(hdr data.HeaderHandler) error {
-	if hdr.GetPubKeysBitmap() == nil {
+	if len(hdr.GetPubKeysBitmap()) == 0 {
 		return process.ErrNilPubKeysBitmap
 	}
-	if hdr.GetPrevHash() == nil {
+	if len(hdr.GetPrevHash()) == 0 {
 		return process.ErrNilPreviousBlockHash
 	}
-	if hdr.GetSignature() == nil {
+	if len(hdr.GetSignature()) == 0 {
 		return process.ErrNilSignature
 	}
-	if hdr.GetRootHash() == nil {
+	if len(hdr.GetRootHash()) == 0 {
 		return process.ErrNilRootHash
 	}
-	if hdr.GetRandSeed() == nil {
+	if len(hdr.GetRandSeed()) == 0 {
 		return process.ErrNilRandSeed
 	}
-	if hdr.GetPrevRandSeed() == nil {
+	if len(hdr.GetPrevRandSeed()) == 0 {
 		return process.ErrNilPrevRandSeed
 	}
 
@@ -137,7 +86,7 @@ func checkHeaderHandler(hdr data.HeaderHandler) error {
 
 func checkMetaShardInfo(shardInfo []block.ShardData, coordinator sharding.Coordinator) error {
 	for _, sd := range shardInfo {
-		if sd.ShardId >= coordinator.NumberOfShards() {
+		if sd.ShardID >= coordinator.NumberOfShards() && sd.ShardID != core.MetachainShardId {
 			return process.ErrInvalidShardId
 		}
 
@@ -152,11 +101,19 @@ func checkMetaShardInfo(shardInfo []block.ShardData, coordinator sharding.Coordi
 
 func checkShardData(sd block.ShardData, coordinator sharding.Coordinator) error {
 	for _, smbh := range sd.ShardMiniBlockHeaders {
-		isWrongSenderShardId := smbh.SenderShardId >= coordinator.NumberOfShards()
-		isWrongDestinationShardId := smbh.ReceiverShardId >= coordinator.NumberOfShards()
+		isWrongSenderShardId := smbh.SenderShardID >= coordinator.NumberOfShards() &&
+			smbh.SenderShardID != core.MetachainShardId &&
+			smbh.SenderShardID != core.AllShardId
+		isWrongDestinationShardId := smbh.ReceiverShardID >= coordinator.NumberOfShards() &&
+			smbh.ReceiverShardID != core.MetachainShardId &&
+			smbh.ReceiverShardID != core.AllShardId
 		isWrongShardId := isWrongSenderShardId || isWrongDestinationShardId
 		if isWrongShardId {
 			return process.ErrInvalidShardId
+		}
+
+		if len(smbh.Reserved) > 0 {
+			return process.ErrReservedFieldNotSupportedYet
 		}
 	}
 
@@ -165,11 +122,19 @@ func checkShardData(sd block.ShardData, coordinator sharding.Coordinator) error 
 
 func checkMiniblocks(miniblocks []block.MiniBlockHeader, coordinator sharding.Coordinator) error {
 	for _, miniblock := range miniblocks {
-		isWrongSenderShardId := miniblock.SenderShardID >= coordinator.NumberOfShards()
-		isWrongDestinationShardId := miniblock.ReceiverShardID >= coordinator.NumberOfShards()
+		isWrongSenderShardId := miniblock.SenderShardID >= coordinator.NumberOfShards() &&
+			miniblock.SenderShardID != core.MetachainShardId &&
+			miniblock.SenderShardID != core.AllShardId
+		isWrongDestinationShardId := miniblock.ReceiverShardID >= coordinator.NumberOfShards() &&
+			miniblock.ReceiverShardID != core.MetachainShardId &&
+			miniblock.ReceiverShardID != core.AllShardId
 		isWrongShardId := isWrongSenderShardId || isWrongDestinationShardId
 		if isWrongShardId {
 			return process.ErrInvalidShardId
+		}
+
+		if len(miniblock.Reserved) > 0 {
+			return process.ErrReservedFieldNotSupportedYet
 		}
 	}
 

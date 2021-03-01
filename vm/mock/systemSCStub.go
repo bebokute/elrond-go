@@ -1,14 +1,29 @@
 package mock
 
 import (
-	vmcommon "github.com/ElrondNetwork/elrond-vm-common"
+	"github.com/ElrondNetwork/elrond-go/core/vmcommon"
+	"github.com/ElrondNetwork/elrond-go/vm"
 )
 
+// SystemSCStub -
 type SystemSCStub struct {
-	ExecuteCalled func(args *vmcommon.ContractCallInput) vmcommon.ReturnCode
-	ValueOfCalled func(key interface{}) interface{}
+	ExecuteCalled       func(args *vmcommon.ContractCallInput) vmcommon.ReturnCode
+	SetNewGasCostCalled func(gasCost vm.GasCost)
 }
 
+// SetNewGasCost -
+func (s *SystemSCStub) SetNewGasCost(gasCost vm.GasCost) {
+	if s.SetNewGasCostCalled != nil {
+		s.SetNewGasCostCalled(gasCost)
+	}
+}
+
+// CanUseContract -
+func (s *SystemSCStub) CanUseContract() bool {
+	return true
+}
+
+// Execute -
 func (s *SystemSCStub) Execute(args *vmcommon.ContractCallInput) vmcommon.ReturnCode {
 	if s.ExecuteCalled != nil {
 		return s.ExecuteCalled(args)
@@ -16,16 +31,7 @@ func (s *SystemSCStub) Execute(args *vmcommon.ContractCallInput) vmcommon.Return
 	return 0
 }
 
-func (s *SystemSCStub) ValueOf(key interface{}) interface{} {
-	if s.ValueOfCalled != nil {
-		return s.ValueOfCalled(key)
-	}
-	return nil
-}
-
+// IsInterfaceNil -
 func (s *SystemSCStub) IsInterfaceNil() bool {
-	if s == nil {
-		return true
-	}
-	return false
+	return s == nil
 }

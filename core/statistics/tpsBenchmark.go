@@ -4,9 +4,30 @@ import (
 	"math/big"
 	"sync"
 
+	logger "github.com/ElrondNetwork/elrond-go-logger"
+	"github.com/ElrondNetwork/elrond-go/core"
+	"github.com/ElrondNetwork/elrond-go/core/check"
 	"github.com/ElrondNetwork/elrond-go/data"
 	"github.com/ElrondNetwork/elrond-go/data/block"
+	"github.com/ElrondNetwork/elrond-go/statusHandler"
 )
+
+var log = logger.GetOrCreate("statistics")
+
+// defaultBlockNumber is used to identify the default value of the value representing the block number fetched from storage.
+// it is used to signal that no value was read from storage and the check for not updating total number of processed
+// transactions should be skipped.
+const defaultBlockNumber = -1
+
+// TpsPersistentData holds the tps benchmark data which is stored between node restarts
+type TpsPersistentData struct {
+	BlockNumber           uint64
+	RoundNumber           uint64
+	PeakTPS               float64
+	AverageBlockTxCount   *big.Int
+	TotalProcessedTxCount *big.Int
+	LastBlockTxCount      uint32
+}
 
 // TpsBenchmark will calculate statistics for the network activity
 type TpsBenchmark struct {
@@ -21,7 +42,8 @@ type TpsBenchmark struct {
 	lastBlockTxCount      uint32
 	totalProcessedTxCount *big.Int
 	shardStatistics       map[uint32]ShardStatistic
-	missingNonces         map[uint64]struct{}
+	statusHandler         core.AppStatusHandler
+	initialBlockNumber    int64
 }
 
 // ShardStatistics will hold the tps statistics for each shard
@@ -36,14 +58,25 @@ type ShardStatistics struct {
 	totalProcessedTxCount *big.Int
 }
 
-// NewTPSBenchmark instantiates a new object responsible with calculating statistics for each shard tps.
-// nrOfShards represents the total number of shards, roundDuration is the duration for a round in seconds
-func NewTPSBenchmark(nrOfShards uint32, roundDuration uint64) (*TpsBenchmark, error) {
+// NewTPSBenchmarkWithInitialData instantiates a new object responsible with calculating statistics for each shard tps
+// starting with initial data
+func NewTPSBenchmarkWithInitialData(
+	appStatusHandler core.AppStatusHandler,
+	initialTpsBenchmark *TpsPersistentData,
+	nrOfShards uint32,
+	roundDuration uint64,
+) (*TpsBenchmark, error) {
 	if roundDuration == 0 {
 		return nil, ErrInvalidRoundDuration
 	}
+	if initialTpsBenchmark == nil {
+		return nil, ErrNilInitialTPSBenchmarks
+	}
+	if check.IfNil(appStatusHandler) {
+		return nil, ErrNilStatusHandler
+	}
 
-	shardStats := make(map[uint32]ShardStatistic, 0)
+	shardStats := make(map[uint32]ShardStatistic)
 	for i := uint32(0); i < nrOfShards; i++ {
 		shardStats[i] = &ShardStatistics{
 			roundTime:             roundDuration,
@@ -54,9 +87,42 @@ func NewTPSBenchmark(nrOfShards uint32, roundDuration uint64) (*TpsBenchmark, er
 		nrOfShards:            nrOfShards,
 		roundTime:             roundDuration,
 		shardStatistics:       shardStats,
-		missingNonces:         make(map[uint64]struct{}, 0),
+		peakTPS:               initialTpsBenchmark.PeakTPS,
+		lastBlockTxCount:      initialTpsBenchmark.LastBlockTxCount,
+		blockNumber:           initialTpsBenchmark.BlockNumber,
+		roundNumber:           initialTpsBenchmark.RoundNumber,
+		totalProcessedTxCount: initialTpsBenchmark.TotalProcessedTxCount,
+		averageBlockTxCount:   initialTpsBenchmark.AverageBlockTxCount,
+		statusHandler:         appStatusHandler,
+		initialBlockNumber:    int64(initialTpsBenchmark.BlockNumber),
+	}, nil
+}
+
+// NewTPSBenchmark instantiates a new object responsible with calculating statistics for each shard tps.
+// nrOfShards represents the total number of shards, roundDuration is the duration for a round in seconds
+func NewTPSBenchmark(
+	nrOfShards uint32,
+	roundDuration uint64,
+) (*TpsBenchmark, error) {
+	if roundDuration == 0 {
+		return nil, ErrInvalidRoundDuration
+	}
+
+	shardStats := make(map[uint32]ShardStatistic)
+	for i := uint32(0); i < nrOfShards; i++ {
+		shardStats[i] = &ShardStatistics{
+			roundTime:             roundDuration,
+			totalProcessedTxCount: big.NewInt(0),
+		}
+	}
+	return &TpsBenchmark{
+		nrOfShards:            nrOfShards,
+		roundTime:             roundDuration,
+		shardStatistics:       shardStats,
+		statusHandler:         statusHandler.NewNilStatusHandler(),
 		totalProcessedTxCount: big.NewInt(0),
 		averageBlockTxCount:   big.NewInt(0),
+		initialBlockNumber:    defaultBlockNumber,
 	}, nil
 }
 
@@ -113,8 +179,13 @@ func (s *TpsBenchmark) NrOfShards() uint32 {
 // ShardStatistics returns the current statistical state for a given shard
 func (s *TpsBenchmark) ShardStatistics() map[uint32]ShardStatistic {
 	s.mut.RLock()
-	defer s.mut.RUnlock()
-	return s.shardStatistics
+	shardStatisticsMapCopy := make(map[uint32]ShardStatistic)
+	for key, value := range s.shardStatistics {
+		shardStatisticsMapCopy[key] = value
+	}
+	s.mut.RUnlock()
+
+	return shardStatisticsMapCopy
 }
 
 // ShardStatistic returns the current statistical state for a given shard
@@ -129,123 +200,141 @@ func (s *TpsBenchmark) ShardStatistic(shardID uint32) ShardStatistic {
 	return ss
 }
 
-func (s *TpsBenchmark) isMissingNonce(nonce uint64) bool {
-	if nonce >= s.blockNumber {
-		return false
-	}
-
-	_, isMissing := s.missingNonces[nonce]
-
-	return isMissing
-}
-
-func (s *TpsBenchmark) isMetaBlockRelevant(mb *block.MetaBlock) bool {
-	if mb == nil {
-		return false
-	}
-	if mb.Nonce <= s.blockNumber && !s.isMissingNonce(mb.Nonce) {
-		return false
-	}
-	if len(mb.ShardInfo) < 1 {
-		return false
-	}
-
-	return true
-}
-
 // Update receives a metablock and updates all fields accordingly for each shard available in the meta block
 func (s *TpsBenchmark) Update(mblock data.HeaderHandler) {
 	if mblock == nil || mblock.IsInterfaceNil() {
 		return
 	}
 
-	mb := mblock.(*block.MetaBlock)
-	if mb == nil {
+	mb, ok := mblock.(*block.MetaBlock)
+	if !ok {
 		return
 	}
 
 	s.mut.Lock()
-	if !s.isMetaBlockRelevant(mb) {
-		s.mut.Unlock()
-		return
-	}
-
-	if mb.Nonce > s.blockNumber {
-		for i := s.blockNumber + 1; i < mb.Nonce; i++ {
-			s.addMissingNonce(i)
-		}
-	}
-	s.removeMissingNonce(mb.Nonce)
 	_ = s.updateStatistics(mb)
 	s.mut.Unlock()
 }
 
-func (s *TpsBenchmark) addMissingNonce(nonce uint64) {
-	s.missingNonces[nonce] = struct{}{}
-}
-
-func (s *TpsBenchmark) removeMissingNonce(nonce uint64) {
-	delete(s.missingNonces, nonce)
-}
-
-func (s *TpsBenchmark) setAverageTxCountForRound(round uint64) {
-	bigNonce := big.NewInt(0)
-	bigNonce.SetUint64(round)
-	s.averageBlockTxCount.Quo(s.totalProcessedTxCount, bigNonce)
-}
-
 func (s *TpsBenchmark) updateStatistics(header *block.MetaBlock) error {
+	if s.blockNumber == header.Nonce {
+		return nil
+	}
+
 	s.blockNumber = header.Nonce
 	s.roundNumber = header.Round
-	s.lastBlockTxCount = header.TxCount
-	s.totalProcessedTxCount.Add(s.totalProcessedTxCount, big.NewInt(int64(header.TxCount)))
+
+	totalTxsForTPS, totalTxsForCount := getNumOfTxsWithoutPeerTxsAndSCRs(header)
+
+	s.lastBlockTxCount = uint32(totalTxsForTPS)
+	shouldUpdateTotalNumAndPeak := s.shouldUpdateFields(header)
+	if shouldUpdateTotalNumAndPeak {
+		s.totalProcessedTxCount.Add(s.totalProcessedTxCount, big.NewInt(0).SetUint64(totalTxsForCount))
+		s.statusHandler.AddUint64(core.MetricNumProcessedTxsTPSBenchmark, totalTxsForCount)
+	}
 	s.averageBlockTxCount.Quo(s.totalProcessedTxCount, big.NewInt(int64(header.Nonce)))
 
-	currentTPS := float64(uint64(header.TxCount) / s.roundTime)
-	if currentTPS > s.peakTPS {
+	currentTPS := float64(totalTxsForTPS / s.roundTime)
+	if currentTPS > s.peakTPS && shouldUpdateTotalNumAndPeak {
 		s.peakTPS = currentTPS
 	}
 
+	s.statusHandler.SetUInt64Value(core.MetricNonceForTPS, header.Nonce)
+	s.statusHandler.SetUInt64Value(core.MetricLastBlockTxCount, totalTxsForTPS)
+	s.statusHandler.SetUInt64Value(core.MetricPeakTPS, uint64(s.peakTPS))
+	s.statusHandler.SetStringValue(core.MetricAverageBlockTxCount, s.averageBlockTxCount.String())
+
 	for _, shardInfo := range header.ShardInfo {
-		shardStat, ok := s.shardStatistics[shardInfo.ShardId]
+		shardStat, ok := s.shardStatistics[shardInfo.ShardID]
 		if !ok {
 			return ErrInvalidShardId
 		}
 
+		shardTotalTxsForTPS, shardTotalTxsForCount := getNumTxsFromMiniblocksWithoutPeerTxsAndSCRs(shardInfo.ShardID, shardInfo.ShardMiniBlockHeaders)
+
 		shardPeakTPS := shardStat.PeakTPS()
-		currentShardTPS := float64(uint64(shardInfo.TxCount) / s.roundTime)
+		currentShardTPS := float64(shardTotalTxsForTPS / s.roundTime)
 		if currentShardTPS > shardStat.PeakTPS() {
 			shardPeakTPS = currentShardTPS
 		}
 
-		bigTxCount := big.NewInt(int64(shardInfo.TxCount))
+		bigTxCount := big.NewInt(0).SetUint64(shardTotalTxsForCount)
 		newTotalProcessedTxCount := big.NewInt(0).Add(shardStat.TotalProcessedTxCount(), bigTxCount)
 		roundsPassed := big.NewInt(int64(header.Round))
 		newAverageTPS := big.NewInt(0).Quo(newTotalProcessedTxCount, roundsPassed)
 
 		updatedShardStats := &ShardStatistics{
-			shardID:               shardInfo.ShardId,
+			shardID:               shardInfo.ShardID,
 			roundTime:             s.roundTime,
 			currentBlockNonce:     header.Nonce,
 			totalProcessedTxCount: newTotalProcessedTxCount,
 
 			averageTPS:       newAverageTPS,
 			peakTPS:          shardPeakTPS,
-			lastBlockTxCount: header.TxCount,
+			lastBlockTxCount: uint32(shardTotalTxsForTPS),
 		}
 
-		s.shardStatistics[shardInfo.ShardId] = updatedShardStats
+		log.Debug("TpsBenchmark.updateStatistics",
+			"shard", updatedShardStats.shardID,
+			"block", updatedShardStats.currentBlockNonce,
+			"avgTPS", updatedShardStats.averageTPS,
+			"peakTPS", updatedShardStats.peakTPS,
+			"lastBlockTxCount", updatedShardStats.lastBlockTxCount,
+			"avgBlockTxCount", updatedShardStats.averageBlockTxCount,
+			"totalProcessedTxCount", updatedShardStats.totalProcessedTxCount,
+		)
+
+		s.shardStatistics[shardInfo.ShardID] = updatedShardStats
 	}
 
 	return nil
 }
 
-// IsInterfaceNil returns true if there is no value under the interface
-func (s *TpsBenchmark) IsInterfaceNil() bool {
-	if s == nil {
+func getNumOfTxsWithoutPeerTxsAndSCRs(metaBlock *block.MetaBlock) (uint64, uint64) {
+	// get number of transactions from metablock miniblocks
+	totalTxsForTPS, totalTxsForCount := getNumTxsFromMiniblocksWithoutPeerTxsAndSCRs(core.MetachainShardId, metaBlock.MiniBlockHeaders)
+
+	// get number of transactions from shard blocks that are included in metablock
+	for _, shardInfo := range metaBlock.ShardInfo {
+		numTxsForTps, numTxsForCount := getNumTxsFromMiniblocksWithoutPeerTxsAndSCRs(shardInfo.ShardID, shardInfo.ShardMiniBlockHeaders)
+
+		totalTxsForTPS += numTxsForTps
+		totalTxsForCount += numTxsForCount
+	}
+
+	return totalTxsForTPS, totalTxsForCount
+}
+
+func getNumTxsFromMiniblocksWithoutPeerTxsAndSCRs(blockShardID uint32, miniblocks []block.MiniBlockHeader) (uint64, uint64) {
+	totalTxsForTPS, totalTxsForCount := uint64(0), uint64(0)
+	for _, mb := range miniblocks {
+		switch mb.Type {
+		case block.PeerBlock, block.SmartContractResultBlock:
+			continue
+		default:
+			if mb.ReceiverShardID == blockShardID {
+				totalTxsForCount += uint64(mb.TxCount)
+			}
+
+			totalTxsForTPS += uint64(mb.TxCount)
+			continue
+		}
+	}
+
+	return totalTxsForTPS, totalTxsForCount
+}
+
+func (s *TpsBenchmark) shouldUpdateFields(metaBlock *block.MetaBlock) bool {
+	if s.initialBlockNumber == defaultBlockNumber {
 		return true
 	}
-	return false
+
+	return uint64(s.initialBlockNumber) < metaBlock.Nonce
+}
+
+// IsInterfaceNil returns true if there is no value under the interface
+func (s *TpsBenchmark) IsInterfaceNil() bool {
+	return s == nil
 }
 
 // ShardID returns the shard id of the current statistic object
@@ -290,8 +379,5 @@ func (ss *ShardStatistics) TotalProcessedTxCount() *big.Int {
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (ss *ShardStatistics) IsInterfaceNil() bool {
-	if ss == nil {
-		return true
-	}
-	return false
+	return ss == nil
 }

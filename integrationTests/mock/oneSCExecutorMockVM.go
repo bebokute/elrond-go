@@ -5,9 +5,10 @@ import (
 	"math/big"
 	"strings"
 
+	"github.com/ElrondNetwork/elrond-go/core/vmcommon"
 	"github.com/ElrondNetwork/elrond-go/hashing"
 	"github.com/ElrondNetwork/elrond-go/process/factory"
-	"github.com/ElrondNetwork/elrond-vm-common"
+	"github.com/ElrondNetwork/elrond-go/process/smartContract/hooks"
 )
 
 var errNilValue = errors.New("nil value provided")
@@ -42,6 +43,7 @@ type OneSCExecutorMockVM struct {
 	GasForOperation uint64
 }
 
+// NewOneSCExecutorMockVM -
 func NewOneSCExecutorMockVM(blockchainHook vmcommon.BlockchainHook, hasher hashing.Hasher) (*OneSCExecutorMockVM, error) {
 	if blockchainHook == nil || hasher == nil {
 		return nil, errNilValue
@@ -55,14 +57,7 @@ func NewOneSCExecutorMockVM(blockchainHook vmcommon.BlockchainHook, hasher hashi
 	return vm, nil
 }
 
-func (vm *OneSCExecutorMockVM) G0Create(input *vmcommon.ContractCreateInput) (*big.Int, error) {
-	return big.NewInt(0), nil
-}
-
-func (vm *OneSCExecutorMockVM) G0Call(input *vmcommon.ContractCallInput) (*big.Int, error) {
-	return big.NewInt(0), nil
-}
-
+// RunSmartContractCreate -
 func (vm *OneSCExecutorMockVM) RunSmartContractCreate(input *vmcommon.ContractCreateInput) (*vmcommon.VMOutput, error) {
 	if input == nil {
 		return nil, errNilValue
@@ -70,62 +65,59 @@ func (vm *OneSCExecutorMockVM) RunSmartContractCreate(input *vmcommon.ContractCr
 	if len(input.Arguments) == 0 {
 		return nil, errNoArgumentsProvided
 	}
-	if input.GasProvided == nil {
-		return nil, errNilValue
-	}
-	if input.GasProvided.Cmp(big.NewInt(0).SetUint64(vm.GasForOperation)) < 0 {
+	if input.GasProvided < vm.GasForOperation {
 		return vm.outOfGasFunc(&input.VMInput)
 	}
 
-	initialValue := big.NewInt(0)
+	initialValue := make([]byte, 0)
 	if input.Arguments[0] != nil {
-		initialValue = input.Arguments[0]
+		initialValue = append(initialValue, input.Arguments[0]...)
 	}
 
-	senderNonce, err := vm.blockchainHook.GetNonce(input.CallerAddr)
+	senderACcount, err := vm.blockchainHook.GetUserAccount(input.CallerAddr)
 	if err != nil {
 		return nil, err
 	}
 
-	newSCAddr, err := vm.blockchainHook.NewAddress(input.CallerAddr, senderNonce, factory.InternalTestingVM)
+	newSCAddr, err := vm.blockchainHook.NewAddress(input.CallerAddr, senderACcount.GetNonce(), factory.InternalTestingVM)
 	if err != nil {
 		return nil, err
 	}
 
 	scOutputAccount := &vmcommon.OutputAccount{
 		Nonce:        0,
+		CodeMetadata: input.ContractCodeMetadata,
 		Code:         input.ContractCode,
 		BalanceDelta: input.CallValue,
 		Address:      newSCAddr,
-		StorageUpdates: []*vmcommon.StorageUpdate{
-			{
-				//only one variable: a
-				Offset: variableA,
-				Data:   initialValue.Bytes(),
-			},
-		},
+		StorageUpdates: makeStorageUpdatesMap(&vmcommon.StorageUpdate{
+			//only one variable: a
+			Offset: variableA,
+			Data:   initialValue,
+		}),
 	}
 
 	senderOutputAccount := &vmcommon.OutputAccount{
 		Address: input.CallerAddr,
 		//VM does not increment sender's nonce
-		Nonce: senderNonce,
+		Nonce: senderACcount.GetNonce(),
 		//tx succeed, return 0 back to the sender
 		BalanceDelta: big.NewInt(0),
 	}
 
 	return &vmcommon.VMOutput{
-		OutputAccounts:  []*vmcommon.OutputAccount{scOutputAccount, senderOutputAccount},
+		OutputAccounts:  makeOutputAccountsMap(scOutputAccount, senderOutputAccount),
 		DeletedAccounts: make([][]byte, 0),
 		GasRefund:       big.NewInt(0),
-		GasRemaining:    big.NewInt(0).Sub(input.GasProvided, big.NewInt(0).SetUint64(vm.GasForOperation)),
+		GasRemaining:    input.GasProvided - vm.GasForOperation,
 		Logs:            make([]*vmcommon.LogEntry, 0),
 		ReturnCode:      vmcommon.Ok,
-		ReturnData:      make([]*big.Int, 0),
+		ReturnData:      [][]byte{},
 		TouchedAccounts: make([][]byte, 0),
 	}, nil
 }
 
+// RunSmartContractCall -
 func (vm *OneSCExecutorMockVM) RunSmartContractCall(input *vmcommon.ContractCallInput) (*vmcommon.VMOutput, error) {
 	if input == nil {
 		return nil, errNilValue
@@ -133,23 +125,24 @@ func (vm *OneSCExecutorMockVM) RunSmartContractCall(input *vmcommon.ContractCall
 	if input.Arguments == nil {
 		return nil, errNilValue
 	}
-	if input.GasProvided == nil {
-		return nil, errNilValue
-	}
-	if input.GasProvided.Cmp(big.NewInt(0).SetUint64(vm.GasForOperation)) < 0 {
+	if input.GasProvided < vm.GasForOperation {
 		return vm.outOfGasFunc(&input.VMInput)
 	}
 
 	//make a dummy call to get the SC code, not required here, but to emulate what happens in the real VM
-	_, err := vm.blockchainHook.GetCode(input.RecipientAddr)
+	recipientAccount, err := vm.blockchainHook.GetUserAccount(input.RecipientAddr)
 	if err != nil {
 		return nil, err
+	}
+
+	if len(vm.blockchainHook.GetCode(recipientAccount)) == 0 {
+		return nil, hooks.ErrEmptyCode
 	}
 
 	value := big.NewInt(0)
 	if len(input.Arguments) > 0 {
 		if input.Arguments[0] != nil {
-			value = input.Arguments[0]
+			value.SetBytes(input.Arguments[0])
 		}
 	}
 
@@ -166,6 +159,10 @@ func (vm *OneSCExecutorMockVM) RunSmartContractCall(input *vmcommon.ContractCall
 	}
 }
 
+// GasScheduleChange -
+func (vm *OneSCExecutorMockVM) GasScheduleChange(_ map[string]map[string]uint64) {
+}
+
 func (vm *OneSCExecutorMockVM) processAddFunc(input *vmcommon.ContractCallInput, value *big.Int) (*vmcommon.VMOutput, error) {
 	currentValueBuff, err := vm.blockchainHook.GetStorageData(input.RecipientAddr, variableA)
 	if err != nil {
@@ -175,25 +172,23 @@ func (vm *OneSCExecutorMockVM) processAddFunc(input *vmcommon.ContractCallInput,
 	currentValue := big.NewInt(0).SetBytes(currentValueBuff)
 	newValue := big.NewInt(0).Add(currentValue, value)
 
-	destNonce, err := vm.blockchainHook.GetNonce(input.RecipientAddr)
+	recipientAccount, err := vm.blockchainHook.GetUserAccount(input.RecipientAddr)
 	if err != nil {
 		return nil, err
 	}
 
 	scOutputAccount := &vmcommon.OutputAccount{
-		Nonce:        destNonce,
+		Nonce:        recipientAccount.GetNonce(),
 		BalanceDelta: input.CallValue,
 		Address:      input.RecipientAddr,
-		StorageUpdates: []*vmcommon.StorageUpdate{
-			{
-				//only one variable: a
-				Offset: variableA,
-				Data:   newValue.Bytes(),
-			},
-		},
+		StorageUpdates: makeStorageUpdatesMap(&vmcommon.StorageUpdate{
+			//only one variable: a
+			Offset: variableA,
+			Data:   newValue.Bytes(),
+		}),
 	}
 
-	senderNonce, err := vm.blockchainHook.GetNonce(input.CallerAddr)
+	senderAccount, err := vm.blockchainHook.GetUserAccount(input.CallerAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -201,48 +196,43 @@ func (vm *OneSCExecutorMockVM) processAddFunc(input *vmcommon.ContractCallInput,
 	senderOutputAccount := &vmcommon.OutputAccount{
 		Address: input.CallerAddr,
 		//VM does not increment sender's nonce
-		Nonce: senderNonce,
+		Nonce: senderAccount.GetNonce(),
 		//tx succeed, return 0 back to the sender
 		BalanceDelta: big.NewInt(0),
 	}
 
-	gasRemaining := big.NewInt(0).Sub(input.GasProvided, big.NewInt(0).SetUint64(vm.GasForOperation))
 	return &vmcommon.VMOutput{
-		OutputAccounts:  []*vmcommon.OutputAccount{scOutputAccount, senderOutputAccount},
+		OutputAccounts:  makeOutputAccountsMap(scOutputAccount, senderOutputAccount),
 		DeletedAccounts: make([][]byte, 0),
 		GasRefund:       big.NewInt(0),
-		GasRemaining:    gasRemaining,
+		GasRemaining:    input.GasProvided - vm.GasForOperation,
 		Logs:            make([]*vmcommon.LogEntry, 0),
 		ReturnCode:      vmcommon.Ok,
-		ReturnData:      make([]*big.Int, 0),
+		ReturnData:      [][]byte{},
 		TouchedAccounts: make([][]byte, 0),
 	}, nil
 }
 
 func (vm *OneSCExecutorMockVM) processWithdrawFunc(input *vmcommon.ContractCallInput, value *big.Int) (*vmcommon.VMOutput, error) {
 
-	destNonce, err := vm.blockchainHook.GetNonce(input.RecipientAddr)
+	destAccount, err := vm.blockchainHook.GetUserAccount(input.RecipientAddr)
 	if err != nil {
 		return nil, err
 	}
 
-	destBalance, err := vm.blockchainHook.GetBalance(input.RecipientAddr)
-	if err != nil {
-		return nil, err
-	}
-
+	destBalance := destAccount.GetBalance()
 	if destBalance.Cmp(value) < 0 {
 		return nil, errInsuficientFunds
 	}
 
 	newSCBalance := big.NewInt(0).Sub(big.NewInt(0), value)
 	scOutputAccount := &vmcommon.OutputAccount{
-		Nonce:        destNonce,
+		Nonce:        destAccount.GetNonce(),
 		BalanceDelta: newSCBalance,
 		Address:      input.RecipientAddr,
 	}
 
-	senderNonce, err := vm.blockchainHook.GetNonce(input.CallerAddr)
+	senderAccount, err := vm.blockchainHook.GetUserAccount(input.CallerAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -250,20 +240,19 @@ func (vm *OneSCExecutorMockVM) processWithdrawFunc(input *vmcommon.ContractCallI
 	senderOutputAccount := &vmcommon.OutputAccount{
 		Address: input.CallerAddr,
 		//VM does not increment sender's nonce
-		Nonce: senderNonce,
+		Nonce: senderAccount.GetNonce(),
 		//tx succeed, return 0 back to the sender
 		BalanceDelta: value,
 	}
 
-	gasRemaining := big.NewInt(0).Sub(input.GasProvided, big.NewInt(0).SetUint64(vm.GasForOperation))
 	return &vmcommon.VMOutput{
-		OutputAccounts:  []*vmcommon.OutputAccount{scOutputAccount, senderOutputAccount},
+		OutputAccounts:  makeOutputAccountsMap(scOutputAccount, senderOutputAccount),
 		DeletedAccounts: make([][]byte, 0),
 		GasRefund:       big.NewInt(0),
-		GasRemaining:    gasRemaining,
+		GasRemaining:    input.GasProvided - vm.GasForOperation,
 		Logs:            make([]*vmcommon.LogEntry, 0),
 		ReturnCode:      vmcommon.Ok,
-		ReturnData:      make([]*big.Int, 0),
+		ReturnData:      [][]byte{},
 		TouchedAccounts: make([][]byte, 0),
 	}, nil
 }
@@ -274,58 +263,56 @@ func (vm *OneSCExecutorMockVM) processGetFunc(input *vmcommon.ContractCallInput)
 		return nil, err
 	}
 
-	currentValue := big.NewInt(0).SetBytes(currentValueBuff)
-	destNonce, err := vm.blockchainHook.GetNonce(input.RecipientAddr)
+	destAccount, err := vm.blockchainHook.GetUserAccount(input.RecipientAddr)
 	if err != nil {
 		return nil, err
 	}
 
 	scOutputAccount := &vmcommon.OutputAccount{
-		Nonce:          destNonce,
+		Nonce:          destAccount.GetNonce(),
 		BalanceDelta:   input.CallValue,
 		Address:        input.RecipientAddr,
-		StorageUpdates: make([]*vmcommon.StorageUpdate, 0),
+		StorageUpdates: make(map[string]*vmcommon.StorageUpdate),
 	}
 
-	gasRemaining := big.NewInt(0).Sub(input.GasProvided, big.NewInt(0).SetUint64(vm.GasForOperation))
 	return &vmcommon.VMOutput{
-		OutputAccounts:  []*vmcommon.OutputAccount{scOutputAccount},
+		OutputAccounts:  makeOutputAccountsMap(scOutputAccount),
 		DeletedAccounts: make([][]byte, 0),
 		GasRefund:       big.NewInt(0),
-		GasRemaining:    gasRemaining,
+		GasRemaining:    input.GasProvided - vm.GasForOperation,
 		Logs:            make([]*vmcommon.LogEntry, 0),
 		ReturnCode:      vmcommon.Ok,
-		ReturnData:      []*big.Int{currentValue},
+		ReturnData:      [][]byte{currentValueBuff},
 		TouchedAccounts: make([][]byte, 0),
 	}, nil
 }
 
 func (vm *OneSCExecutorMockVM) unavailableFunc(input *vmcommon.ContractCallInput) (*vmcommon.VMOutput, error) {
-	destNonce, err := vm.blockchainHook.GetNonce(input.RecipientAddr)
+	destAccount, err := vm.blockchainHook.GetUserAccount(input.RecipientAddr)
 	if err != nil {
 		return nil, err
 	}
 
 	scOutputAccount := &vmcommon.OutputAccount{
-		Nonce:          destNonce,
+		Nonce:          destAccount.GetNonce(),
 		Address:        input.RecipientAddr,
-		StorageUpdates: make([]*vmcommon.StorageUpdate, 0),
+		StorageUpdates: make(map[string]*vmcommon.StorageUpdate),
 	}
 
 	return &vmcommon.VMOutput{
-		OutputAccounts:  []*vmcommon.OutputAccount{scOutputAccount},
+		OutputAccounts:  makeOutputAccountsMap(scOutputAccount),
 		DeletedAccounts: make([][]byte, 0),
 		GasRefund:       big.NewInt(0),
-		GasRemaining:    big.NewInt(0),
+		GasRemaining:    0,
 		Logs:            make([]*vmcommon.LogEntry, 0),
 		ReturnCode:      vmcommon.FunctionNotFound,
-		ReturnData:      make([]*big.Int, 0),
+		ReturnData:      [][]byte{},
 		TouchedAccounts: make([][]byte, 0),
 	}, nil
 }
 
 func (vm *OneSCExecutorMockVM) outOfGasFunc(input *vmcommon.VMInput) (*vmcommon.VMOutput, error) {
-	nonce, err := vm.blockchainHook.GetNonce(input.CallerAddr)
+	callerAccount, err := vm.blockchainHook.GetUserAccount(input.CallerAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -333,17 +320,46 @@ func (vm *OneSCExecutorMockVM) outOfGasFunc(input *vmcommon.VMInput) (*vmcommon.
 	vmo := &vmcommon.OutputAccount{
 		BalanceDelta: big.NewInt(0),
 		Address:      input.CallerAddr,
-		Nonce:        nonce,
+		Nonce:        callerAccount.GetNonce(),
 	}
 
 	return &vmcommon.VMOutput{
-		OutputAccounts:  []*vmcommon.OutputAccount{vmo},
+		OutputAccounts:  makeOutputAccountsMap(vmo),
 		DeletedAccounts: make([][]byte, 0),
 		GasRefund:       big.NewInt(0),
-		GasRemaining:    big.NewInt(0),
+		GasRemaining:    0,
 		Logs:            make([]*vmcommon.LogEntry, 0),
 		ReturnCode:      vmcommon.OutOfGas,
-		ReturnData:      make([]*big.Int, 0),
+		ReturnData:      [][]byte{},
 		TouchedAccounts: make([][]byte, 0),
 	}, nil
+}
+
+func makeStorageUpdatesMap(updates ...*vmcommon.StorageUpdate) map[string]*vmcommon.StorageUpdate {
+	if len(updates) == 0 {
+		return make(map[string]*vmcommon.StorageUpdate)
+	}
+
+	updatesMap := make(map[string]*vmcommon.StorageUpdate, len(updates))
+	for _, update := range updates {
+		updatesMap[string(update.Offset)] = update
+	}
+	return updatesMap
+}
+
+func makeOutputAccountsMap(accounts ...*vmcommon.OutputAccount) map[string]*vmcommon.OutputAccount {
+	if accounts == nil {
+		return make(map[string]*vmcommon.OutputAccount)
+	}
+
+	accountsMap := make(map[string]*vmcommon.OutputAccount, len(accounts))
+	for _, account := range accounts {
+		accountsMap[string(account.Address)] = account
+	}
+	return accountsMap
+}
+
+// IsInterfaceNil returns true if there is no value under the interface
+func (vm *OneSCExecutorMockVM) IsInterfaceNil() bool {
+	return vm == nil
 }

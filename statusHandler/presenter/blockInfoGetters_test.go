@@ -80,7 +80,7 @@ func TestPresenterStatusHandler_GetConsensusStateShouldReturnErrorMessageInvalid
 	presenterStatusHandler.SetUInt64Value(core.MetricConsensusState, consensusState)
 	result := presenterStatusHandler.GetConsensusState()
 
-	assert.Equal(t, invalidType, result)
+	assert.Equal(t, metricNotAvailable, result)
 }
 
 func TestPresenterStatusHandler_GetConsensusStateShouldReturnErrorMessageInvalidKey(t *testing.T) {
@@ -89,7 +89,7 @@ func TestPresenterStatusHandler_GetConsensusStateShouldReturnErrorMessageInvalid
 	presenterStatusHandler := NewPresenterStatusHandler()
 	result := presenterStatusHandler.GetConsensusState()
 
-	assert.Equal(t, invalidKey, result)
+	assert.Equal(t, metricNotAvailable, result)
 }
 
 func TestPresenterStatusHandler_GetConsensusRoundStateState(t *testing.T) {
@@ -139,13 +139,13 @@ func TestPresenterStatusHandler_GetBlockSize(t *testing.T) {
 	assert.Equal(t, blockExpectedSize, result)
 }
 
-func TestPresenterStatusHandler_GetHighestFinalBlockInShard(t *testing.T) {
+func TestPresenterStatusHandler_GetHighestFinalBlock(t *testing.T) {
 	t.Parallel()
 
 	highestFinalBlockNonce := uint64(100)
 	presenterStatusHandler := NewPresenterStatusHandler()
-	presenterStatusHandler.SetUInt64Value(core.MetricHighestFinalBlockInShard, highestFinalBlockNonce)
-	result := presenterStatusHandler.GetHighestFinalBlockInShard()
+	presenterStatusHandler.SetUInt64Value(core.MetricHighestFinalBlock, highestFinalBlockNonce)
+	result := presenterStatusHandler.GetHighestFinalBlock()
 
 	assert.Equal(t, highestFinalBlockNonce, result)
 }

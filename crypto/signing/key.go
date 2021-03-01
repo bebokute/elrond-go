@@ -1,8 +1,16 @@
 package signing
 
 import (
+	"github.com/ElrondNetwork/elrond-go-logger"
+	"github.com/ElrondNetwork/elrond-go/core/check"
 	"github.com/ElrondNetwork/elrond-go/crypto"
 )
+
+var log = logger.GetOrCreate("crypto/signing")
+
+var _ crypto.KeyGenerator = (*keyGenerator)(nil)
+var _ crypto.PublicKey = (*publicKey)(nil)
+var _ crypto.PrivateKey = (*privateKey)(nil)
 
 // privateKey holds the private key and the chosen curve
 type privateKey struct {
@@ -35,12 +43,12 @@ func (kg *keyGenerator) GeneratePair() (crypto.PrivateKey, crypto.PublicKey) {
 	}
 
 	return &privateKey{
-		suite: kg.suite,
-		sk:    private,
-	}, &publicKey{
-		suite: kg.suite,
-		pk:    public,
-	}
+			suite: kg.suite,
+			sk:    private,
+		}, &publicKey{
+			suite: kg.suite,
+			pk:    public,
+		}
 }
 
 // PrivateKeyFromByteArray generates a private key given a byte array
@@ -53,6 +61,7 @@ func (kg *keyGenerator) PrivateKeyFromByteArray(b []byte) (crypto.PrivateKey, er
 	if err != nil {
 		return nil, err
 	}
+
 	return &privateKey{
 		suite: kg.suite,
 		sk:    sc,
@@ -61,18 +70,25 @@ func (kg *keyGenerator) PrivateKeyFromByteArray(b []byte) (crypto.PrivateKey, er
 
 // PublicKeyFromByteArray unmarshalls a byte array into a public key Point
 func (kg *keyGenerator) PublicKeyFromByteArray(b []byte) (crypto.PublicKey, error) {
-	if b == nil {
+	if len(b) != kg.suite.PointLen() {
 		return nil, crypto.ErrInvalidParam
 	}
+
 	point := kg.suite.CreatePoint()
 	err := point.UnmarshalBinary(b)
 	if err != nil {
 		return nil, err
 	}
+
 	return &publicKey{
 		suite: kg.suite,
 		pk:    point,
 	}, nil
+}
+
+// CheckPublicKeyValid verifies the validity of the public key
+func (kg *keyGenerator) CheckPublicKeyValid(b []byte) error {
+	return kg.suite.CheckPointValid(b)
 }
 
 // Suite returns the Suite (curve data) used for this key generator
@@ -82,20 +98,15 @@ func (kg *keyGenerator) Suite() crypto.Suite {
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (kg *keyGenerator) IsInterfaceNil() bool {
-	if kg == nil {
-		return true
-	}
-	return false
+	return kg == nil
 }
 
 func newKeyPair(suite crypto.Suite) (private crypto.Scalar, public crypto.Point, err error) {
-	if suite == nil || suite.IsInterfaceNil() {
+	if check.IfNil(suite) {
 		return nil, nil, crypto.ErrNilSuite
 	}
 
-	random := suite.RandomStream()
-
-	private, public = suite.CreateKeyPair(random)
+	private, public = suite.CreateKeyPair()
 
 	return private, public, nil
 }
@@ -107,8 +118,12 @@ func (spk *privateKey) ToByteArray() ([]byte, error) {
 
 // GeneratePublic builds a public key for the current private key
 func (spk *privateKey) GeneratePublic() crypto.PublicKey {
-	point := spk.suite.CreatePoint().Base()
-	pubKeyPoint, _ := point.Mul(spk.sk)
+	pubKeyPoint, err := spk.suite.CreatePointForScalar(spk.sk)
+	if err != nil {
+		log.Warn("problem generating public key",
+			"message", err.Error())
+	}
+
 	return &publicKey{
 		suite: spk.suite,
 		pk:    pubKeyPoint,
@@ -127,10 +142,7 @@ func (spk *privateKey) Scalar() crypto.Scalar {
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (spk *privateKey) IsInterfaceNil() bool {
-	if spk == nil {
-		return true
-	}
-	return false
+	return spk == nil
 }
 
 // ToByteArray returns the byte array representation of the public key
@@ -150,8 +162,5 @@ func (pk *publicKey) Point() crypto.Point {
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (pk *publicKey) IsInterfaceNil() bool {
-	if pk == nil {
-		return true
-	}
-	return false
+	return pk == nil
 }

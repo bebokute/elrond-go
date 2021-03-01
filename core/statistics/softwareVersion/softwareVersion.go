@@ -1,93 +1,94 @@
 package softwareVersion
 
 import (
-	"bytes"
-	"encoding/json"
-	"math/rand"
-	"net/http"
+	"context"
 	"time"
 
+	logger "github.com/ElrondNetwork/elrond-go-logger"
 	"github.com/ElrondNetwork/elrond-go/core"
-	"github.com/ElrondNetwork/elrond-go/core/logger"
+	"github.com/ElrondNetwork/elrond-go/core/check"
 )
-
-const checkInterval = time.Hour + 5*time.Minute
-const stableTagLocation = "https://api.github.com/repos/ElrondNetwork/elrond-go/releases/latest"
 
 type tagVersion struct {
 	TagVersion string `json:"tag_name"`
 }
 
+// SoftwareVersionChecker is a component which is used to check if a new software stable tag is available
 type SoftwareVersionChecker struct {
 	statusHandler             core.AppStatusHandler
+	stableTagProvider         StableTagProviderHandler
 	mostRecentSoftwareVersion string
-	checkRandInterval         time.Duration
+	checkInterval             time.Duration
+	ctx                       context.Context
+	cancelFunc                func()
 }
 
-var log = logger.DefaultLogger()
+var log = logger.GetOrCreate("core/statistics")
 
 // NewSoftwareVersionChecker will create an object for software  version checker
-func NewSoftwareVersionChecker(appStatusHandler core.AppStatusHandler) (*SoftwareVersionChecker, error) {
-	if appStatusHandler == nil || appStatusHandler.IsInterfaceNil() {
+func NewSoftwareVersionChecker(
+	appStatusHandler core.AppStatusHandler,
+	stableTagProvider StableTagProviderHandler,
+	pollingIntervalInMinutes int,
+) (*SoftwareVersionChecker, error) {
+	if check.IfNil(appStatusHandler) {
 		return nil, core.ErrNilAppStatusHandler
 	}
+	if check.IfNil(stableTagProvider) {
+		return nil, core.ErrNilStatusTagProvider
+	}
+	if pollingIntervalInMinutes <= 0 {
+		return nil, core.ErrInvalidPollingInterval
+	}
 
-	// check interval will be random in a interval [1hour, 1hour 15minutes]
-	randInterval := time.Duration(rand.Int() % 15)
-	checkRandInterval := checkInterval + randInterval*time.Minute
+	checkInterval := time.Duration(pollingIntervalInMinutes) * time.Minute
+
+	ctx, cancelFunc := context.WithCancel(context.Background())
 
 	return &SoftwareVersionChecker{
 		statusHandler:             appStatusHandler,
+		stableTagProvider:         stableTagProvider,
 		mostRecentSoftwareVersion: "",
-		checkRandInterval:         checkRandInterval,
+		checkInterval:             checkInterval,
+		ctx:                       ctx,
+		cancelFunc:                cancelFunc,
 	}, nil
 }
 
 // StartCheckSoftwareVersion will check on a specific interval if a new software version is available
 func (svc *SoftwareVersionChecker) StartCheckSoftwareVersion() {
-	go func() {
+	go svc.checkSoftwareVersion()
+}
+
+func (svc *SoftwareVersionChecker) checkSoftwareVersion() {
+	for {
 		svc.readLatestStableVersion()
-		for {
-			select {
-			case <-time.After(svc.checkRandInterval):
-				svc.readLatestStableVersion()
-			}
+
+		select {
+		case <-svc.ctx.Done():
+			log.Debug("softwareVersionChecker's go routine is stopping...")
+			return
+		case <-time.After(svc.checkInterval):
 		}
-	}()
+	}
+}
+
+// Close will close the endless running go routine
+func (svc *SoftwareVersionChecker) Close() error {
+	svc.cancelFunc()
+
+	return nil
 }
 
 func (svc *SoftwareVersionChecker) readLatestStableVersion() {
-	tagVersion, err := readJSONFromUrl(stableTagLocation)
+	tagVersionFromURL, err := svc.stableTagProvider.FetchTagVersion()
 	if err != nil {
-		log.Error("cannot read json with latest stable tag", err)
+		log.Debug("cannot read json with latest stable tag", "error", err)
 		return
 	}
-	if tagVersion != "" {
-		svc.mostRecentSoftwareVersion = tagVersion
+	if tagVersionFromURL != "" {
+		svc.mostRecentSoftwareVersion = tagVersionFromURL
 	}
 
 	svc.statusHandler.SetStringValue(core.MetricLatestTagSoftwareVersion, svc.mostRecentSoftwareVersion)
-}
-
-func readJSONFromUrl(url string) (string, error) {
-	resp, err := http.Get(url)
-	if err != nil {
-		return "", err
-	}
-
-	defer func() {
-		err := resp.Body.Close()
-		log.LogIfError(err)
-	}()
-
-	buf := new(bytes.Buffer)
-	_, err = buf.ReadFrom(resp.Body)
-	respBytes := buf.Bytes()
-
-	var tag tagVersion
-	if err = json.Unmarshal(respBytes, &tag); err != nil {
-		return "", err
-	}
-
-	return tag.TagVersion, nil
 }

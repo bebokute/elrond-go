@@ -3,7 +3,7 @@ package factory_test
 import (
 	"testing"
 
-	"github.com/ElrondNetwork/elrond-go/data/mock"
+	"github.com/ElrondNetwork/elrond-go/core/check"
 	"github.com/ElrondNetwork/elrond-go/data/state"
 	"github.com/ElrondNetwork/elrond-go/data/state/factory"
 	"github.com/stretchr/testify/assert"
@@ -12,43 +12,27 @@ import (
 func TestPeerAccountCreator_CreateAccountNilAddress(t *testing.T) {
 	t.Parallel()
 
-	accF, err := factory.NewAccountFactoryCreator(factory.ValidatorAccount)
-	assert.Nil(t, err)
+	accF := factory.NewPeerAccountCreator()
 
 	_, ok := accF.(*factory.PeerAccountCreator)
 	assert.Equal(t, true, ok)
 
-	acc, err := accF.CreateAccount(nil, &mock.AccountTrackerStub{})
+	acc, err := accF.CreateAccount(nil)
 
 	assert.Nil(t, acc)
-	assert.Equal(t, err, state.ErrNilAddressContainer)
-}
-
-func TestPeerAccountCreator_CreateAccountNilAccountTraccer(t *testing.T) {
-	t.Parallel()
-
-	accF, err := factory.NewAccountFactoryCreator(factory.ValidatorAccount)
-	assert.Nil(t, err)
-
-	_, ok := accF.(*factory.PeerAccountCreator)
-	assert.Equal(t, true, ok)
-
-	acc, err := accF.CreateAccount(&mock.AddressMock{}, nil)
-
-	assert.Nil(t, acc)
-	assert.Equal(t, err, state.ErrNilAccountTracker)
+	assert.Equal(t, err, state.ErrNilAddress)
 }
 
 func TestPeerAccountCreator_CreateAccountOk(t *testing.T) {
 	t.Parallel()
 
-	accF, err := factory.NewAccountFactoryCreator(factory.ValidatorAccount)
-	assert.Nil(t, err)
+	accF := factory.NewPeerAccountCreator()
+	assert.False(t, check.IfNil(accF))
 
 	_, ok := accF.(*factory.PeerAccountCreator)
 	assert.Equal(t, true, ok)
 
-	acc, err := accF.CreateAccount(&mock.AddressMock{}, &mock.AccountTrackerStub{})
+	acc, err := accF.CreateAccount(make([]byte, 32))
 
 	assert.NotNil(t, acc)
 	assert.Nil(t, err)

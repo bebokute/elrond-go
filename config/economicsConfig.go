@@ -1,28 +1,42 @@
 package config
 
-// EconomicsAddresses will hold economics addresses
-type EconomicsAddresses struct {
-	CommunityAddress string
-	BurnAddress      string
+// GlobalSettings will hold general economic values
+type GlobalSettings struct {
+	GenesisTotalSupply string
+	MinimumInflation   float64
+	YearSettings       []*YearSetting
+	Denomination       int
+}
+
+// YearSetting will hold the maximum inflation rate for year
+type YearSetting struct {
+	Year             uint32
+	MaximumInflation float64
 }
 
 // RewardsSettings will hold economics rewards settings
 type RewardsSettings struct {
-	RewardsValue        string
-	CommunityPercentage float64
-	LeaderPercentage    float64
-	BurnPercentage      float64
+	LeaderPercentage                 float64
+	DeveloperPercentage              float64
+	ProtocolSustainabilityPercentage float64
+	ProtocolSustainabilityAddress    string
+	TopUpGradientPoint               string
+	TopUpFactor                      float64
 }
 
 // FeeSettings will hold economics fee settings
 type FeeSettings struct {
-	MinGasPrice string
-	MinGasLimit string
+	MaxGasLimitPerBlock     string
+	MaxGasLimitPerMetaBlock string
+	GasPerDataByte          string
+	MinGasPrice             string
+	MinGasLimit             string
+	GasPriceModifier        float64
 }
 
-// ConfigEconomics will hold economics config
-type ConfigEconomics struct {
-	EconomicsAddresses EconomicsAddresses
-	RewardsSettings    RewardsSettings
-	FeeSettings        FeeSettings
+// EconomicsConfig will hold economics config
+type EconomicsConfig struct {
+	GlobalSettings  GlobalSettings
+	RewardsSettings RewardsSettings
+	FeeSettings     FeeSettings
 }

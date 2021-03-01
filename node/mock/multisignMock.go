@@ -4,73 +4,86 @@ import (
 	"github.com/ElrondNetwork/elrond-go/crypto"
 )
 
+// MultisignMock -
 type MultisignMock struct {
 }
 
-func (mm *MultisignMock) Create(pubKeys []string, index uint16) (crypto.MultiSigner, error) {
+// Create -
+func (mm *MultisignMock) Create(_ []string, _ uint16) (crypto.MultiSigner, error) {
 	panic("implement me")
 }
 
-func (mm *MultisignMock) Reset(pubKeys []string, index uint16) error {
+// Reset -
+func (mm *MultisignMock) Reset(_ []string, _ uint16) error {
 	panic("implement me")
 }
 
+// SetAggregatedSig -
 func (mm *MultisignMock) SetAggregatedSig([]byte) error {
 	panic("implement me")
 }
 
-func (mm *MultisignMock) Verify(msg []byte, bitmap []byte) error {
+// Verify -
+func (mm *MultisignMock) Verify(_ []byte, _ []byte) error {
 	panic("implement me")
 }
 
+// CreateCommitment -
 func (mm *MultisignMock) CreateCommitment() (commSecret []byte, commitment []byte) {
 	panic("implement me")
 }
 
-func (mm *MultisignMock) StoreCommitmentHash(index uint16, commHash []byte) error {
+// StoreCommitmentHash -
+func (mm *MultisignMock) StoreCommitmentHash(_ uint16, _ []byte) error {
 	panic("implement me")
 }
 
-func (mm *MultisignMock) CommitmentHash(index uint16) ([]byte, error) {
+// CommitmentHash -
+func (mm *MultisignMock) CommitmentHash(_ uint16) ([]byte, error) {
 	panic("implement me")
 }
 
-func (mm *MultisignMock) StoreCommitment(index uint16, value []byte) error {
+// StoreCommitment -
+func (mm *MultisignMock) StoreCommitment(_ uint16, _ []byte) error {
 	panic("implement me")
 }
 
-func (mm *MultisignMock) Commitment(index uint16) ([]byte, error) {
+// Commitment -
+func (mm *MultisignMock) Commitment(_ uint16) ([]byte, error) {
 	panic("implement me")
 }
 
-func (mm *MultisignMock) AggregateCommitments(bitmap []byte) error {
+// AggregateCommitments -
+func (mm *MultisignMock) AggregateCommitments(_ []byte) error {
 	panic("implement me")
 }
 
-func (mm *MultisignMock) CreateSignatureShare(msg []byte, bitmap []byte) ([]byte, error) {
+// CreateSignatureShare -
+func (mm *MultisignMock) CreateSignatureShare(_ []byte, _ []byte) ([]byte, error) {
 	panic("implement me")
 }
 
-func (mm *MultisignMock) StoreSignatureShare(index uint16, sig []byte) error {
+// StoreSignatureShare -
+func (mm *MultisignMock) StoreSignatureShare(_ uint16, _ []byte) error {
 	panic("implement me")
 }
 
-func (mm *MultisignMock) VerifySignatureShare(index uint16, sig []byte, msg []byte, bitmap []byte) error {
+// VerifySignatureShare -
+func (mm *MultisignMock) VerifySignatureShare(_ uint16, _ []byte, _ []byte, _ []byte) error {
 	panic("implement me")
 }
 
-func (mm *MultisignMock) SignatureShare(index uint16) ([]byte, error) {
+// SignatureShare -
+func (mm *MultisignMock) SignatureShare(_ uint16) ([]byte, error) {
 	panic("implement me")
 }
 
-func (mm *MultisignMock) AggregateSigs(bitmap []byte) ([]byte, error) {
+// AggregateSigs -
+func (mm *MultisignMock) AggregateSigs(_ []byte) ([]byte, error) {
 	panic("implement me")
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (mm *MultisignMock) IsInterfaceNil() bool {
-	if mm == nil {
-		return true
-	}
-	return false
+	return mm == nil
 }

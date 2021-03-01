@@ -1,17 +1,34 @@
 package state
 
-func (adb *AccountsDB) LoadCode(accountHandler AccountHandler) error {
+import "github.com/ElrondNetwork/elrond-go/marshal"
+
+func NewEmptyBaseAccount(address []byte, tracker DataTrieTracker) *baseAccount {
+	return &baseAccount{
+		address:         address,
+		dataTrieTracker: tracker,
+	}
+}
+
+func (adb *AccountsDB) LoadCode(accountHandler baseAccountHandler) error {
 	return adb.loadCode(accountHandler)
 }
 
-func (adb *AccountsDB) LoadDataTrie(accountHandler AccountHandler) error {
+func (adb *AccountsDB) LoadDataTrie(accountHandler baseAccountHandler) error {
 	return adb.loadDataTrie(accountHandler)
 }
 
-func (adb *AccountsDB) GetAccount(addressContainer AddressContainer) (AccountHandler, error) {
-	return adb.getAccount(addressContainer)
+func (adb *AccountsDB) GetAccount(address []byte) (AccountHandler, error) {
+	return adb.getAccount(address)
 }
 
-func (tdaw *TrackableDataTrie) OriginalData() map[string][]byte {
-	return tdaw.originalData
+func (adb *AccountsDB) GetObsoleteHashes() map[string][][]byte {
+	return adb.obsoleteDataTrieHashes
+}
+
+func GetCode(account baseAccountHandler) []byte {
+	return account.GetCodeHash()
+}
+
+func GetCodeEntry(codeHash []byte, trie Updater, marshalizer marshal.Marshalizer) (*CodeEntry, error) {
+	return getCodeEntry(codeHash, trie, marshalizer)
 }

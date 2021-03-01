@@ -1,13 +1,23 @@
 package spos
 
 import (
+	"fmt"
+
 	"github.com/ElrondNetwork/elrond-go/consensus"
-	"github.com/ElrondNetwork/elrond-go/crypto"
+	"github.com/ElrondNetwork/elrond-go/core"
 	"github.com/ElrondNetwork/elrond-go/marshal"
 	"github.com/ElrondNetwork/elrond-go/process"
 )
 
-type RoundConsensus *roundConsensus
+type RoundConsensus struct {
+	*roundConsensus
+}
+
+func NewRoundConsensusWrapper(rcns *roundConsensus) *RoundConsensus {
+	return &RoundConsensus{
+		roundConsensus: rcns,
+	}
+}
 
 // worker
 
@@ -51,14 +61,6 @@ func (wrk *Worker) SetForkDetector(forkDetector process.ForkDetector) {
 	wrk.forkDetector = forkDetector
 }
 
-func (wrk *Worker) KeyGenerator() crypto.KeyGenerator {
-	return wrk.keyGenerator
-}
-
-func (wrk *Worker) SetKeyGenerator(keyGenerator crypto.KeyGenerator) {
-	wrk.keyGenerator = keyGenerator
-}
-
 func (wrk *Worker) Marshalizer() marshal.Marshalizer {
 	return wrk.marshalizer
 }
@@ -71,12 +73,16 @@ func (wrk *Worker) Rounder() consensus.Rounder {
 	return wrk.rounder
 }
 
+func (wrk *Worker) SetNodeRedundancyHandler(nodeRedundancyHandler consensus.NodeRedundancyHandler) {
+	wrk.nodeRedundancyHandler = nodeRedundancyHandler
+}
+
 func (wrk *Worker) SetRounder(rounder consensus.Rounder) {
 	wrk.rounder = rounder
 }
 
 func (wrk *Worker) CheckSignature(cnsData *consensus.Message) error {
-	return wrk.checkSignature(cnsData)
+	return wrk.peerSignatureHandler.VerifyPeerSignature(cnsData.PubKey, core.PeerID(cnsData.OriginatorPid), cnsData.Signature)
 }
 
 func (wrk *Worker) ExecuteMessage(cnsDtaList []*consensus.Message) {
@@ -137,4 +143,72 @@ func (wrk *Worker) SetConsensusStateChangedChannel(consensusStateChangedChannel 
 
 func (wrk *Worker) CheckSelfState(cnsDta *consensus.Message) error {
 	return wrk.checkSelfState(cnsDta)
+}
+
+func (rcns *RoundConsensus) EligibleList() map[string]struct{} {
+	return rcns.eligibleNodes
+}
+
+func (wrk *Worker) AppStatusHandler() core.AppStatusHandler {
+	return wrk.appStatusHandler
+}
+
+// consensusMessageValidator
+
+func (cmv *consensusMessageValidator) CheckConsensusMessageValidity(cnsMsg *consensus.Message, originator core.PeerID) error {
+	return cmv.checkConsensusMessageValidity(cnsMsg, originator)
+}
+
+func (cmv *consensusMessageValidator) CheckMessageWithFinalInfoValidity(cnsMsg *consensus.Message) error {
+	return cmv.checkMessageWithFinalInfoValidity(cnsMsg)
+}
+
+func (cmv *consensusMessageValidator) CheckMessageWithSignatureValidity(cnsMsg *consensus.Message) error {
+	return cmv.checkMessageWithSignatureValidity(cnsMsg)
+}
+
+func (cmv *consensusMessageValidator) CheckMessageWithBlockHeaderValidity(cnsMsg *consensus.Message) error {
+	return cmv.checkMessageWithBlockHeaderValidity(cnsMsg)
+}
+
+func (cmv *consensusMessageValidator) CheckMessageWithBlockBodyValidity(cnsMsg *consensus.Message) error {
+	return cmv.checkMessageWithBlockBodyValidity(cnsMsg)
+}
+
+func (cmv *consensusMessageValidator) CheckMessageWithBlockBodyAndHeaderValidity(cnsMsg *consensus.Message) error {
+	return cmv.checkMessageWithBlockBodyAndHeaderValidity(cnsMsg)
+}
+
+func (cmv *consensusMessageValidator) CheckConsensusMessageValidityForMessageType(cnsMsg *consensus.Message) error {
+	return cmv.checkConsensusMessageValidityForMessageType(cnsMsg)
+}
+
+func (cmv *consensusMessageValidator) IsBlockHeaderHashSizeValid(cnsMsg *consensus.Message) bool {
+	return cmv.isBlockHeaderHashSizeValid(cnsMsg)
+}
+
+func (cmv *consensusMessageValidator) AddMessageTypeToPublicKey(pk []byte, round int64, msgType consensus.MessageType) {
+	cmv.addMessageTypeToPublicKey(pk, round, msgType)
+}
+
+func (cmv *consensusMessageValidator) IsMessageTypeLimitReached(pk []byte, round int64, msgType consensus.MessageType) bool {
+	return cmv.isMessageTypeLimitReached(pk, round, msgType)
+}
+
+func (cmv *consensusMessageValidator) GetNumOfMessageTypeForPublicKey(pk []byte, round int64, msgType consensus.MessageType) uint32 {
+	cmv.mutPkConsensusMessages.RLock()
+	defer cmv.mutPkConsensusMessages.RUnlock()
+
+	key := fmt.Sprintf("%s_%d", string(pk), round)
+
+	mapMsgType, ok := cmv.mapPkConsensusMessages[key]
+	if !ok {
+		return uint32(0)
+	}
+
+	return mapMsgType[msgType]
+}
+
+func (cmv *consensusMessageValidator) ResetConsensusMessages() {
+	cmv.resetConsensusMessages()
 }

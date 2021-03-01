@@ -1,106 +1,110 @@
 package smartContractResult_test
 
 import (
-	"bytes"
 	"math/big"
 	"testing"
 
+	"github.com/ElrondNetwork/elrond-go/data"
 	"github.com/ElrondNetwork/elrond-go/data/smartContractResult"
 	"github.com/stretchr/testify/assert"
 )
 
-func TestSmartContractResult_SaveLoad(t *testing.T) {
-	smrS := smartContractResult.SmartContractResult{
-		Nonce:   uint64(1),
-		Value:   big.NewInt(1),
-		RcvAddr: []byte("receiver_address"),
-		SndAddr: []byte("sender_address"),
-		Data:    "scr_data",
-		Code:    []byte("code"),
-		TxHash:  []byte("scrHash"),
+func TestSmartContractResult_SettersAndGetters(t *testing.T) {
+	t.Parallel()
+
+	nonce := uint64(5)
+	gasPrice := uint64(1)
+	gasLimit := uint64(10)
+	scr := smartContractResult.SmartContractResult{
+		Nonce:    nonce,
+		GasPrice: gasPrice,
+		GasLimit: gasLimit,
 	}
 
-	var b bytes.Buffer
-	_ = smrS.Save(&b)
+	rcvAddr := []byte("rcv address")
+	sndAddr := []byte("snd address")
+	value := big.NewInt(37)
+	data := []byte("unStake")
 
-	loadSMR := smartContractResult.SmartContractResult{}
-	_ = loadSMR.Load(&b)
-
-	assert.Equal(t, smrS, loadSMR)
-}
-
-func TestSmartContractResult_GetData(t *testing.T) {
-	t.Parallel()
-
-	data := "data"
-	scr := &smartContractResult.SmartContractResult{Data: data}
-
-	assert.Equal(t, data, scr.Data)
-}
-
-func TestSmartContractResult_GetRecvAddr(t *testing.T) {
-	t.Parallel()
-
-	data := []byte("data")
-	scr := &smartContractResult.SmartContractResult{RcvAddr: data}
-
-	assert.Equal(t, data, scr.RcvAddr)
-}
-
-func TestSmartContractResult_GetSndAddr(t *testing.T) {
-	t.Parallel()
-
-	data := []byte("data")
-	scr := &smartContractResult.SmartContractResult{SndAddr: data}
-
-	assert.Equal(t, data, scr.SndAddr)
-}
-
-func TestSmartContractResult_GetValue(t *testing.T) {
-	t.Parallel()
-
-	value := big.NewInt(10)
-	scr := &smartContractResult.SmartContractResult{Value: value}
-
-	assert.Equal(t, value, scr.Value)
-}
-
-func TestSmartContractResult_SetData(t *testing.T) {
-	t.Parallel()
-
-	data := "data"
-	scr := &smartContractResult.SmartContractResult{}
+	scr.SetRcvAddr(rcvAddr)
+	scr.SetSndAddr(sndAddr)
+	scr.SetValue(value)
 	scr.SetData(data)
 
-	assert.Equal(t, data, scr.Data)
+	assert.Equal(t, sndAddr, scr.GetSndAddr())
+	assert.Equal(t, rcvAddr, scr.GetRcvAddr())
+	assert.Equal(t, value, scr.GetValue())
+	assert.Equal(t, data, scr.GetData())
+	assert.Equal(t, gasLimit, scr.GetGasLimit())
+	assert.Equal(t, gasPrice, scr.GetGasPrice())
+	assert.Equal(t, nonce, scr.GetNonce())
 }
 
-func TestSmartContractResult_SetRecvAddr(t *testing.T) {
+func TestTrimSlicePtr(t *testing.T) {
 	t.Parallel()
 
-	data := []byte("data")
-	scr := &smartContractResult.SmartContractResult{}
-	scr.SetRecvAddress(data)
+	scrSlice := make([]*smartContractResult.SmartContractResult, 0, 5)
+	scr1 := &smartContractResult.SmartContractResult{Nonce: 3}
+	scr2 := &smartContractResult.SmartContractResult{Nonce: 5}
 
-	assert.Equal(t, data, scr.RcvAddr)
+	scrSlice = append(scrSlice, scr1)
+	scrSlice = append(scrSlice, scr2)
+
+	assert.Equal(t, 2, len(scrSlice))
+	assert.Equal(t, 5, cap(scrSlice))
+
+	scrSlice = smartContractResult.TrimSlicePtr(scrSlice)
+
+	assert.Equal(t, 2, len(scrSlice))
+	assert.Equal(t, 2, len(scrSlice))
 }
 
-func TestSmartContractResult_SetSndAddr(t *testing.T) {
+func TestSmartContractResult_CheckIntegrityShouldWork(t *testing.T) {
 	t.Parallel()
 
-	data := []byte("data")
-	scr := &smartContractResult.SmartContractResult{}
-	scr.SetSndAddress(data)
+	scr := &smartContractResult.SmartContractResult{
+		Nonce:      1,
+		Value:      big.NewInt(10),
+		GasPrice:   1,
+		GasLimit:   10,
+		Data:       []byte("data"),
+		RcvAddr:    []byte("rcv-address"),
+		SndAddr:    []byte("snd-address"),
+		PrevTxHash: []byte("prev-hash"),
+	}
 
-	assert.Equal(t, data, scr.SndAddr)
+	err := scr.CheckIntegrity()
+	assert.Nil(t, err)
 }
 
-func TestSmartContractResult_SetValue(t *testing.T) {
+func TestSmartContractResult_CheckIntegrityShouldErr(t *testing.T) {
 	t.Parallel()
 
-	value := big.NewInt(10)
-	scr := &smartContractResult.SmartContractResult{}
-	scr.SetValue(value)
+	scr := &smartContractResult.SmartContractResult{
+		Nonce: 1,
+		Data:  []byte("data"),
+	}
 
-	assert.Equal(t, value, scr.Value)
+	err := scr.CheckIntegrity()
+	assert.Equal(t, data.ErrNilRcvAddr, err)
+
+	scr.RcvAddr = []byte("rcv-address")
+
+	err = scr.CheckIntegrity()
+	assert.Equal(t, data.ErrNilSndAddr, err)
+
+	scr.SndAddr = []byte("snd-address")
+
+	err = scr.CheckIntegrity()
+	assert.Equal(t, data.ErrNilValue, err)
+
+	scr.Value = big.NewInt(-1)
+
+	err = scr.CheckIntegrity()
+	assert.Equal(t, data.ErrNegativeValue, err)
+
+	scr.Value = big.NewInt(10)
+
+	err = scr.CheckIntegrity()
+	assert.Equal(t, data.ErrNilTxHash, err)
 }

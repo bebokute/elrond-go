@@ -1,10 +1,13 @@
 package loadBalancer
 
 import (
+	"context"
 	"sync"
 
 	"github.com/ElrondNetwork/elrond-go/p2p"
 )
+
+var _ p2p.ChannelLoadBalancer = (*OutgoingChannelLoadBalancer)(nil)
 
 const defaultSendChannel = "default send channel"
 
@@ -18,15 +21,21 @@ type OutgoingChannelLoadBalancer struct {
 	//iteration is done directly on slices as that is used very often and is about 50x
 	//faster then an iteration over a map
 	namesChans map[string]chan *p2p.SendableData
+	cancelFunc context.CancelFunc
+	ctx        context.Context //we need the context saved here in order to call appendChannel from exported func AddChannel
 }
 
 // NewOutgoingChannelLoadBalancer creates a new instance of a ChannelLoadBalancer instance
 func NewOutgoingChannelLoadBalancer() *OutgoingChannelLoadBalancer {
+	ctx, cancelFunc := context.WithCancel(context.Background())
+
 	oclb := &OutgoingChannelLoadBalancer{
 		chans:      make([]chan *p2p.SendableData, 0),
 		names:      make([]string, 0),
 		namesChans: make(map[string]chan *p2p.SendableData),
 		mainChan:   make(chan *p2p.SendableData),
+		cancelFunc: cancelFunc,
+		ctx:        ctx,
 	}
 
 	oclb.appendChannel(defaultSendChannel)
@@ -42,10 +51,11 @@ func (oplb *OutgoingChannelLoadBalancer) appendChannel(channel string) {
 
 	go func() {
 		for {
-			obj, ok := <-ch
+			var obj *p2p.SendableData
 
-			if !ok {
-				//channel closed, close the go routine
+			select {
+			case obj = <-ch:
+			case <-oplb.ctx.Done():
 				return
 			}
 
@@ -54,14 +64,18 @@ func (oplb *OutgoingChannelLoadBalancer) appendChannel(channel string) {
 	}()
 }
 
-// AddChannel adds a new channel to the throttler
+// AddChannel adds a new channel to the throttler, if it does not exists
 func (oplb *OutgoingChannelLoadBalancer) AddChannel(channel string) error {
+	if channel == defaultSendChannel {
+		return p2p.ErrChannelCanNotBeReAdded
+	}
+
 	oplb.mut.Lock()
 	defer oplb.mut.Unlock()
 
 	for _, name := range oplb.names {
 		if name == channel {
-			return p2p.ErrChannelAlreadyExists
+			return nil
 		}
 	}
 
@@ -115,7 +129,7 @@ func (oplb *OutgoingChannelLoadBalancer) GetChannelOrDefault(channel string) cha
 	oplb.mut.RLock()
 	defer oplb.mut.RUnlock()
 
-	ch, _ := oplb.namesChans[channel]
+	ch := oplb.namesChans[channel]
 	if ch != nil {
 		return ch
 	}
@@ -129,10 +143,13 @@ func (oplb *OutgoingChannelLoadBalancer) CollectOneElementFromChannels() *p2p.Se
 	return obj
 }
 
+// Close finishes all started go routines in this instance
+func (oplb *OutgoingChannelLoadBalancer) Close() error {
+	oplb.cancelFunc()
+	return nil
+}
+
 // IsInterfaceNil returns true if there is no value under the interface
 func (oplb *OutgoingChannelLoadBalancer) IsInterfaceNil() bool {
-	if oplb == nil {
-		return true
-	}
-	return false
+	return oplb == nil
 }

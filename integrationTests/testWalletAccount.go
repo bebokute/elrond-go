@@ -6,34 +6,59 @@ import (
 	"math/big"
 
 	"github.com/ElrondNetwork/elrond-go/crypto"
-	"github.com/ElrondNetwork/elrond-go/crypto/signing/kyber/singlesig"
-	"github.com/ElrondNetwork/elrond-go/data/state"
+	"github.com/ElrondNetwork/elrond-go/crypto/peerSignatureHandler"
+	ed25519SingleSig "github.com/ElrondNetwork/elrond-go/crypto/signing/ed25519/singlesig"
+	"github.com/ElrondNetwork/elrond-go/integrationTests/mock"
 	"github.com/ElrondNetwork/elrond-go/sharding"
+	"github.com/ElrondNetwork/elrond-go/storage/storageUnit"
 )
 
 // TestWalletAccount creates and account with balance and crypto necessary to sign transactions
 type TestWalletAccount struct {
-	SingleSigner  crypto.SingleSigner
-	SkTxSign      crypto.PrivateKey
-	PkTxSign      crypto.PublicKey
-	PkTxSignBytes []byte
-	KeygenTxSign  crypto.KeyGenerator
+	SingleSigner      crypto.SingleSigner
+	BlockSingleSigner crypto.SingleSigner
+	SkTxSign          crypto.PrivateKey
+	PkTxSign          crypto.PublicKey
+	PkTxSignBytes     []byte
+	KeygenTxSign      crypto.KeyGenerator
+	KeygenBlockSign   crypto.KeyGenerator
+	PeerSigHandler    crypto.PeerSignatureHandler
 
-	Address state.AddressContainer
+	Address []byte
 	Nonce   uint64
 	Balance *big.Int
 }
 
-// CreateTestWalletAccount creates an wallett account in a selected shard
+// CreateTestWalletAccount creates an wallet account in a selected shard
 func CreateTestWalletAccount(coordinator sharding.Coordinator, shardId uint32) *TestWalletAccount {
 	testWalletAccount := &TestWalletAccount{}
 	testWalletAccount.initCrypto(coordinator, shardId)
+	testWalletAccount.Balance = big.NewInt(0)
 	return testWalletAccount
+}
+
+// CreateTestWalletAccountWithKeygenAndSingleSigner creates a wallet account in a selected shard
+func CreateTestWalletAccountWithKeygenAndSingleSigner(
+	coordinator sharding.Coordinator,
+	shardId uint32,
+	blockSingleSigner crypto.SingleSigner,
+	keyGenBlockSign crypto.KeyGenerator,
+) *TestWalletAccount {
+	twa := CreateTestWalletAccount(coordinator, shardId)
+	twa.KeygenBlockSign = keyGenBlockSign
+	twa.BlockSingleSigner = blockSingleSigner
+
+	return twa
 }
 
 // initCrypto initializes the crypto for the account
 func (twa *TestWalletAccount) initCrypto(coordinator sharding.Coordinator, shardId uint32) {
-	twa.SingleSigner = &singlesig.SchnorrSigner{}
+	twa.SingleSigner = &ed25519SingleSig.Ed25519Signer{}
+	twa.BlockSingleSigner = &mock.SignerMock{
+		VerifyStub: func(public crypto.PublicKey, msg []byte, sig []byte) error {
+			return nil
+		},
+	}
 	sk, pk, keyGen := GenerateSkAndPkInShard(coordinator, shardId)
 
 	pkBuff, _ := pk.ToByteArray()
@@ -43,7 +68,11 @@ func (twa *TestWalletAccount) initCrypto(coordinator sharding.Coordinator, shard
 	twa.PkTxSign = pk
 	twa.PkTxSignBytes, _ = pk.ToByteArray()
 	twa.KeygenTxSign = keyGen
-	twa.Address, _ = TestAddressConverter.CreateAddressFromPublicKeyBytes(twa.PkTxSignBytes)
+	twa.KeygenBlockSign = &mock.KeyGenMock{}
+	twa.Address = twa.PkTxSignBytes
+
+	peerSigCache, _ := storageUnit.NewCache(storageUnit.CacheConfig{Type: storageUnit.LRUCache, Capacity: 1000})
+	twa.PeerSigHandler, _ = peerSignatureHandler.NewPeerSignatureHandler(peerSigCache, twa.SingleSigner, keyGen)
 }
 
 // LoadTxSignSkBytes alters the already generated sk/pk pair
@@ -54,5 +83,5 @@ func (twa *TestWalletAccount) LoadTxSignSkBytes(skBytes []byte) {
 	twa.SkTxSign = newSk
 	twa.PkTxSign = newPk
 	twa.PkTxSignBytes, _ = newPk.ToByteArray()
-	twa.Address, _ = TestAddressConverter.CreateAddressFromPublicKeyBytes(twa.PkTxSignBytes)
+	twa.Address = twa.PkTxSignBytes
 }

@@ -3,29 +3,82 @@ package transaction
 import (
 	"math/big"
 
+	"github.com/ElrondNetwork/elrond-go/core/vmcommon"
+	"github.com/ElrondNetwork/elrond-go/data/smartContractResult"
 	"github.com/ElrondNetwork/elrond-go/data/state"
 	"github.com/ElrondNetwork/elrond-go/data/transaction"
+	"github.com/ElrondNetwork/elrond-go/process"
 )
 
 type TxProcessor *txProcessor
 
-func (txProc *txProcessor) GetAddresses(tx *transaction.Transaction) (adrSrc, adrDst state.AddressContainer, err error) {
-	return txProc.getAddresses(tx)
-}
-
-func (txProc *txProcessor) GetAccounts(adrSrc, adrDst state.AddressContainer,
-) (acntSrc, acntDst *state.Account, err error) {
+func (txProc *txProcessor) GetAccounts(adrSrc, adrDst []byte,
+) (acntSrc, acntDst state.UserAccountHandler, err error) {
 	return txProc.getAccounts(adrSrc, adrDst)
 }
 
-func (txProc *txProcessor) CheckTxValues(tx *transaction.Transaction, acntSnd state.AccountHandler) error {
-	return txProc.checkTxValues(tx, acntSnd)
+func (txProc *txProcessor) CheckTxValues(tx *transaction.Transaction, acntSnd, acntDst state.UserAccountHandler, isUserTxOfRelayed bool) error {
+	return txProc.checkTxValues(tx, acntSnd, acntDst, isUserTxOfRelayed)
 }
 
-func (txProc *txProcessor) MoveBalances(acntSrc, acntDst *state.Account, value *big.Int) error {
-	return txProc.moveBalances(acntSrc, acntDst, value)
+func (txProc *txProcessor) IncreaseNonce(acntSrc state.UserAccountHandler) {
+	acntSrc.IncreaseNonce(1)
 }
 
-func (txProc *txProcessor) IncreaseNonce(acntSrc *state.Account) error {
-	return txProc.increaseNonce(acntSrc)
+func (txProc *txProcessor) ProcessTxFee(
+	tx *transaction.Transaction,
+	acntSnd, acntDst state.UserAccountHandler,
+	txType process.TransactionType,
+	isUserTxOfRelayed bool,
+) (*big.Int, *big.Int, error) {
+	return txProc.processTxFee(tx, acntSnd, acntDst, txType, isUserTxOfRelayed)
+}
+
+func (inTx *InterceptedTransaction) SetWhitelistHandler(handler process.WhiteListHandler) {
+	inTx.whiteListerVerifiedTxs = handler
+}
+
+func (txProc *baseTxProcessor) IsCrossTxFromMe(adrSrc, adrDst []byte) bool {
+	return txProc.isCrossTxFromMe(adrSrc, adrDst)
+}
+
+func (txProc *txProcessor) SetPenalizedTooMuchGasEnableEpoch(epoch uint32) {
+	txProc.penalizedTooMuchGasEnableEpoch = epoch
+}
+
+func (txProc *txProcessor) ProcessUserTx(
+	originalTx *transaction.Transaction,
+	userTx *transaction.Transaction,
+	relayedTxValue *big.Int,
+	relayedNonce uint64,
+	txHash []byte,
+) (vmcommon.ReturnCode, error) {
+	return txProc.processUserTx(originalTx, userTx, relayedTxValue, relayedNonce, txHash)
+}
+
+func (txProc *txProcessor) ProcessMoveBalanceCostRelayedUserTx(
+	userTx *transaction.Transaction,
+	userScr *smartContractResult.SmartContractResult,
+	userAcc state.UserAccountHandler,
+) error {
+	return txProc.processMoveBalanceCostRelayedUserTx(userTx, userScr, userAcc)
+}
+
+func (txProc *txProcessor) ExecuteFailedRelayedTransaction(
+	userTx *transaction.Transaction,
+	relayerAdr []byte,
+	relayedTxValue *big.Int,
+	relayedNonce uint64,
+	originalTx *transaction.Transaction,
+	originalTxHash []byte,
+	errorMsg string,
+) error {
+	return txProc.executeFailedRelayedUserTx(
+		userTx,
+		relayerAdr,
+		relayedTxValue,
+		relayedNonce,
+		originalTx,
+		originalTxHash,
+		errorMsg)
 }

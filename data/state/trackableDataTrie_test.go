@@ -4,80 +4,88 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/ElrondNetwork/elrond-go/core"
+	"github.com/ElrondNetwork/elrond-go/core/check"
+	"github.com/ElrondNetwork/elrond-go/data"
 	"github.com/ElrondNetwork/elrond-go/data/mock"
 	"github.com/ElrondNetwork/elrond-go/data/state"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 )
 
-func TestTrackableDataAccountRetrieveValueNilDataTrieShouldErr(t *testing.T) {
+func TestNewTrackableDataTrie(t *testing.T) {
 	t.Parallel()
 
-	as := state.NewTrackableDataTrie(nil)
+	identifier := []byte("identifier")
+	trie := &mock.TrieStub{}
+	tdaw := state.NewTrackableDataTrie(identifier, trie)
+
+	assert.False(t, check.IfNil(tdaw))
+}
+
+func TestTrackableDataTrie_RetrieveValueNilDataTrieShouldErr(t *testing.T) {
+	t.Parallel()
+
+	as := state.NewTrackableDataTrie([]byte("identifier"), nil)
 	assert.NotNil(t, as)
 
-	_, err := as.RetrieveValue([]byte{65, 66, 67})
+	_, err := as.RetrieveValue([]byte("ABC"))
 	assert.NotNil(t, err)
 }
 
-func TestTrackableDataAccountRetrieveValueFoundInDirtyShouldWork(t *testing.T) {
+func TestTrackableDataTrie_RetrieveValueFoundInDirtyShouldWork(t *testing.T) {
 	t.Parallel()
 
+	stringKey := "ABC"
+	identifier := []byte("identifier")
 	trie := &mock.TrieStub{}
-	tdaw := state.NewTrackableDataTrie(trie)
+	tdaw := state.NewTrackableDataTrie(identifier, trie)
 	assert.NotNil(t, tdaw)
 
 	tdaw.SetDataTrie(&mock.TrieStub{})
-	tdaw.DirtyData()["ABC"] = []byte{32, 33, 34}
+	key := []byte(stringKey)
+	val := []byte("123")
 
-	val, err := tdaw.RetrieveValue([]byte{65, 66, 67})
+	trieVal := append(val, key...)
+	trieVal = append(trieVal, identifier...)
+
+	tdaw.DirtyData()[stringKey] = trieVal
+
+	retrievedVal, err := tdaw.RetrieveValue(key)
 	assert.Nil(t, err)
-	assert.Equal(t, []byte{32, 33, 34}, val)
+	assert.Equal(t, val, retrievedVal)
 }
 
-func TestTrackableDataAccountRetrieveValueFoundInOriginalShouldWork(t *testing.T) {
+func TestTrackableDataTrie_RetrieveValueFoundInTrieShouldWork(t *testing.T) {
 	t.Parallel()
 
-	trie := &mock.TrieStub{}
-	mdaw := state.NewTrackableDataTrie(trie)
-	assert.NotNil(t, mdaw)
+	identifier := []byte("identifier")
+	expectedKey := []byte("key")
 
-	mdaw.SetDataTrie(&mock.TrieStub{})
-	mdaw.DirtyData()["ABC"] = []byte{32, 33, 34}
-	mdaw.OriginalData()["ABD"] = []byte{35, 36, 37}
+	expectedVal := []byte("value")
+	value := append(expectedVal, expectedKey...)
+	value = append(value, identifier...)
 
-	val, err := mdaw.RetrieveValue([]byte{65, 66, 68})
-	assert.Nil(t, err)
-	assert.Equal(t, []byte{35, 36, 37}, val)
-}
-
-func TestTrackableDataAccountRetrieveValueFoundInTrieShouldWork(t *testing.T) {
-	t.Parallel()
-
-	keyExpected := []byte("key")
-	value := []byte("value")
 	trie := &mock.TrieStub{
 		UpdateCalled: func(key, value []byte) error {
 			return nil
 		},
 		GetCalled: func(key []byte) (b []byte, e error) {
-			if bytes.Equal(key, keyExpected) {
+			if bytes.Equal(key, expectedKey) {
 				return value, nil
 			}
 			return nil, nil
 		},
 	}
-	mdaw := state.NewTrackableDataTrie(trie)
+	mdaw := state.NewTrackableDataTrie(identifier, trie)
 	assert.NotNil(t, mdaw)
 
-	mdaw.DirtyData()[string(keyExpected)] = value
-
-	valRecovered, err := mdaw.RetrieveValue(keyExpected)
+	valRecovered, err := mdaw.RetrieveValue(expectedKey)
 	assert.Nil(t, err)
-	assert.Equal(t, valRecovered, value)
+	assert.Equal(t, expectedVal, valRecovered)
 }
 
-func TestTrackableDataAccountRetrieveValueMalfunctionTrieShouldErr(t *testing.T) {
+func TestTrackableDataTrie_RetrieveValueMalfunctionTrieShouldErr(t *testing.T) {
 	t.Parallel()
 
 	errExpected := errors.New("expected err")
@@ -90,7 +98,7 @@ func TestTrackableDataAccountRetrieveValueMalfunctionTrieShouldErr(t *testing.T)
 			return nil, errExpected
 		},
 	}
-	mdaw := state.NewTrackableDataTrie(trie)
+	mdaw := state.NewTrackableDataTrie([]byte("identifier"), trie)
 	assert.NotNil(t, mdaw)
 
 	valRecovered, err := mdaw.RetrieveValue(keyExpected)
@@ -98,11 +106,44 @@ func TestTrackableDataAccountRetrieveValueMalfunctionTrieShouldErr(t *testing.T)
 	assert.Nil(t, valRecovered)
 }
 
-func TestTrackableDataAccountSaveKeyValueShouldSaveOnlyInDirty(t *testing.T) {
+func TestTrackableDataTrie_RetrieveValueShouldCheckDirtyDataFirst(t *testing.T) {
 	t.Parallel()
 
+	identifier := []byte("id")
+	key := []byte("key")
+	tail := append(key, identifier...)
+	retrievedTrieVal := []byte("value")
+	trieValue := append(retrievedTrieVal, tail...)
+	newTrieValue := []byte("new trie value")
+
+	trie := &mock.TrieStub{
+		GetCalled: func(key []byte) (b []byte, e error) {
+			return trieValue, nil
+		},
+	}
+	mdaw := state.NewTrackableDataTrie([]byte("id"), trie)
+	assert.NotNil(t, mdaw)
+
+	valRecovered, err := mdaw.RetrieveValue(key)
+	assert.Equal(t, retrievedTrieVal, valRecovered)
+	assert.Nil(t, err)
+
+	_ = mdaw.SaveKeyValue(key, newTrieValue)
+	valRecovered, err = mdaw.RetrieveValue(key)
+	assert.Equal(t, newTrieValue, valRecovered)
+	assert.Nil(t, err)
+}
+
+func TestTrackableDataTrie_SaveKeyValueShouldSaveOnlyInDirty(t *testing.T) {
+	t.Parallel()
+
+	identifier := []byte("identifier")
 	keyExpected := []byte("key")
 	value := []byte("value")
+
+	expectedVal := append(value, keyExpected...)
+	expectedVal = append(expectedVal, identifier...)
+
 	trie := &mock.TrieStub{
 		UpdateCalled: func(key, value []byte) error {
 			return nil
@@ -112,22 +153,20 @@ func TestTrackableDataAccountSaveKeyValueShouldSaveOnlyInDirty(t *testing.T) {
 			return nil, nil
 		},
 	}
-	mdaw := state.NewTrackableDataTrie(trie)
+	mdaw := state.NewTrackableDataTrie(identifier, trie)
 	assert.NotNil(t, mdaw)
 
-	mdaw.SaveKeyValue(keyExpected, value)
+	_ = mdaw.SaveKeyValue(keyExpected, value)
 
 	//test in dirty
-	assert.Equal(t, value, mdaw.DirtyData()[string(keyExpected)])
-	//test in original
-	assert.Nil(t, mdaw.OriginalData()[string(keyExpected)])
+	assert.Equal(t, expectedVal, mdaw.DirtyData()[string(keyExpected)])
 }
 
-func TestTrackableDataAccountClearDataCachesValidDataShouldWork(t *testing.T) {
+func TestTrackableDataTrie_ClearDataCachesValidDataShouldWork(t *testing.T) {
 	t.Parallel()
 
 	trie := &mock.TrieStub{}
-	mdaw := state.NewTrackableDataTrie(trie)
+	mdaw := state.NewTrackableDataTrie([]byte("identifier"), trie)
 	assert.NotNil(t, mdaw)
 
 	mdaw.SetDataTrie(&mock.TrieStub{})
@@ -135,10 +174,32 @@ func TestTrackableDataAccountClearDataCachesValidDataShouldWork(t *testing.T) {
 	assert.Equal(t, 0, len(mdaw.DirtyData()))
 
 	//add something
-	mdaw.SaveKeyValue([]byte{65, 66, 67}, []byte{32, 33, 34})
+	_ = mdaw.SaveKeyValue([]byte("ABC"), []byte("123"))
 	assert.Equal(t, 1, len(mdaw.DirtyData()))
 
 	//clear
 	mdaw.ClearDataCaches()
 	assert.Equal(t, 0, len(mdaw.DirtyData()))
+}
+
+func TestTrackableDataTrie_SetAndGetDataTrie(t *testing.T) {
+	t.Parallel()
+
+	trie := &mock.TrieStub{}
+	mdaw := state.NewTrackableDataTrie([]byte("identifier"), trie)
+
+	newTrie := &mock.TrieStub{}
+	mdaw.SetDataTrie(newTrie)
+	assert.Equal(t, newTrie, mdaw.DataTrie())
+}
+
+func TestTrackableDataTrie_SaveKeyValueTooBig(t *testing.T) {
+	t.Parallel()
+
+	identifier := []byte("identifier")
+	trie := &mock.TrieStub{}
+	tdaw := state.NewTrackableDataTrie(identifier, trie)
+
+	err := tdaw.SaveKeyValue([]byte("key"), make([]byte, core.MaxLeafSize+1))
+	assert.Equal(t, err, data.ErrLeafSizeTooBig)
 }

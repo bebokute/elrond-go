@@ -2,33 +2,53 @@ package mock
 
 import "math/big"
 
+// RewardsHandlerMock -
 type RewardsHandlerMock struct {
-	RewardsValueCalled        func() *big.Int
-	CommunityPercentageCalled func() float64
-	LeaderPercentageCalled    func() float64
-	BurnPercentageCalled      func() float64
+	MaxInflationRateCalled                 func() float64
+	MinInflationRateCalled                 func() float64
+	LeaderPercentageCalled                 func() float64
+	ProtocolSustainabilityPercentageCalled func() float64
+	ProtocolSustainabilityAddressCalled    func() string
+	RewardsTopUpGradientPointCalled        func() *big.Int
+	RewardsTopUpFactorCalled               func() float64
 }
 
-func (rhm *RewardsHandlerMock) RewardsValue() *big.Int {
-	return rhm.RewardsValueCalled()
-}
-
-func (rhm *RewardsHandlerMock) CommunityPercentage() float64 {
-	return rhm.CommunityPercentageCalled()
-}
-
+// LeaderPercentage -
 func (rhm *RewardsHandlerMock) LeaderPercentage() float64 {
 	return rhm.LeaderPercentageCalled()
 }
 
-func (rhm *RewardsHandlerMock) BurnPercentage() float64 {
-	return rhm.BurnPercentageCalled()
+// ProtocolSustainabilityPercentage will return the protocol sustainability percentage value
+func (rhm *RewardsHandlerMock) ProtocolSustainabilityPercentage() float64 {
+	return rhm.ProtocolSustainabilityPercentageCalled()
+}
+
+// ProtocolSustainabilityAddress will return the protocol sustainability address
+func (rhm *RewardsHandlerMock) ProtocolSustainabilityAddress() string {
+	return rhm.ProtocolSustainabilityAddressCalled()
+}
+
+// MinInflationRate -
+func (rhm *RewardsHandlerMock) MinInflationRate() float64 {
+	return rhm.MinInflationRateCalled()
+}
+
+// MaxInflationRate -
+func (rhm *RewardsHandlerMock) MaxInflationRate(uint32) float64 {
+	return rhm.MaxInflationRateCalled()
+}
+
+// RewardsTopUpGradientPoint -
+func (rhm *RewardsHandlerMock) RewardsTopUpGradientPoint() *big.Int {
+	return rhm.RewardsTopUpGradientPointCalled()
+}
+
+// RewardsTopUpFactor -
+func (rhm *RewardsHandlerMock) RewardsTopUpFactor() float64 {
+	return rhm.RewardsTopUpFactorCalled()
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (rhm *RewardsHandlerMock) IsInterfaceNil() bool {
-	if rhm == nil {
-		return true
-	}
-	return false
+	return rhm == nil
 }

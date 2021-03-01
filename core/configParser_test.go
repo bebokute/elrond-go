@@ -32,26 +32,39 @@ func TestLoadP2PConfig_ShouldPass(t *testing.T) {
 	assert.Nil(t, err)
 }
 
-func TestLoadServersPConfig_InvalidFileShouldErr(t *testing.T) {
-	t.Parallel()
+func TestLoadGasScheduleConfig(t *testing.T) {
+	testString := `
+[GasSchedule]
+    GetFunction = 84
+    StorageStore = 11
+    BigIntNew = 9
+    BigIntAdd = 44
+    Drop = 1
+    I64Load = 12
+    MemoryCopy = 14623
+`
 
-	conf, err := core.LoadServersPConfig("testFile03")
-
-	assert.Nil(t, conf)
-	assert.Error(t, err)
-}
-
-func TestLoadServersPConfig_ShouldPass(t *testing.T) {
-	t.Parallel()
-
-	_, err := os.Create("testFile04")
+	file, err := os.Create("testGasSchedule.toml")
 	assert.Nil(t, err)
 
-	conf, err := core.LoadServersPConfig("testFile04")
-	if _, errF := os.Stat("testFile04"); errF == nil {
-		_ = os.Remove("testFile04")
+	_, _ = file.WriteString(testString)
+	_ = file.Close()
+
+	gasSchedule, err := core.LoadGasScheduleConfig("testGasSchedule.toml")
+	assert.Nil(t, err)
+
+	if _, err = os.Stat("testGasSchedule.toml"); err == nil {
+		_ = os.Remove("testGasSchedule.toml")
 	}
 
-	assert.NotNil(t, conf)
-	assert.Nil(t, err)
+	expectedGasSchedule := make(map[string]uint64)
+	expectedGasSchedule["GetFunction"] = 84
+	expectedGasSchedule["StorageStore"] = 11
+	expectedGasSchedule["BigIntNew"] = 9
+	expectedGasSchedule["BigIntAdd"] = 44
+	expectedGasSchedule["Drop"] = 1
+	expectedGasSchedule["I64Load"] = 12
+	expectedGasSchedule["MemoryCopy"] = 14623
+
+	assert.Equal(t, expectedGasSchedule, gasSchedule["GasSchedule"])
 }

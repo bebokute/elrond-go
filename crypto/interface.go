@@ -2,11 +2,12 @@ package crypto
 
 import (
 	"crypto/cipher"
+
+	"github.com/ElrondNetwork/elrond-go/core"
 )
 
 // A Scalar represents a scalar value by which
 // a Point (group element) may be encrypted to produce another Point.
-// adapted from kyber
 type Scalar interface {
 	// MarshalBinary transforms the Scalar into a byte array
 	MarshalBinary() ([]byte, error)
@@ -38,7 +39,7 @@ type Scalar interface {
 	// Inv returns the modular inverse of scalar s given as parameter
 	Inv(s Scalar) (Scalar, error)
 	// Pick returns a fresh random or pseudo-random scalar
-	Pick(rand cipher.Stream) (Scalar, error)
+	Pick() (Scalar, error)
 	// SetBytes sets the scalar from a byte-slice,
 	// reducing if necessary to the appropriate modulus.
 	SetBytes([]byte) (Scalar, error)
@@ -49,7 +50,6 @@ type Scalar interface {
 }
 
 // Point represents an element of a public-key cryptographic Group.
-// adapted from kyber
 type Point interface {
 	// MarshalBinary transforms the Point into a byte array
 	MarshalBinary() ([]byte, error)
@@ -60,8 +60,6 @@ type Point interface {
 	Equal(p Point) (bool, error)
 	// Null returns the neutral identity element.
 	Null() Point
-	// Base returns the Group's base point.
-	Base() Point
 	// Set sets the receiver equal to another Point p.
 	Set(p Point) error
 	// Clone returns a clone of the receiver.
@@ -77,7 +75,7 @@ type Point interface {
 	// Mul returns the result of multiplying receiver by the scalar s.
 	Mul(s Scalar) (Point, error)
 	// Pick returns a fresh random or pseudo-random Point.
-	Pick(rand cipher.Stream) (Point, error)
+	Pick() (Point, error)
 	// GetUnderlyingObj returns the object the implementation wraps
 	GetUnderlyingObj() interface{}
 	// IsInterfaceNil returns true if there is no value under the interface
@@ -85,7 +83,6 @@ type Point interface {
 }
 
 // Group defines a mathematical group used for Diffie-Hellmann operations
-// adapted from kyber
 type Group interface {
 	// String returns the string for the group
 	String() string
@@ -97,12 +94,13 @@ type Group interface {
 	PointLen() int
 	// CreatePoint creates a new point
 	CreatePoint() Point
+	// CreatePointForScalar creates a new point corresponding to the given scalar
+	CreatePointForScalar(scalar Scalar) (Point, error)
 	// IsInterfaceNil returns true if there is no value under the interface
 	IsInterfaceNil() bool
 }
 
 // Random is an interface that can be mixed in to local suite definitions.
-// adapted from kyber
 type Random interface {
 	// RandomStream returns a cipher.Stream that produces a
 	// cryptographically random key stream. The stream must
@@ -111,12 +109,13 @@ type Random interface {
 }
 
 // Suite represents the list of functionalities needed by this package.
-// adapted from kyber
 type Suite interface {
 	Group
 	Random
 	// CreateKeyPair creates a scalar and a point pair that can be used in asymmetric cryptography
-	CreateKeyPair(cipher.Stream) (Scalar, Point)
+	CreateKeyPair() (Scalar, Point)
+	// CheckPointValid returns nil if point is valid otherwise error. Zero is reported also as invalid
+	CheckPointValid(pointBytes []byte) error
 	// GetUnderlyingSuite returns the library suite that crypto.Suite wraps
 	GetUnderlyingSuite() interface{}
 }
@@ -129,6 +128,8 @@ type KeyGenerator interface {
 	PrivateKeyFromByteArray(b []byte) (PrivateKey, error)
 	// PublicKeyFromByteArray creates a crypto.PublicKey from a byte array
 	PublicKeyFromByteArray(b []byte) (PublicKey, error)
+	//CheckPublicKeyValid verifies the validity of the public key
+	CheckPublicKeyValid(b []byte) error
 	// Suite returns the crypto.Suite used by the KeyGenerator
 	Suite() Suite
 	// IsInterfaceNil returns true if there is no value under the interface
@@ -212,14 +213,15 @@ type LowLevelSignerBLS interface {
 	// VerifySigBytes verifies if a byte array represents a BLS signature
 	VerifySigBytes(suite Suite, sig []byte) error
 	// AggregateSignatures aggregates BLS single signatures given as byte arrays
-	AggregateSignatures(suite Suite, sigs ...[]byte) ([]byte, error)
+	AggregateSignatures(suite Suite, signatures [][]byte, pubKeysSigners []PublicKey) ([]byte, error)
 	// VerifyAggregatedSig verifies the validity of an aggregated signature over a given message
-	VerifyAggregatedSig(suite Suite, aggPointsBytes []byte, aggSigBytes []byte, msg []byte) error
-	// AggregatePublicKeys aggregates a list of public key Points. Returns the byte array representation of the point
-	AggregatePublicKeys(suite Suite, pubKeys ...Point) ([]byte, error)
-	// ScalarMulSig provides the result of multiplying a scalar with a signature.
-	// This is used in the modified BLS multi-signature scheme
-	ScalarMulSig(suite Suite, scalar Scalar, sig []byte) ([]byte, error)
-	// IsInterfaceNil returns true if there is no value under the interface
+	VerifyAggregatedSig(suite Suite, pubKeys []PublicKey, aggSigBytes []byte, msg []byte) error
+}
+
+// PeerSignatureHandler is a wrapper over SingleSigner that buffers the peer signatures.
+// When it needs to sign or to verify a signature, it searches the buffer first.
+type PeerSignatureHandler interface {
+	VerifyPeerSignature(pk []byte, pid core.PeerID, signature []byte) error
+	GetPeerSignature(key PrivateKey, pid []byte) ([]byte, error)
 	IsInterfaceNil() bool
 }

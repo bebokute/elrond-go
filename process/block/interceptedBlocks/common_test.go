@@ -11,22 +11,24 @@ import (
 
 func createDefaultBlockHeaderArgument() *ArgInterceptedBlockHeader {
 	arg := &ArgInterceptedBlockHeader{
-		ShardCoordinator: mock.NewOneShardCoordinatorMock(),
-		MultiSigVerifier: mock.NewMultiSigner(),
-		Hasher:           mock.HasherMock{},
-		Marshalizer:      &mock.MarshalizerMock{},
-		NodesCoordinator: mock.NewNodesCoordinatorMock(),
-		HdrBuff:          []byte("test buffer"),
+		ShardCoordinator:        mock.NewOneShardCoordinatorMock(),
+		Hasher:                  mock.HasherMock{},
+		Marshalizer:             &mock.MarshalizerMock{},
+		HdrBuff:                 []byte("test buffer"),
+		HeaderSigVerifier:       &mock.HeaderSigVerifierStub{},
+		HeaderIntegrityVerifier: &mock.HeaderIntegrityVerifierStub{},
+		ValidityAttester:        &mock.ValidityAttesterStub{},
+		EpochStartTrigger:       &mock.EpochStartTriggerStub{},
 	}
 
 	return arg
 }
 
-func createDefaultTxBlockBodyArgument() *ArgInterceptedTxBlockBody {
-	arg := &ArgInterceptedTxBlockBody{
+func createDefaultMiniblockArgument() *ArgInterceptedMiniblock {
+	arg := &ArgInterceptedMiniblock{
 		Hasher:           mock.HasherMock{},
 		Marshalizer:      &mock.MarshalizerMock{},
-		TxBlockBodyBuff:  []byte("test buffer"),
+		MiniblockBuff:    []byte("test buffer"),
 		ShardCoordinator: mock.NewOneShardCoordinatorMock(),
 	}
 
@@ -63,7 +65,7 @@ func TestCheckBlockHeaderArgument_NilArgumentShouldErr(t *testing.T) {
 
 	err := checkBlockHeaderArgument(nil)
 
-	assert.Equal(t, process.ErrNilArguments, err)
+	assert.Equal(t, process.ErrNilArgumentStruct, err)
 }
 
 func TestCheckBlockHeaderArgument_NilHdrShouldErr(t *testing.T) {
@@ -88,6 +90,17 @@ func TestCheckBlockHeaderArgument_NilMarshalizerShouldErr(t *testing.T) {
 	assert.Equal(t, process.ErrNilMarshalizer, err)
 }
 
+func TestCheckBlockHeaderArgument_NilHeaderSigVerifierShouldErr(t *testing.T) {
+	t.Parallel()
+
+	arg := createDefaultBlockHeaderArgument()
+	arg.HeaderSigVerifier = nil
+
+	err := checkBlockHeaderArgument(arg)
+
+	assert.Equal(t, process.ErrNilHeaderSigVerifier, err)
+}
+
 func TestCheckBlockHeaderArgument_NilHasherShouldErr(t *testing.T) {
 	t.Parallel()
 
@@ -97,28 +110,6 @@ func TestCheckBlockHeaderArgument_NilHasherShouldErr(t *testing.T) {
 	err := checkBlockHeaderArgument(arg)
 
 	assert.Equal(t, process.ErrNilHasher, err)
-}
-
-func TestCheckBlockHeaderArgument_NilMultiSigVerifierShouldErr(t *testing.T) {
-	t.Parallel()
-
-	arg := createDefaultBlockHeaderArgument()
-	arg.MultiSigVerifier = nil
-
-	err := checkBlockHeaderArgument(arg)
-
-	assert.Equal(t, process.ErrNilMultiSigVerifier, err)
-}
-
-func TestCheckBlockHeaderArgument_NilChronologyValidatorShouldErr(t *testing.T) {
-	t.Parallel()
-
-	arg := createDefaultBlockHeaderArgument()
-	arg.NodesCoordinator = nil
-
-	err := checkBlockHeaderArgument(arg)
-
-	assert.Equal(t, process.ErrNilNodesCoordinator, err)
 }
 
 func TestCheckBlockHeaderArgument_NilShardCoordinatorShouldErr(t *testing.T) {
@@ -132,6 +123,17 @@ func TestCheckBlockHeaderArgument_NilShardCoordinatorShouldErr(t *testing.T) {
 	assert.Equal(t, process.ErrNilShardCoordinator, err)
 }
 
+func TestCheckBlockHeaderArgument_NilValidityAttesterShouldErr(t *testing.T) {
+	t.Parallel()
+
+	arg := createDefaultBlockHeaderArgument()
+	arg.ValidityAttester = nil
+
+	err := checkBlockHeaderArgument(arg)
+
+	assert.Equal(t, process.ErrNilValidityAttester, err)
+}
+
 func TestCheckBlockHeaderArgument_ShouldWork(t *testing.T) {
 	t.Parallel()
 
@@ -142,66 +144,66 @@ func TestCheckBlockHeaderArgument_ShouldWork(t *testing.T) {
 	assert.Nil(t, err)
 }
 
-//-------- checkTxBlockBodyArgument
+//-------- checkMiniblockArgument
 
-func TestCheckTxBlockBodyArgument_NilArgumentShouldErr(t *testing.T) {
+func TestCheckMiniblockArgument_NilArgumentShouldErr(t *testing.T) {
 	t.Parallel()
 
-	err := checkTxBlockBodyArgument(nil)
+	err := checkMiniblockArgument(nil)
 
-	assert.Equal(t, process.ErrNilArguments, err)
+	assert.Equal(t, process.ErrNilArgumentStruct, err)
 }
 
-func TestCheckTxBlockBodyArgument_NilHdrShouldErr(t *testing.T) {
+func TestCheckMiniblockArgument_NilHdrShouldErr(t *testing.T) {
 	t.Parallel()
 
-	arg := createDefaultTxBlockBodyArgument()
-	arg.TxBlockBodyBuff = nil
+	arg := createDefaultMiniblockArgument()
+	arg.MiniblockBuff = nil
 
-	err := checkTxBlockBodyArgument(arg)
+	err := checkMiniblockArgument(arg)
 
 	assert.Equal(t, process.ErrNilBuffer, err)
 }
 
-func TestCheckTxBlockBodyArgument_NilMarshalizerShouldErr(t *testing.T) {
+func TestCheckMiniblockArgument_NilMarshalizerShouldErr(t *testing.T) {
 	t.Parallel()
 
-	arg := createDefaultTxBlockBodyArgument()
+	arg := createDefaultMiniblockArgument()
 	arg.Marshalizer = nil
 
-	err := checkTxBlockBodyArgument(arg)
+	err := checkMiniblockArgument(arg)
 
 	assert.Equal(t, process.ErrNilMarshalizer, err)
 }
 
-func TestCheckTxBlockBodyArgument_NilHasherShouldErr(t *testing.T) {
+func TestCheckMiniblockArgument_NilHasherShouldErr(t *testing.T) {
 	t.Parallel()
 
-	arg := createDefaultTxBlockBodyArgument()
+	arg := createDefaultMiniblockArgument()
 	arg.Hasher = nil
 
-	err := checkTxBlockBodyArgument(arg)
+	err := checkMiniblockArgument(arg)
 
 	assert.Equal(t, process.ErrNilHasher, err)
 }
 
-func TestCheckTxBlockBodyArgument_NilShardCoordinatorShouldErr(t *testing.T) {
+func TestCheckMiniblockArgument_NilShardCoordinatorShouldErr(t *testing.T) {
 	t.Parallel()
 
-	arg := createDefaultTxBlockBodyArgument()
+	arg := createDefaultMiniblockArgument()
 	arg.ShardCoordinator = nil
 
-	err := checkTxBlockBodyArgument(arg)
+	err := checkMiniblockArgument(arg)
 
 	assert.Equal(t, process.ErrNilShardCoordinator, err)
 }
 
-func TestCheckTxBlockBodyArgument_ShouldWork(t *testing.T) {
+func TestCheckMiniblockArgument_ShouldWork(t *testing.T) {
 	t.Parallel()
 
-	arg := createDefaultTxBlockBodyArgument()
+	arg := createDefaultMiniblockArgument()
 
-	err := checkTxBlockBodyArgument(arg)
+	err := checkMiniblockArgument(arg)
 
 	assert.Nil(t, err)
 }
@@ -316,7 +318,7 @@ func TestCheckMetaShardInfo_WrongShardIdShouldErr(t *testing.T) {
 	shardCoordinator := mock.NewOneShardCoordinatorMock()
 	wrongShardId := uint32(2)
 	sd := block.ShardData{
-		ShardId:               wrongShardId,
+		ShardID:               wrongShardId,
 		HeaderHash:            nil,
 		ShardMiniBlockHeaders: nil,
 		TxCount:               0,
@@ -332,17 +334,17 @@ func TestCheckMetaShardInfo_WrongMiniblockSenderShardIdShouldErr(t *testing.T) {
 
 	shardCoordinator := mock.NewOneShardCoordinatorMock()
 	wrongShardId := uint32(2)
-	miniBlock := block.ShardMiniBlockHeader{
+	miniBlock := block.MiniBlockHeader{
 		Hash:            make([]byte, 0),
-		ReceiverShardId: shardCoordinator.SelfId(),
-		SenderShardId:   wrongShardId,
+		ReceiverShardID: shardCoordinator.SelfId(),
+		SenderShardID:   wrongShardId,
 		TxCount:         0,
 	}
 
 	sd := block.ShardData{
-		ShardId:               shardCoordinator.SelfId(),
+		ShardID:               shardCoordinator.SelfId(),
 		HeaderHash:            nil,
-		ShardMiniBlockHeaders: []block.ShardMiniBlockHeader{miniBlock},
+		ShardMiniBlockHeaders: []block.MiniBlockHeader{miniBlock},
 		TxCount:               0,
 	}
 
@@ -356,17 +358,17 @@ func TestCheckMetaShardInfo_WrongMiniblockReceiverShardIdShouldErr(t *testing.T)
 
 	shardCoordinator := mock.NewOneShardCoordinatorMock()
 	wrongShardId := uint32(2)
-	miniBlock := block.ShardMiniBlockHeader{
+	miniBlock := block.MiniBlockHeader{
 		Hash:            make([]byte, 0),
-		ReceiverShardId: wrongShardId,
-		SenderShardId:   shardCoordinator.SelfId(),
+		ReceiverShardID: wrongShardId,
+		SenderShardID:   shardCoordinator.SelfId(),
 		TxCount:         0,
 	}
 
 	sd := block.ShardData{
-		ShardId:               shardCoordinator.SelfId(),
+		ShardID:               shardCoordinator.SelfId(),
 		HeaderHash:            nil,
-		ShardMiniBlockHeaders: []block.ShardMiniBlockHeader{miniBlock},
+		ShardMiniBlockHeaders: []block.MiniBlockHeader{miniBlock},
 		TxCount:               0,
 	}
 
@@ -375,21 +377,45 @@ func TestCheckMetaShardInfo_WrongMiniblockReceiverShardIdShouldErr(t *testing.T)
 	assert.Equal(t, process.ErrInvalidShardId, err)
 }
 
+func TestCheckMetaShardInfo_ReservedPopulatedShouldErr(t *testing.T) {
+	t.Parallel()
+
+	shardCoordinator := mock.NewOneShardCoordinatorMock()
+	miniBlock := block.MiniBlockHeader{
+		Hash:            make([]byte, 0),
+		ReceiverShardID: shardCoordinator.SelfId(),
+		SenderShardID:   shardCoordinator.SelfId(),
+		TxCount:         0,
+		Reserved:        []byte("r"),
+	}
+
+	sd := block.ShardData{
+		ShardID:               shardCoordinator.SelfId(),
+		HeaderHash:            nil,
+		ShardMiniBlockHeaders: []block.MiniBlockHeader{miniBlock},
+		TxCount:               0,
+	}
+
+	err := checkMetaShardInfo([]block.ShardData{sd}, shardCoordinator)
+
+	assert.Equal(t, process.ErrReservedFieldNotSupportedYet, err)
+}
+
 func TestCheckMetaShardInfo_OkValsShouldWork(t *testing.T) {
 	t.Parallel()
 
 	shardCoordinator := mock.NewOneShardCoordinatorMock()
-	miniBlock := block.ShardMiniBlockHeader{
+	miniBlock := block.MiniBlockHeader{
 		Hash:            make([]byte, 0),
-		ReceiverShardId: shardCoordinator.SelfId(),
-		SenderShardId:   shardCoordinator.SelfId(),
+		ReceiverShardID: shardCoordinator.SelfId(),
+		SenderShardID:   shardCoordinator.SelfId(),
 		TxCount:         0,
 	}
 
 	sd := block.ShardData{
-		ShardId:               shardCoordinator.SelfId(),
+		ShardID:               shardCoordinator.SelfId(),
 		HeaderHash:            nil,
-		ShardMiniBlockHeaders: []block.ShardMiniBlockHeader{miniBlock},
+		ShardMiniBlockHeaders: []block.MiniBlockHeader{miniBlock},
 		TxCount:               0,
 	}
 
@@ -446,6 +472,24 @@ func TestCheckMiniblocks_WrongMiniblockReceiverShardIdShouldErr(t *testing.T) {
 	err := checkMiniblocks([]block.MiniBlockHeader{miniblockHeader}, shardCoordinator)
 
 	assert.Equal(t, process.ErrInvalidShardId, err)
+}
+
+func TestCheckMiniblocks_ReservedPopulatedShouldErr(t *testing.T) {
+	t.Parallel()
+
+	shardCoordinator := mock.NewOneShardCoordinatorMock()
+	miniblockHeader := block.MiniBlockHeader{
+		Hash:            make([]byte, 0),
+		SenderShardID:   shardCoordinator.SelfId(),
+		ReceiverShardID: shardCoordinator.SelfId(),
+		TxCount:         0,
+		Type:            0,
+		Reserved:        []byte("r"),
+	}
+
+	err := checkMiniblocks([]block.MiniBlockHeader{miniblockHeader}, shardCoordinator)
+
+	assert.Equal(t, process.ErrReservedFieldNotSupportedYet, err)
 }
 
 func TestCheckMiniblocks_OkValsShouldWork(t *testing.T) {

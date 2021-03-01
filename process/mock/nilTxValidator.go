@@ -13,20 +13,17 @@ func NewNilTxValidator() (*nilTxValidator, error) {
 	return &nilTxValidator{}, nil
 }
 
-// IsTxValidForProcessing is a nil implementation that will return true
-func (ntv *nilTxValidator) IsTxValidForProcessing(interceptedTx process.TxValidatorHandler) bool {
-	return true
+// CheckTxValidity is a nil implementation that will return nil
+func (ntv *nilTxValidator) CheckTxValidity(_ process.TxValidatorHandler) error {
+	return nil
 }
 
-// NumRejectedTxs will return number of rejected transaction
-func (ntv *nilTxValidator) NumRejectedTxs() uint64 {
-	return 0
+// CheckTxWhiteList is a nil implementation that will return nil
+func (ntv *nilTxValidator) CheckTxWhiteList(_ process.InterceptedData) error {
+	return nil
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (ntv *nilTxValidator) IsInterfaceNil() bool {
-	if ntv == nil {
-		return true
-	}
-	return false
+	return ntv == nil
 }

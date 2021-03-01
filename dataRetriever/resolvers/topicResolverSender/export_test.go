@@ -1,20 +1,17 @@
 package topicResolverSender
 
 import (
-	"github.com/ElrondNetwork/elrond-go/dataRetriever"
-	"github.com/ElrondNetwork/elrond-go/p2p"
+	"github.com/ElrondNetwork/elrond-go/core"
 )
 
+const TopicRequestSuffix = topicRequestSuffix
+
 func MakeDiffList(
-	allConnectedPeers []p2p.PeerID,
-	excludedConnectedPeers []p2p.PeerID,
-) []p2p.PeerID {
+	allConnectedPeers []core.PeerID,
+	excludedConnectedPeers []core.PeerID,
+) []core.PeerID {
 
 	return makeDiffList(allConnectedPeers, excludedConnectedPeers)
-}
-
-func FisherYatesShuffle(indexes []int, randomizer dataRetriever.IntRandomizer) ([]int, error) {
-	return fisherYatesShuffle(indexes, randomizer)
 }
 
 func (dplc *DiffPeerListCreator) MainTopic() string {

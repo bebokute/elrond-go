@@ -9,47 +9,68 @@ import (
 	"github.com/ElrondNetwork/elrond-go/data/transaction"
 	"github.com/ElrondNetwork/elrond-go/integrationTests"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestInterceptedTxFromFrontendGeneratedParamsAllParams(t *testing.T) {
+const mintingValue = "100000000"
+
+func TestInterceptedTxWithoutDataField(t *testing.T) {
+	value := big.NewInt(0)
+	value.SetString("999", 10)
+
 	testInterceptedTxFromFrontendGeneratedParams(
 		t,
 		0,
-		big.NewInt(10),
-		"53669be65aac358a6add8e8a8b1251bb994dc1e4a0cc885956f5ecd53396f0d8",
-		"a10e99839fe19bdb2ec8b22e0805da40053d4e5b6ace564949f26d49095e36e8",
-		"e1e38ae48088baeca9da900cf054d71d7500171986a73cd04027d32fe3435241338979db530bd79e5148d8b0146204c9b2d985d201019a1728218841b8454a09",
+		value,
+		"erd12dnfhej64s6c56ka369gkyj3hwv5ms0y5rxgsk2k7hkd2vuk7rvqxkalsa",
+		"erd1l20m7kzfht5rhdnd4zvqr82egk7m4nvv3zk06yw82zqmrt9kf0zsf9esqq",
+		"394c6f1375f6511dd281465fb9dd7caf013b6512a8f8ac278bbe2151cbded89da28bd539bc1c1c7884835742712c826900c092edb24ac02de9015f0f494f6c0a",
 		10,
-		1000,
-		"aa@bbbb@cccc",
+		100000,
+		[]byte(""),
+		integrationTests.ChainID,
+		integrationTests.MinTransactionVersion,
+		0,
 	)
 }
 
-func TestInterceptedTxFromFrontendGeneratedParamsAllParams2(t *testing.T) {
+func TestInterceptedTxWithDataField(t *testing.T) {
+	value := big.NewInt(0)
+	value.SetString("999", 10)
+
 	testInterceptedTxFromFrontendGeneratedParams(
 		t,
-		12,
-		big.NewInt(2),
-		"943643524936191d1c5627e044f7b5e4ca559c7d0ba1c2b85d1b2e6c299ebcd8",
-		"943643524936191d1c5627e044f7b5e4ca559c7d0ba1c2b85d1b2e6c299ebcd8",
-		"1ef83bae21227e93e9717f45a4ec34e3f5c6a110e31dfa438ac2b8c1f5459e5167fd8424d1dfa6de59756437fe599def6872217ddad5717fe61a41853606450c",
+		0,
+		value,
+		"erd12dnfhej64s6c56ka369gkyj3hwv5ms0y5rxgsk2k7hkd2vuk7rvqxkalsa",
+		"erd1vjdll4xqtyll7nx3xx83audv27k5ktppvcc8kddn2yhxhwrjadgqlvtz8w",
+		"258edbbec6f7b67f6747340da09a5f849fe9fde29758097e06684d261e5d92d3abafbe9b2e2879226d738b2223a82468642e9342032ff69798de69b0fd6ca304",
+		10,
+		100000,
+		[]byte("data@~`!@#$^&*()_=[]{};'<>?,./|<>><!!!!!"),
+		integrationTests.ChainID,
+		integrationTests.MinTransactionVersion,
+		0,
+	)
+}
+
+func TestInterceptedTxWithSigningOverTxHash(t *testing.T) {
+	value := big.NewInt(0)
+	value.SetString("1000000000000000000", 10)
+
+	testInterceptedTxFromFrontendGeneratedParams(
+		t,
 		1,
-		10000,
-		"aa@dd@cc",
-	)
-}
-
-func TestInterceptedTxFromFrontendGeneratedParamsGasPriceGasLimitNoData(t *testing.T) {
-	testInterceptedTxFromFrontendGeneratedParams(
-		t,
-		0,
-		big.NewInt(10),
-		"53669be65aac358a6add8e8a8b1251bb994dc1e4a0cc885956f5ecd53396f0d8",
-		"6afb8018dcc5a53d22d4dcdda39ceaf25dafd1ea353a9bbe12073057f4e6d262",
-		"1d96166ecd6cae86797046126b64028099fcd026a37a82c4bdd19700bd49828069a822fb5453e0b32f66ed895d4f162af35ea8aca862af498e2831c596250e03",
-		10,
-		1000,
-		"",
+		value,
+		"erd1ez0puv8mqsulwllnavfygfzqe5zveeqjwpr6dsm8egchkf449kjqf8udu6",
+		"erd1ez0puv8mqsulwllnavfygfzqe5zveeqjwpr6dsm8egchkf449kjqf8udu6",
+		"89cb10cafb75040d704b66610990c2ec7f6393e8da7ac867b1db417a9c9a3340947d5139e23ef14ebe80fd33ce352458ede505c0532f0316ac85c44456c8bf06",
+		1000000000,
+		56000,
+		[]byte("test"),
+		integrationTests.ChainID,
+		2,
+		1,
 	)
 }
 
@@ -59,12 +80,15 @@ func testInterceptedTxFromFrontendGeneratedParams(
 	t *testing.T,
 	frontendNonce uint64,
 	frontendValue *big.Int,
-	frontendReceiverHex string,
-	frontendSenderHex string,
-	frontendSignature string,
+	frontendReceiver string,
+	frontendSender string,
+	frontendSignatureHex string,
 	frontendGasPrice uint64,
 	frontendGasLimit uint64,
-	frontendData string,
+	frontendData []byte,
+	chainID []byte,
+	version uint32,
+	options uint32,
 ) {
 	if testing.Short() {
 		t.Skip("this is not a short test")
@@ -76,7 +100,8 @@ func testInterceptedTxFromFrontendGeneratedParams(
 	nodeShardId := uint32(0)
 	txSignPrivKeyShardId := uint32(0)
 	initialNodeAddr := "nodeAddr"
-	valMinting := big.NewInt(20000)
+	valMinting, _ := big.NewInt(0).SetString(mintingValue, 10)
+	valMinting.Mul(valMinting, big.NewInt(5000000))
 
 	node := integrationTests.NewTestProcessorNode(
 		maxShards,
@@ -85,15 +110,16 @@ func testInterceptedTxFromFrontendGeneratedParams(
 		initialNodeAddr,
 	)
 
+	node.EconomicsData.SetMinGasPrice(10)
 	txHexHash := ""
 
 	err := node.SetAccountNonce(uint64(0))
 	assert.Nil(t, err)
 
-	node.ShardDataPool.Transactions().RegisterHandler(func(key []byte) {
+	node.DataPool.Transactions().RegisterOnAdded(func(key []byte, value interface{}) {
 		assert.Equal(t, txHexHash, hex.EncodeToString(key))
 
-		dataRecovered, _ := node.ShardDataPool.Transactions().SearchFirstData(key)
+		dataRecovered, _ := node.DataPool.Transactions().SearchFirstData(key)
 		assert.NotNil(t, dataRecovered)
 
 		txRecovered, ok := dataRecovered.(*transaction.Transaction)
@@ -102,41 +128,44 @@ func testInterceptedTxFromFrontendGeneratedParams(
 		assert.Equal(t, frontendNonce, txRecovered.Nonce)
 		assert.Equal(t, frontendValue, txRecovered.Value)
 
-		sender, _ := hex.DecodeString(frontendSenderHex)
+		sender, _ := integrationTests.TestAddressPubkeyConverter.Decode(frontendSender)
 		assert.Equal(t, sender, txRecovered.SndAddr)
 
-		receiver, _ := hex.DecodeString(frontendReceiverHex)
+		receiver, _ := integrationTests.TestAddressPubkeyConverter.Decode(frontendReceiver)
 		assert.Equal(t, receiver, txRecovered.RcvAddr)
 
-		sig, _ := hex.DecodeString(frontendSignature)
+		sig, _ := hex.DecodeString(frontendSignatureHex)
 		assert.Equal(t, sig, txRecovered.Signature)
-		assert.Equal(t, frontendData, txRecovered.Data)
+		assert.Equal(t, len(frontendData), len(txRecovered.Data))
 
 		chDone <- struct{}{}
 	})
 
-	rcvAddrBytes, _ := hex.DecodeString(frontendReceiverHex)
-	sndAddrBytes, _ := hex.DecodeString(frontendSenderHex)
-	signatureBytes, _ := hex.DecodeString(frontendSignature)
+	rcvAddrBytes, _ := integrationTests.TestAddressPubkeyConverter.Decode(frontendReceiver)
+	sndAddrBytes, _ := integrationTests.TestAddressPubkeyConverter.Decode(frontendSender)
+	signatureBytes, _ := hex.DecodeString(frontendSignatureHex)
 
 	integrationTests.MintAddress(node.AccntState, sndAddrBytes, valMinting)
 
-	txHexHash, err = node.SendTransaction(&transaction.Transaction{
+	tx := &transaction.Transaction{
 		Nonce:     frontendNonce,
-		Value:     frontendValue,
 		RcvAddr:   rcvAddrBytes,
 		SndAddr:   sndAddrBytes,
 		GasPrice:  frontendGasPrice,
 		GasLimit:  frontendGasLimit,
 		Data:      frontendData,
 		Signature: signatureBytes,
-	})
-
-	assert.Nil(t, err)
+		ChainID:   chainID,
+		Version:   version,
+		Options:   options,
+	}
+	tx.Value = big.NewInt(0).Set(frontendValue)
+	txHexHash, err = node.SendTransaction(tx)
+	require.Nil(t, err)
 
 	select {
 	case <-chDone:
-	case <-time.After(time.Second * 2):
+	case <-time.After(time.Second * 3):
 		assert.Fail(t, "timeout getting transaction")
 	}
 }

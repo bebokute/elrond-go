@@ -1,68 +1,64 @@
 package rewardTx_test
 
 import (
-	"bytes"
 	"math/big"
 	"testing"
 
+	"github.com/ElrondNetwork/elrond-go/data"
 	"github.com/ElrondNetwork/elrond-go/data/rewardTx"
 	"github.com/stretchr/testify/assert"
 )
 
-func TestRewardTx_SaveLoad(t *testing.T) {
-	smrS := rewardTx.RewardTx{
-		Round:   uint64(1),
-		Epoch:   uint32(1),
-		Value:   big.NewInt(1),
-		RcvAddr: []byte("receiver_address"),
-		ShardId: 10,
+func TestRewardTx_GettersAndSetters(t *testing.T) {
+	t.Parallel()
+
+	rwdTx := rewardTx.RewardTx{}
+
+	addr := []byte("address")
+	value := big.NewInt(37)
+
+	rwdTx.SetRcvAddr(addr)
+	rwdTx.SetValue(value)
+
+	assert.Equal(t, []byte(nil), rwdTx.GetSndAddr())
+	assert.Equal(t, addr, rwdTx.GetRcvAddr())
+	assert.Equal(t, value, rwdTx.GetValue())
+	assert.Equal(t, []byte(""), rwdTx.GetData())
+	assert.Equal(t, uint64(0), rwdTx.GetGasLimit())
+	assert.Equal(t, uint64(0), rwdTx.GetGasPrice())
+	assert.Equal(t, uint64(0), rwdTx.GetNonce())
+}
+
+func TestRewardTx_CheckIntegrityShouldWork(t *testing.T) {
+	t.Parallel()
+
+	rwdTx := &rewardTx.RewardTx{
+		Round:   19,
+		RcvAddr: []byte("rcv-address"),
+		Value:   big.NewInt(10),
 	}
 
-	var b bytes.Buffer
-	err := smrS.Save(&b)
+	err := rwdTx.CheckIntegrity()
 	assert.Nil(t, err)
-
-	loadSMR := rewardTx.RewardTx{}
-	err = loadSMR.Load(&b)
-	assert.Nil(t, err)
-
-	assert.Equal(t, smrS, loadSMR)
 }
 
-func TestRewardTx_GetRecvAddr(t *testing.T) {
+func TestRewardTx_CheckIntegrityShouldErr(t *testing.T) {
 	t.Parallel()
 
-	data := []byte("data")
-	scr := &rewardTx.RewardTx{RcvAddr: data}
+	rwdTx := &rewardTx.RewardTx{
+		Round: 19,
+	}
 
-	assert.Equal(t, data, scr.RcvAddr)
-}
+	err := rwdTx.CheckIntegrity()
+	assert.Equal(t, data.ErrNilRcvAddr, err)
 
-func TestRewardTx_GetValue(t *testing.T) {
-	t.Parallel()
+	rwdTx.RcvAddr = []byte("rcv-address")
 
-	value := big.NewInt(10)
-	scr := &rewardTx.RewardTx{Value: value}
+	err = rwdTx.CheckIntegrity()
+	assert.Equal(t, data.ErrNilValue, err)
 
-	assert.Equal(t, value, scr.Value)
-}
+	rwdTx.Value = big.NewInt(-1)
 
-func TestRewardTx_SetRecvAddr(t *testing.T) {
-	t.Parallel()
-
-	data := []byte("data")
-	scr := &rewardTx.RewardTx{}
-	scr.SetRecvAddress(data)
-
-	assert.Equal(t, data, scr.RcvAddr)
-}
-
-func TestRewardTx_SetValue(t *testing.T) {
-	t.Parallel()
-
-	value := big.NewInt(10)
-	scr := &rewardTx.RewardTx{}
-	scr.SetValue(value)
-
-	assert.Equal(t, value, scr.Value)
+	err = rwdTx.CheckIntegrity()
+	assert.Equal(t, data.ErrNegativeValue, err)
 }

@@ -2,39 +2,39 @@ package libp2p_test
 
 import (
 	"bytes"
-	"context"
-	"crypto/ecdsa"
 	"fmt"
-	"math/rand"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ElrondNetwork/elrond-go/config"
+	"github.com/ElrondNetwork/elrond-go/core"
 	"github.com/ElrondNetwork/elrond-go/p2p"
 	"github.com/ElrondNetwork/elrond-go/p2p/libp2p"
-	"github.com/ElrondNetwork/elrond-go/p2p/libp2p/discovery"
-	"github.com/ElrondNetwork/elrond-go/p2p/loadBalancer"
 	"github.com/ElrondNetwork/elrond-go/p2p/mock"
-	"github.com/btcsuite/btcd/btcec"
-	libp2pCrypto "github.com/libp2p/go-libp2p-core/crypto"
+	"github.com/ElrondNetwork/elrond-go/testscommon"
 	"github.com/stretchr/testify/assert"
 )
 
-func createMessenger(port int) p2p.Messenger {
-	r := rand.New(rand.NewSource(int64(port)))
-	prvKey, _ := ecdsa.GenerateKey(btcec.S256(), r)
-	sk := (*libp2pCrypto.Secp256k1PrivateKey)(prvKey)
+func createMessenger() p2p.Messenger {
+	args := libp2p.ArgsNetworkMessenger{
+		Marshalizer:   &testscommon.ProtoMarshalizerMock{},
+		ListenAddress: libp2p.ListenLocalhostAddrWithIp4AndTcp,
+		P2pConfig: config.P2PConfig{
+			Node: config.NodeConfig{
+				Port: "0",
+			},
+			KadDhtPeerDiscovery: config.KadDhtPeerDiscoveryConfig{
+				Enabled: false,
+			},
+			Sharding: config.ShardingConfig{
+				Type: p2p.NilListSharder,
+			},
+		},
+		SyncTimer: &libp2p.LocalSyncTimer{},
+	}
 
-	libP2PMes, err := libp2p.NewNetworkMessenger(
-		context.Background(),
-		port,
-		sk,
-		nil,
-		loadBalancer.NewOutgoingChannelLoadBalancer(),
-		discovery.NewNullDiscoverer(),
-		libp2p.ListenLocalhostAddrWithIp4AndTcp,
-	)
-
+	libP2PMes, err := libp2p.NewNetworkMessenger(args)
 	if err != nil {
 		fmt.Println(err.Error())
 	}
@@ -52,8 +52,8 @@ func TestIssueEN898_StreamResetError(t *testing.T) {
 		t.Skip("this is not a short test")
 	}
 
-	mes1 := createMessenger(23100)
-	mes2 := createMessenger(23101)
+	mes1 := createMessenger()
+	mes2 := createMessenger()
 
 	defer func() {
 		_ = mes1.Close()
@@ -80,7 +80,7 @@ func TestIssueEN898_StreamResetError(t *testing.T) {
 
 	_ = mes2.CreateTopic(topic, false)
 	_ = mes2.RegisterMessageProcessor(topic, &mock.MessageProcessorStub{
-		ProcessMessageCalled: func(message p2p.MessageP2P, _ func(buffToSend []byte)) error {
+		ProcessMessageCalled: func(message p2p.MessageP2P, _ core.PeerID) error {
 			if bytes.Equal(message.Data(), largePacket) {
 				largePacketReceived.Store(true)
 			}

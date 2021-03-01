@@ -2,8 +2,12 @@ package partitioning
 
 import (
 	"github.com/ElrondNetwork/elrond-go/core"
+	"github.com/ElrondNetwork/elrond-go/data/batch"
+	"github.com/ElrondNetwork/elrond-go/dataRetriever"
 	"github.com/ElrondNetwork/elrond-go/marshal"
 )
+
+var _ dataRetriever.DataPacker = (*SimpleDataPacker)(nil)
 
 // SimpleDataPacker can split a large slice of byte slices in chunks <= maxPacketSize
 // If one element still exceeds maxPacketSize, it will be returned alone
@@ -44,7 +48,7 @@ func (sdp *SimpleDataPacker) PackDataInChunks(data [][]byte, limit int) ([][]byt
 		isBuffToLarge := lenChunk+len(element) >= limit
 		chunkNotEmpty := len(currentChunk) > 0
 		if isBuffToLarge && chunkNotEmpty {
-			marshaledChunk, _ := sdp.marshalizer.Marshal(currentChunk)
+			marshaledChunk, _ := sdp.marshalizer.Marshal(&batch.Batch{Data: currentChunk})
 			returningBuff = append(returningBuff, marshaledChunk)
 			currentChunk = make([][]byte, 0)
 			lenChunk = 0
@@ -55,7 +59,7 @@ func (sdp *SimpleDataPacker) PackDataInChunks(data [][]byte, limit int) ([][]byt
 	}
 
 	if len(currentChunk) > 0 {
-		marshaledElements, err := sdp.marshalizer.Marshal(currentChunk)
+		marshaledElements, err := sdp.marshalizer.Marshal(&batch.Batch{Data: currentChunk})
 		if err != nil {
 			return nil, err
 		}
@@ -67,8 +71,5 @@ func (sdp *SimpleDataPacker) PackDataInChunks(data [][]byte, limit int) ([][]byt
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (sdp *SimpleDataPacker) IsInterfaceNil() bool {
-	if sdp == nil {
-		return true
-	}
-	return false
+	return sdp == nil
 }

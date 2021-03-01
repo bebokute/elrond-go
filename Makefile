@@ -1,3 +1,6 @@
+CURRENT_DIRECTORY := $(shell pwd)
+TESTS_TO_RUN := $(shell go list ./... | grep -v /integrationTests/ | grep -v /testscommon/ | grep -v mock | grep -v disabled)
+
 build:
 	go build ./...
 
@@ -8,10 +11,14 @@ clean-test:
 	go clean -testcache ./...
 
 clean: clean-test
+	go clean -cache ./...
 	go clean ./...
 
 test: clean-test
 	go test ./...
+
+test-serial: clean-test
+	go test -p 1 ./...
 
 test-short:
 	go test -short -count=1 ./...
@@ -49,5 +56,31 @@ test-agario-join-reward:
 test-miniblocks-sc-v:
 	go test -count=1 -v ./integrationTests/multiShard/block/executingMiniblocksSc_test.go
 
-cross:
-	./cross_build.sh
+test-arwen:
+	go test -count=1 -v ./integrationTests/vm/arwen/...
+
+test-coverage:
+	@echo "Running unit tests"
+	CURRENT_DIRECTORY=$(CURRENT_DIRECTORY) go test -cover -coverprofile=coverage.txt -covermode=atomic -v ${TESTS_TO_RUN}
+
+test-multishard-sc:
+	go test -count=1 -v ./integrationTests/multiShard/smartContract
+
+benchmark-arwen:
+	go test -v -count=1 -test.bench 'Benchmark_VmDeployWithFibbonacciAndExecute' -test.run='noruns' ./integrationTests/vm/arwen
+	go test -v -count=1 -test.bench 'Benchmark_VmDeployWithCPUCalculateAndExecute' -test.run='noruns' ./integrationTests/vm/arwen
+	go test -v -count=1 -test.bench 'Benchmark_VmDeployWithStringConcatAndExecute' -test.run='noruns' ./integrationTests/vm/arwen
+
+arwen:
+ifndef ARWEN_PATH
+	$(error ARWEN_PATH is undefined)
+endif
+	# When referencing a non-release version, add the commit hash, like this:
+	#go get github.com/ElrondNetwork/arwen-wasm-vm/cmd/arwen@...
+	#When referencing a released version, use this instead:
+	go get github.com/ElrondNetwork/arwen-wasm-vm/cmd/arwen@$(shell cat go.mod | grep arwen-wasm-vm | sed 's/.* //')
+	go build -o ${ARWEN_PATH} github.com/ElrondNetwork/arwen-wasm-vm/cmd/arwen
+	stat ${ARWEN_PATH}
+
+cli-docs:
+	cd ./cmd && bash ./CLI.md.sh

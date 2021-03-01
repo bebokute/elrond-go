@@ -1,19 +1,24 @@
 package containers
 
 import (
+	"fmt"
+
+	"github.com/ElrondNetwork/elrond-go/core/check"
+	"github.com/ElrondNetwork/elrond-go/core/container"
 	"github.com/ElrondNetwork/elrond-go/process"
-	"github.com/cornelk/hashmap"
 )
+
+var _ process.InterceptorsContainer = (*interceptorsContainer)(nil)
 
 // interceptorsContainer is an interceptors holder organized by type
 type interceptorsContainer struct {
-	objects *hashmap.HashMap
+	objects *container.MutexMap
 }
 
 // NewInterceptorsContainer will create a new instance of a container
 func NewInterceptorsContainer() *interceptorsContainer {
 	return &interceptorsContainer{
-		objects: &hashmap.HashMap{},
+		objects: container.NewMutexMap(),
 	}
 }
 
@@ -22,7 +27,7 @@ func NewInterceptorsContainer() *interceptorsContainer {
 func (ic *interceptorsContainer) Get(key string) (process.Interceptor, error) {
 	value, ok := ic.objects.Get(key)
 	if !ok {
-		return nil, process.ErrInvalidContainerKey
+		return nil, fmt.Errorf("%w in interceptors container for key %v", process.ErrInvalidContainerKey, key)
 	}
 
 	interceptor, ok := value.(process.Interceptor)
@@ -36,12 +41,11 @@ func (ic *interceptorsContainer) Get(key string) (process.Interceptor, error) {
 // Add will add an object at a given key. Returns
 // an error if the element already exists
 func (ic *interceptorsContainer) Add(key string, interceptor process.Interceptor) error {
-	if interceptor == nil || interceptor.IsInterfaceNil() {
+	if check.IfNil(interceptor) {
 		return process.ErrNilContainerElement
 	}
 
 	ok := ic.objects.Insert(key, interceptor)
-
 	if !ok {
 		return process.ErrContainerKeyAlreadyExists
 	}
@@ -57,6 +61,10 @@ func (ic *interceptorsContainer) AddMultiple(keys []string, interceptors []proce
 	}
 
 	for idx, key := range keys {
+		if len(key) == 0 {
+			continue
+		}
+
 		err := ic.Add(key, interceptors[idx])
 		if err != nil {
 			return err
@@ -68,7 +76,7 @@ func (ic *interceptorsContainer) AddMultiple(keys []string, interceptors []proce
 
 // Replace will add (or replace if it already exists) an object at a given key
 func (ic *interceptorsContainer) Replace(key string, interceptor process.Interceptor) error {
-	if interceptor == nil || interceptor.IsInterfaceNil() {
+	if check.IfNil(interceptor) {
 		return process.ErrNilContainerElement
 	}
 
@@ -78,7 +86,7 @@ func (ic *interceptorsContainer) Replace(key string, interceptor process.Interce
 
 // Remove will remove an object at a given key
 func (ic *interceptorsContainer) Remove(key string) {
-	ic.objects.Del(key)
+	ic.objects.Remove(key)
 }
 
 // Len returns the length of the added objects
@@ -86,10 +94,36 @@ func (ic *interceptorsContainer) Len() int {
 	return ic.objects.Len()
 }
 
+// Iterate will call the provided handler for each and every key-value pair
+func (ic *interceptorsContainer) Iterate(handler func(key string, interceptor process.Interceptor) bool) {
+	if handler == nil {
+		return
+	}
+
+	for _, keyVal := range ic.objects.Keys() {
+		key, ok := keyVal.(string)
+		if !ok {
+			continue
+		}
+
+		val, ok := ic.objects.Get(key)
+		if !ok {
+			continue
+		}
+
+		interceptor, ok := val.(process.Interceptor)
+		if !ok {
+			continue
+		}
+
+		shouldContinue := handler(key, interceptor)
+		if !shouldContinue {
+			return
+		}
+	}
+}
+
 // IsInterfaceNil returns true if there is no value under the interface
 func (ic *interceptorsContainer) IsInterfaceNil() bool {
-	if ic == nil {
-		return true
-	}
-	return false
+	return ic == nil
 }

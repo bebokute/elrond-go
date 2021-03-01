@@ -1,17 +1,17 @@
 package mock
 
 import (
-	"crypto/cipher"
-
 	"github.com/ElrondNetwork/elrond-go/crypto"
 )
 
+// PointMock represents a mock implementation for a Point
 type PointMock struct {
 	X int
 	Y int
 
-	MarshalBinaryStub   func(x, y int) ([]byte, error)
-	UnmarshalBinaryStub func([]byte) (x, y int, err error)
+	GetUnderlyingObjStub func() interface{}
+	MarshalBinaryStub    func(x, y int) ([]byte, error)
+	UnmarshalBinaryStub  func([]byte) (x, y int, err error)
 }
 
 // Equal tests if receiver is equal with the Point p given as parameter.
@@ -44,7 +44,7 @@ func (po *PointMock) Base() crypto.Point {
 }
 
 // Set sets the receiver equal to another Point p.
-func (po *PointMock) Set(p crypto.Point) error {
+func (po *PointMock) Set(_ crypto.Point) error {
 	panic("implement me")
 }
 
@@ -55,13 +55,13 @@ func (po *PointMock) Clone() crypto.Point {
 
 // Add returns the result of adding receiver with Point p given as parameter,
 // so that their scalars add homomorphically
-func (po *PointMock) Add(p crypto.Point) (crypto.Point, error) {
+func (po *PointMock) Add(_ crypto.Point) (crypto.Point, error) {
 	panic("implement me")
 }
 
 // Sub returns the result of subtracting from receiver the Point p given as parameter,
 // so that their scalars subtract homomorphically
-func (po *PointMock) Sub(p crypto.Point) (crypto.Point, error) {
+func (po *PointMock) Sub(_ crypto.Point) (crypto.Point, error) {
 	panic("implement me")
 }
 
@@ -90,12 +90,15 @@ func (po *PointMock) Mul(s crypto.Scalar) (crypto.Point, error) {
 }
 
 // Pick returns a fresh random or pseudo-random Point.
-func (po *PointMock) Pick(rand cipher.Stream) (crypto.Point, error) {
+func (po *PointMock) Pick() (crypto.Point, error) {
 	panic("implement me")
 }
 
 // GetUnderlyingObj returns the object the implementation wraps
 func (po *PointMock) GetUnderlyingObj() interface{} {
+	if po.GetUnderlyingObjStub != nil {
+		return po.GetUnderlyingObjStub()
+	}
 	return 0
 }
 
@@ -115,8 +118,5 @@ func (po *PointMock) UnmarshalBinary(point []byte) error {
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (po *PointMock) IsInterfaceNil() bool {
-	if po == nil {
-		return true
-	}
-	return false
+	return po == nil
 }

@@ -3,18 +3,29 @@
 #NodeConfig holds the P2P settings
 [Node]
     #Port is the port that will be opened by the node on all interfaces so other peers can connect to it
-    Port = 10000
+    #Can use single values such as 0, 10230, 15670 or a range such as 5000-10000
+    Port = "10000"
 
     #Seed represents the seed string generator for p2p identity (used during authentication and message passing).
     #An empty Seed value will mean that the identity will be generated randomly in a secure cryptographically manner.
     #The seed provided in this string can be of any length.
     #########################################################################################
-    # WARNING! For security reasons, one might use a generated string as long as possible!  #
-    # It is recommended that the seed field should remain empty (no characters between "")  #
+    # WARNING! FOR SECURITY REASONS, ONE MIGHT USE A GENERATED STRING AS LONG AS POSSIBLE!  #
+    # IT IS RECOMMENDED THAT THE SEED FIELD SHOULD REMAIN EMPTY (NO CHARACTERS BETWEEN "")  #
+    # THIS SEED WILL BE USED FOR P2P'S PRIVATE KEY GENERATION. SAME SEED USED WILL LEAD TO  #
+    # THE GENERATION OF THE SAME P2P IDENTITY.                                              #
+    # SPECIFY A SEED VALUE IF YOU KNOW WHAT YOU ARE DOING!                                  #
     #########################################################################################
     #The seed provided will be hashed using SHA256 and the resulting 32 byte length byte array will be used in
     #p2p identity generation
     Seed = "seed"
+
+    # The maximum peers that will connect to this node
+    MaximumExpectedPeerCount = 1024
+
+    #ThresholdMinConnectedPeers can be any value when used in conjunction with a seednode because the seednode does
+    #not have a sync and consensus mechanism. Default is 0.
+    ThresholdMinConnectedPeers = 0
 
 # P2P peer discovery section
 
@@ -27,11 +38,11 @@
     Enabled = true
 
     #RefreshIntervalInSec represents the time in seconds between querying for new peers
-    RefreshIntervalInSec = 2
+    RefreshIntervalInSec = 10
 
-    #RandezVous represents the meeting point that this node will advertize itself
-    #To connect to other nodes, those nodes should have the same RandezVous string
-    RandezVous = "elrond"
+    #ProtocolID represents the protocol that this node will advertize to other peers
+    #To connect to other nodes, those nodes should have the same ProtocolID string
+    ProtocolID = "/erd/kad/1.0.0"
 
     #InitialPeerList represents the list of strings of some known nodes that will bootstrap this node
     #The address will be in a self-describing addressing format.
@@ -44,3 +55,21 @@
     #If the initial peers list is left empty, the node will not try to connect to other peers during initial bootstrap
     #phase but will accept connections and will do the network discovery if another peer connects to it
    InitialPeerList = []
+
+   #kademlia's routing table bucket size
+   BucketSize = 100
+
+   #RoutingTableRefreshIntervalInSec defines how many seconds should pass between 2 kad routing table auto refresh calls
+   RoutingTableRefreshIntervalInSec = 300
+
+[Sharding]
+    # The targeted number of peer connections
+    TargetPeerCount = 0
+    MaxIntraShard = 0
+    MaxCrossShard = 0
+    #available options:
+    #  `ListsSharder` will split the peers based on the shard membership (intra, cross or unknown)
+    #  `OneListSharder` will do just the connection triming (upto TargetPeerCount value) not taking into account
+    #              the shard membership of the connected peers
+    #  `NilListSharder` will disable conection trimming (sharder is off)
+    Type = "NilListSharder"

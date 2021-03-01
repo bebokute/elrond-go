@@ -5,11 +5,11 @@ import (
 	"github.com/ElrondNetwork/elrond-go/consensus/broadcast"
 	"github.com/ElrondNetwork/elrond-go/consensus/spos"
 	"github.com/ElrondNetwork/elrond-go/consensus/spos/bls"
-	"github.com/ElrondNetwork/elrond-go/consensus/spos/bn"
 	"github.com/ElrondNetwork/elrond-go/core"
-	"github.com/ElrondNetwork/elrond-go/core/indexer"
 	"github.com/ElrondNetwork/elrond-go/crypto"
+	"github.com/ElrondNetwork/elrond-go/hashing"
 	"github.com/ElrondNetwork/elrond-go/marshal"
+	"github.com/ElrondNetwork/elrond-go/process"
 	"github.com/ElrondNetwork/elrond-go/sharding"
 )
 
@@ -20,12 +20,19 @@ func GetSubroundsFactory(
 	worker spos.WorkerHandler,
 	consensusType string,
 	appStatusHandler core.AppStatusHandler,
-	indexer indexer.Indexer,
+	indexer process.Indexer,
+	chainID []byte,
+	currentPid core.PeerID,
 ) (spos.SubroundsFactory, error) {
-
 	switch consensusType {
 	case blsConsensusType:
-		subRoundFactoryBls, err := bls.NewSubroundsFactory(consensusDataContainer, consensusState, worker)
+		subRoundFactoryBls, err := bls.NewSubroundsFactory(
+			consensusDataContainer,
+			consensusState,
+			worker,
+			chainID,
+			currentPid,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -38,23 +45,9 @@ func GetSubroundsFactory(
 		subRoundFactoryBls.SetIndexer(indexer)
 
 		return subRoundFactoryBls, nil
-	case bnConsensusType:
-		subRoundFactoryBn, err := bn.NewSubroundsFactory(consensusDataContainer, consensusState, worker)
-		if err != nil {
-			return nil, err
-		}
-
-		err = subRoundFactoryBn.SetAppStatusHandler(appStatusHandler)
-		if err != nil {
-			return nil, err
-		}
-
-		subRoundFactoryBn.SetIndexer(indexer)
-
-		return subRoundFactoryBn, nil
+	default:
+		return nil, ErrInvalidConsensusType
 	}
-
-	return nil, ErrInvalidConsensusType
 }
 
 // GetConsensusCoreFactory returns a consensus service depending of the given parameter
@@ -62,28 +55,50 @@ func GetConsensusCoreFactory(consensusType string) (spos.ConsensusService, error
 	switch consensusType {
 	case blsConsensusType:
 		return bls.NewConsensusService()
-	case bnConsensusType:
-		return bn.NewConsensusService()
+	default:
+		return nil, ErrInvalidConsensusType
 	}
-
-	return nil, ErrInvalidConsensusType
 }
 
 // GetBroadcastMessenger returns a consensus service depending of the given parameter
 func GetBroadcastMessenger(
 	marshalizer marshal.Marshalizer,
+	hasher hashing.Hasher,
 	messenger consensus.P2PMessenger,
 	shardCoordinator sharding.Coordinator,
 	privateKey crypto.PrivateKey,
-	singleSigner crypto.SingleSigner,
+	peerSignatureHandler crypto.PeerSignatureHandler,
+	headersSubscriber consensus.HeadersPoolSubscriber,
+	interceptorsContainer process.InterceptorsContainer,
 ) (consensus.BroadcastMessenger, error) {
 
-	if shardCoordinator.SelfId() < shardCoordinator.NumberOfShards() {
-		return broadcast.NewShardChainMessenger(marshalizer, messenger, privateKey, shardCoordinator, singleSigner)
+	commonMessengerArgs := broadcast.CommonMessengerArgs{
+		Marshalizer:                marshalizer,
+		Hasher:                     hasher,
+		Messenger:                  messenger,
+		PrivateKey:                 privateKey,
+		ShardCoordinator:           shardCoordinator,
+		PeerSignatureHandler:       peerSignatureHandler,
+		HeadersSubscriber:          headersSubscriber,
+		MaxDelayCacheSize:          maxDelayCacheSize,
+		MaxValidatorDelayCacheSize: maxDelayCacheSize,
+		InterceptorsContainer:      interceptorsContainer,
 	}
 
-	if shardCoordinator.SelfId() == sharding.MetachainShardId {
-		return broadcast.NewMetaChainMessenger(marshalizer, messenger, privateKey, shardCoordinator, singleSigner)
+	if shardCoordinator.SelfId() < shardCoordinator.NumberOfShards() {
+		shardMessengerArgs := broadcast.ShardChainMessengerArgs{
+			CommonMessengerArgs: commonMessengerArgs,
+		}
+
+		return broadcast.NewShardChainMessenger(shardMessengerArgs)
+	}
+
+	if shardCoordinator.SelfId() == core.MetachainShardId {
+		metaMessengerArgs := broadcast.MetaChainMessengerArgs{
+			CommonMessengerArgs: commonMessengerArgs,
+		}
+
+		return broadcast.NewMetaChainMessenger(metaMessengerArgs)
 	}
 
 	return nil, ErrInvalidShardId

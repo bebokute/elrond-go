@@ -4,7 +4,7 @@ import (
 	"github.com/ElrondNetwork/elrond-go/core"
 )
 
-var maxSpeedHistorySaved = 1000
+var maxSpeedHistorySaved = 2000
 
 // GetNonce will return current nonce of node
 func (psh *PresenterStatusHandler) GetNonce() uint64 {
@@ -58,10 +58,14 @@ func (psh *PresenterStatusHandler) GetCurrentRound() uint64 {
 
 // CalculateTimeToSynchronize will calculate and return an estimation of
 // the time required for synchronization in a human friendly format
-func (psh *PresenterStatusHandler) CalculateTimeToSynchronize() string {
-	currentBlock := psh.GetNonce()
+func (psh *PresenterStatusHandler) CalculateTimeToSynchronize(numMillisecondsRefreshTime int) string {
+	if numMillisecondsRefreshTime < 1 {
+		return "N/A"
+	}
 
-	numsynchronizationSpeedHistory := len(psh.synchronizationSpeedHistory)
+	currentSynchronizedRound := psh.GetSynchronizedRound()
+
+	numSynchronizationSpeedHistory := len(psh.synchronizationSpeedHistory)
 
 	sum := uint64(0)
 	for i := 0; i < len(psh.synchronizationSpeedHistory); i++ {
@@ -69,40 +73,67 @@ func (psh *PresenterStatusHandler) CalculateTimeToSynchronize() string {
 	}
 
 	speed := float64(0)
-	if numsynchronizationSpeedHistory > 0 {
-		speed = float64(sum) / float64(numsynchronizationSpeedHistory)
+	if numSynchronizationSpeedHistory > 0 {
+		speed = float64(sum*1000) / float64(numSynchronizationSpeedHistory*numMillisecondsRefreshTime)
 	}
 
-	probableHighestNonce := psh.GetProbableHighestNonce()
-	remainingBlocksToSynchronize := probableHighestNonce - currentBlock
-	timeEstimationSeconds := float64(remainingBlocksToSynchronize) / speed
+	currentRound := psh.GetCurrentRound()
+	if currentRound < currentSynchronizedRound || speed == 0 {
+		return ""
+	}
+
+	remainingRoundsToSynchronize := currentRound - currentSynchronizedRound
+	timeEstimationSeconds := float64(remainingRoundsToSynchronize) / speed
 	remainingTime := core.SecondsToHourMinSec(int(timeEstimationSeconds))
 
 	return remainingTime
 }
 
 // CalculateSynchronizationSpeed will calculate and return speed of synchronization
-// how many block per second are synchronized
-func (psh *PresenterStatusHandler) CalculateSynchronizationSpeed() uint64 {
-	currentBlock := psh.GetNonce()
-	if psh.oldNonce == 0 {
-		psh.oldNonce = currentBlock
+// how many blocks per second are synchronized
+func (psh *PresenterStatusHandler) CalculateSynchronizationSpeed(numMillisecondsRefreshTime int) uint64 {
+	currentSynchronizedRound := psh.GetSynchronizedRound()
+	if psh.oldRound == 0 {
+		psh.oldRound = currentSynchronizedRound
 		return 0
 	}
 
-	blocksPerSecond := int64(currentBlock - psh.oldNonce)
-	if blocksPerSecond < 0 {
-		blocksPerSecond = 0
+	roundsPerSecond := int64(currentSynchronizedRound - psh.oldRound)
+	if roundsPerSecond < 0 {
+		roundsPerSecond = 0
 	}
 
 	if len(psh.synchronizationSpeedHistory) >= maxSpeedHistorySaved {
 		psh.synchronizationSpeedHistory = psh.synchronizationSpeedHistory[1:len(psh.synchronizationSpeedHistory)]
 	}
-	psh.synchronizationSpeedHistory = append(psh.synchronizationSpeedHistory, uint64(blocksPerSecond))
+	psh.synchronizationSpeedHistory = append(psh.synchronizationSpeedHistory, uint64(roundsPerSecond))
 
-	psh.oldNonce = currentBlock
+	psh.oldRound = currentSynchronizedRound
 
-	return uint64(blocksPerSecond)
+	numSyncedBlocks := uint64(0)
+	cumulatedTime := uint64(0)
+	lastIndex := len(psh.synchronizationSpeedHistory) - 1
+	millisecondsInASecond := uint64(1000)
+	for {
+		if lastIndex < 0 {
+			break
+		}
+		if cumulatedTime >= millisecondsInASecond {
+			break
+		}
+
+		numSyncedBlocks += psh.synchronizationSpeedHistory[lastIndex]
+		lastIndex--
+		cumulatedTime += uint64(numMillisecondsRefreshTime)
+	}
+	if cumulatedTime == 0 || numSyncedBlocks == 0 {
+		return 0
+	}
+
+	timeAdjustment := float64(millisecondsInASecond) / float64(cumulatedTime)
+	syncedBlocksAdjustment := timeAdjustment * float64(numSyncedBlocks)
+
+	return uint64(syncedBlocksAdjustment)
 }
 
 // GetNumTxProcessed will return number of processed transactions since node starts
@@ -118,4 +149,28 @@ func (psh *PresenterStatusHandler) GetNumShardHeadersInPool() uint64 {
 // GetNumShardHeadersProcessed will return number of shard header processed until now
 func (psh *PresenterStatusHandler) GetNumShardHeadersProcessed() uint64 {
 	return psh.getFromCacheAsUint64(core.MetricNumShardHeadersProcessed)
+}
+
+// GetEpochInfo will return information about current epoch
+func (psh *PresenterStatusHandler) GetEpochInfo() (uint64, uint64, int, string) {
+	roundAtEpochStart := psh.getFromCacheAsUint64(core.MetricRoundAtEpochStart)
+	roundsPerEpoch := psh.getFromCacheAsUint64(core.MetricRoundsPerEpoch)
+	currentRound := psh.getFromCacheAsUint64(core.MetricCurrentRound)
+	roundDuration := psh.getFromCacheAsUint64(core.MetricRoundDuration)
+
+	epochFinishRound := roundAtEpochStart + roundsPerEpoch
+	roundsRemained := epochFinishRound - currentRound
+	if epochFinishRound < currentRound {
+		roundsRemained = 0
+	}
+	if roundsRemained <= 0 || roundsPerEpoch == 0 || roundDuration == 0 {
+		return 0, 0, 0, ""
+	}
+	secondsRemainedInEpoch := roundsRemained * roundDuration / 1000
+
+	remainingTime := core.SecondsToHourMinSec(int(secondsRemainedInEpoch))
+
+	epochLoadPercent := 100 - int(float64(roundsRemained)/float64(roundsPerEpoch)*100.0)
+
+	return currentRound, epochFinishRound, epochLoadPercent, remainingTime
 }

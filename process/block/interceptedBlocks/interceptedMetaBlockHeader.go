@@ -1,20 +1,30 @@
 package interceptedBlocks
 
 import (
+	"fmt"
+
+	"github.com/ElrondNetwork/elrond-go/core"
 	"github.com/ElrondNetwork/elrond-go/data"
 	"github.com/ElrondNetwork/elrond-go/data/block"
 	"github.com/ElrondNetwork/elrond-go/hashing"
 	"github.com/ElrondNetwork/elrond-go/marshal"
+	"github.com/ElrondNetwork/elrond-go/process"
 	"github.com/ElrondNetwork/elrond-go/sharding"
 )
 
+var _ process.HdrValidatorHandler = (*InterceptedMetaHeader)(nil)
+var _ process.InterceptedData = (*InterceptedMetaHeader)(nil)
+
 // InterceptedMetaHeader represents the wrapper over the meta block header struct
 type InterceptedMetaHeader struct {
-	hdr              *block.MetaBlock
-	sigVerifier      *headerMultiSigVerifier
-	hasher           hashing.Hasher
-	shardCoordinator sharding.Coordinator
-	hash             []byte
+	hdr               *block.MetaBlock
+	sigVerifier       process.InterceptedHeaderSigVerifier
+	integrityVerifier process.HeaderIntegrityVerifier
+	hasher            hashing.Hasher
+	shardCoordinator  sharding.Coordinator
+	hash              []byte
+	validityAttester  process.ValidityAttester
+	epochStartTrigger process.EpochStartTriggerHandler
 }
 
 // NewInterceptedMetaHeader creates a new instance of InterceptedMetaHeader struct
@@ -29,21 +39,15 @@ func NewInterceptedMetaHeader(arg *ArgInterceptedBlockHeader) (*InterceptedMetaH
 		return nil, err
 	}
 
-	sigVerifier := &headerMultiSigVerifier{
-		marshalizer:      arg.Marshalizer,
-		hasher:           arg.Hasher,
-		nodesCoordinator: arg.NodesCoordinator,
-		multiSigVerifier: arg.MultiSigVerifier,
-	}
-
 	inHdr := &InterceptedMetaHeader{
-		hdr:              hdr,
-		hasher:           arg.Hasher,
-		sigVerifier:      sigVerifier,
-		shardCoordinator: arg.ShardCoordinator,
+		hdr:               hdr,
+		hasher:            arg.Hasher,
+		sigVerifier:       arg.HeaderSigVerifier,
+		integrityVerifier: arg.HeaderIntegrityVerifier,
+		shardCoordinator:  arg.ShardCoordinator,
+		validityAttester:  arg.ValidityAttester,
+		epochStartTrigger: arg.EpochStartTrigger,
 	}
-	//wire-up the "virtual" function
-	inHdr.sigVerifier.copyHeaderWithoutSig = inHdr.copyHeaderWithoutSig
 	inHdr.processFields(arg.HdrBuff)
 
 	return inHdr, nil
@@ -52,7 +56,6 @@ func NewInterceptedMetaHeader(arg *ArgInterceptedBlockHeader) (*InterceptedMetaH
 func createMetaHdr(marshalizer marshal.Marshalizer, hdrBuff []byte) (*block.MetaBlock, error) {
 	hdr := &block.MetaBlock{
 		ShardInfo: make([]block.ShardData, 0),
-		PeerInfo:  make([]block.PeerData, 0),
 	}
 	err := marshalizer.Unmarshal(hdr, hdrBuff)
 	if err != nil {
@@ -60,17 +63,6 @@ func createMetaHdr(marshalizer marshal.Marshalizer, hdrBuff []byte) (*block.Meta
 	}
 
 	return hdr, nil
-}
-
-func (imh *InterceptedMetaHeader) copyHeaderWithoutSig(header data.HeaderHandler) data.HeaderHandler {
-	//it is virtually impossible here to have a wrong type assertion case
-	hdr := header.(*block.MetaBlock)
-
-	headerCopy := *hdr
-	headerCopy.Signature = nil
-	headerCopy.PubKeysBitmap = nil
-
-	return &headerCopy
 }
 
 func (imh *InterceptedMetaHeader) processFields(txBuff []byte) {
@@ -94,7 +86,29 @@ func (imh *InterceptedMetaHeader) CheckValidity() error {
 		return err
 	}
 
-	return imh.sigVerifier.verifySig(imh.hdr)
+	if !imh.validityAttester.CheckBlockAgainstWhitelist(imh) {
+		err = imh.validityAttester.CheckBlockAgainstFinal(imh.HeaderHandler())
+		if err != nil {
+			return err
+		}
+	}
+
+	err = imh.validityAttester.CheckBlockAgainstRounder(imh.HeaderHandler())
+	if err != nil {
+		return err
+	}
+
+	err = imh.sigVerifier.VerifyRandSeedAndLeaderSignature(imh.hdr)
+	if err != nil {
+		return err
+	}
+
+	err = imh.sigVerifier.VerifySignature(imh.hdr)
+	if err != nil {
+		return err
+	}
+
+	return imh.integrityVerifier.Verify(imh.hdr)
 }
 
 // integrity checks the integrity of the meta header block wrapper
@@ -117,10 +131,29 @@ func (imh *InterceptedMetaHeader) IsForCurrentShard() bool {
 	return true
 }
 
+// Type returns the type of this intercepted data
+func (imh *InterceptedMetaHeader) Type() string {
+	return "intercepted meta header"
+}
+
+// String returns the meta header's most important fields as string
+func (imh *InterceptedMetaHeader) String() string {
+	return fmt.Sprintf("epoch=%d, round=%d, nonce=%d",
+		imh.hdr.Epoch,
+		imh.hdr.Round,
+		imh.hdr.Nonce,
+	)
+}
+
+// Identifiers returns the identifiers used in requests
+func (imh *InterceptedMetaHeader) Identifiers() [][]byte {
+	keyNonce := []byte(fmt.Sprintf("%d-%d", core.MetachainShardId, imh.hdr.Nonce))
+	keyEpoch := []byte(core.EpochStartIdentifier(imh.hdr.Epoch))
+
+	return [][]byte{imh.hash, keyNonce, keyEpoch}
+}
+
 // IsInterfaceNil returns true if there is no value under the interface
 func (imh *InterceptedMetaHeader) IsInterfaceNil() bool {
-	if imh == nil {
-		return true
-	}
-	return false
+	return imh == nil
 }

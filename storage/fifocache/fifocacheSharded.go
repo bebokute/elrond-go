@@ -3,11 +3,14 @@ package fifocache
 import (
 	"sync"
 
-	"github.com/ElrondNetwork/concurrent-map"
-	"github.com/ElrondNetwork/elrond-go/core/logger"
+	cmap "github.com/ElrondNetwork/concurrent-map"
+	logger "github.com/ElrondNetwork/elrond-go-logger"
+	"github.com/ElrondNetwork/elrond-go/storage"
 )
 
-var log = logger.DefaultLogger()
+var _ storage.Cacher = (*FIFOShardedCache)(nil)
+
+var log = logger.GetOrCreate("storage/fifocache")
 
 // FIFOShardedCache implements a First In First Out eviction cache
 type FIFOShardedCache struct {
@@ -15,7 +18,7 @@ type FIFOShardedCache struct {
 	maxsize int
 
 	mutAddedDataHandlers sync.RWMutex
-	addedDataHandlers    []func(key []byte)
+	mapDataHandlers      map[string]func(key []byte, value interface{})
 }
 
 // NewShardedCache creates a new cache instance
@@ -25,7 +28,7 @@ func NewShardedCache(size int, shards int) (*FIFOShardedCache, error) {
 		cache:                cache,
 		maxsize:              size,
 		mutAddedDataHandlers: sync.RWMutex{},
-		addedDataHandlers:    make([]func(key []byte), 0),
+		mapDataHandlers:      make(map[string]func(key []byte, value interface{})),
 	}
 
 	return fifoShardedCache, nil
@@ -40,22 +43,30 @@ func (c *FIFOShardedCache) Clear() {
 }
 
 // Put adds a value to the cache.  Returns true if an eviction occurred.
-func (c *FIFOShardedCache) Put(key []byte, value interface{}) (evicted bool) {
+// the int parameter for size is not used as, for now, fifo sharded cache can not count for its contained data size
+func (c *FIFOShardedCache) Put(key []byte, value interface{}, _ int) (evicted bool) {
 	c.cache.Set(string(key), value)
-	c.callAddedDataHandlers(key)
+	c.callAddedDataHandlers(key, value)
 
 	return true
 }
 
 // RegisterHandler registers a new handler to be called when a new data is added
-func (c *FIFOShardedCache) RegisterHandler(handler func(key []byte)) {
+func (c *FIFOShardedCache) RegisterHandler(handler func(key []byte, value interface{}), id string) {
 	if handler == nil {
 		log.Error("attempt to register a nil handler to a cacher object")
 		return
 	}
 
 	c.mutAddedDataHandlers.Lock()
-	c.addedDataHandlers = append(c.addedDataHandlers, handler)
+	c.mapDataHandlers[id] = handler
+	c.mutAddedDataHandlers.Unlock()
+}
+
+// UnRegisterHandler removes the handler from the list
+func (c *FIFOShardedCache) UnRegisterHandler(id string) {
+	c.mutAddedDataHandlers.Lock()
+	delete(c.mapDataHandlers, id)
 	c.mutAddedDataHandlers.Unlock()
 }
 
@@ -76,23 +87,23 @@ func (c *FIFOShardedCache) Peek(key []byte) (value interface{}, ok bool) {
 	return c.cache.Get(string(key))
 }
 
-// HasOrAdd checks if a key is in the cache  without updating the
-// recent-ness or deleting it for being stale,  and if not, adds the value.
-// Returns whether found and whether an eviction occurred.
-func (c *FIFOShardedCache) HasOrAdd(key []byte, value interface{}) (found, evicted bool) {
-	added := c.cache.SetIfAbsent(string(key), value)
+// HasOrAdd checks if a key is in the cache without updating the
+// recent-ness or deleting it for being stale, and if not, adds the value.
+// Returns whether the item existed before and whether it has been added.
+func (c *FIFOShardedCache) HasOrAdd(key []byte, value interface{}, _ int) (has, added bool) {
+	added = c.cache.SetIfAbsent(string(key), value)
 
 	if added {
-		c.callAddedDataHandlers(key)
+		c.callAddedDataHandlers(key, value)
 	}
 
-	return !added, true
+	return !added, added
 }
 
-func (c *FIFOShardedCache) callAddedDataHandlers(key []byte) {
+func (c *FIFOShardedCache) callAddedDataHandlers(key []byte, value interface{}) {
 	c.mutAddedDataHandlers.RLock()
-	for _, handler := range c.addedDataHandlers {
-		go handler(key)
+	for _, handler := range c.mapDataHandlers {
+		go handler(key, value)
 	}
 	c.mutAddedDataHandlers.RUnlock()
 }
@@ -100,12 +111,6 @@ func (c *FIFOShardedCache) callAddedDataHandlers(key []byte) {
 // Remove removes the provided key from the cache.
 func (c *FIFOShardedCache) Remove(key []byte) {
 	c.cache.Remove(string(key))
-}
-
-// RemoveOldest removes the oldest item from the cache.
-func (c *FIFOShardedCache) RemoveOldest() {
-	// nothing to do, oldest is automatically removed when adding a new item.
-	log.Warn("remove oldest item not done, oldest item will be automatically cleared on reaching capacity")
 }
 
 // Keys returns a slice of the keys in the cache, from oldest to newest.
@@ -132,8 +137,5 @@ func (c *FIFOShardedCache) MaxSize() int {
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (c *FIFOShardedCache) IsInterfaceNil() bool {
-	if c == nil {
-		return true
-	}
-	return false
+	return c == nil
 }

@@ -4,10 +4,10 @@ package view
 type Presenter interface {
 	GetAppVersion() string
 	GetNodeName() string
-	GetPublicKeyTxSign() string
 	GetPublicKeyBlockSign() string
 	GetShardId() uint64
 	GetNodeType() string
+	GetPeerType() string
 	GetCountConsensus() uint64
 	GetCountConsensusAcceptedBlocks() uint64
 	GetCountLeader() uint64
@@ -40,17 +40,23 @@ type Presenter interface {
 	GetLogLines() []string
 	GetNumTxProcessed() uint64
 	GetCurrentBlockHash() string
-	CalculateTimeToSynchronize() string
-	CalculateSynchronizationSpeed() uint64
+	GetEpochNumber() uint64
+	GetEpochInfo() (uint64, uint64, int, string)
+	CalculateTimeToSynchronize(numMillisecondsRefreshTime int) string
+	CalculateSynchronizationSpeed(numMillisecondsRefreshTime int) uint64
 	GetCurrentRoundTimestamp() uint64
 	GetBlockSize() uint64
 	GetNumShardHeadersInPool() uint64
 	GetNumShardHeadersProcessed() uint64
-	GetHighestFinalBlockInShard() uint64
+	GetHighestFinalBlock() uint64
 	CheckSoftwareVersion() (bool, string)
+
+	GetNetworkSentBytesInEpoch() uint64
+	GetNetworkReceivedBytesInEpoch() uint64
 
 	GetTotalRewardsValue() (string, string)
 	CalculateRewardsPerHour() string
+	GetZeros() string
 
 	// IsInterfaceNil returns true if there is no value under the interface
 	IsInterfaceNil() bool

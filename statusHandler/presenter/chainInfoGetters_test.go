@@ -127,10 +127,10 @@ func TestPresenterStatusHandler_CalculateTimeToSynchronize(t *testing.T) {
 	presenterStatusHandler := NewPresenterStatusHandler()
 
 	time.Sleep(time.Second)
-	presenterStatusHandler.SetUInt64Value(core.MetricNonce, currentBlockNonce)
-	presenterStatusHandler.SetUInt64Value(core.MetricProbableHighestNonce, probableHighestNonce)
+	presenterStatusHandler.SetUInt64Value(core.MetricSynchronizedRound, currentBlockNonce)
+	presenterStatusHandler.SetUInt64Value(core.MetricCurrentRound, probableHighestNonce)
 	presenterStatusHandler.synchronizationSpeedHistory = append(presenterStatusHandler.synchronizationSpeedHistory, synchronizationSpeed)
-	synchronizationEstimation := presenterStatusHandler.CalculateTimeToSynchronize()
+	synchronizationEstimation := presenterStatusHandler.CalculateTimeToSynchronize(1000)
 
 	// Node needs to synchronize 190 blocks and synchronization speed is 10 blocks/s
 	// Synchronization estimation will be equals with ((200-10)/10) seconds
@@ -146,12 +146,27 @@ func TestPresenterStatusHandler_CalculateSynchronizationSpeed(t *testing.T) {
 	initialNonce := uint64(10)
 	currentNonce := uint64(20)
 	presenterStatusHandler := NewPresenterStatusHandler()
-	presenterStatusHandler.SetUInt64Value(core.MetricNonce, initialNonce)
-	syncSpeed := presenterStatusHandler.CalculateSynchronizationSpeed()
-	presenterStatusHandler.SetUInt64Value(core.MetricNonce, currentNonce)
-	syncSpeed = presenterStatusHandler.CalculateSynchronizationSpeed()
+	presenterStatusHandler.SetUInt64Value(core.MetricSynchronizedRound, initialNonce)
+	_ = presenterStatusHandler.CalculateSynchronizationSpeed(1000)
+	presenterStatusHandler.SetUInt64Value(core.MetricSynchronizedRound, currentNonce)
+	syncSpeed := presenterStatusHandler.CalculateSynchronizationSpeed(1000)
 
 	expectedSpeed := currentNonce - initialNonce
+	assert.Equal(t, expectedSpeed, syncSpeed)
+}
+
+func TestPresenterStatusHandler_CalculateSynchronizationSpeedMultipleRoundsPerSecond(t *testing.T) {
+	t.Parallel()
+
+	initialNonce := uint64(10)
+	currentNonce := uint64(20)
+	presenterStatusHandler := NewPresenterStatusHandler()
+	presenterStatusHandler.SetUInt64Value(core.MetricSynchronizedRound, initialNonce)
+	_ = presenterStatusHandler.CalculateSynchronizationSpeed(100)
+	presenterStatusHandler.SetUInt64Value(core.MetricSynchronizedRound, currentNonce)
+	syncSpeed := presenterStatusHandler.CalculateSynchronizationSpeed(100)
+
+	expectedSpeed := 10 * (currentNonce - initialNonce)
 	assert.Equal(t, expectedSpeed, syncSpeed)
 }
 
@@ -186,4 +201,26 @@ func TestNewPresenterStatusHandler_GetNumShardHeadersProcessed(t *testing.T) {
 	result := presenterStatusHandler.GetNumShardHeadersProcessed()
 
 	assert.Equal(t, numShardHeadersProcessed, result)
+}
+
+func TestPresenterStatusHandler_GetEpochInfo(t *testing.T) {
+	t.Parallel()
+
+	numRoundsPerEpoch := uint64(20)
+	roundDuration := uint64(5000)
+	roundAtEpochStart := uint64(60)
+	currentRound := uint64(70)
+
+	presenterStatusHandler := NewPresenterStatusHandler()
+	presenterStatusHandler.SetUInt64Value(core.MetricRoundDuration, roundDuration)
+	presenterStatusHandler.SetUInt64Value(core.MetricRoundsPerEpoch, numRoundsPerEpoch)
+	presenterStatusHandler.SetUInt64Value(core.MetricRoundAtEpochStart, roundAtEpochStart)
+	presenterStatusHandler.SetUInt64Value(core.MetricCurrentRound, currentRound)
+
+	expectedRemainingTime := core.SecondsToHourMinSec(int((roundAtEpochStart + numRoundsPerEpoch - currentRound) * roundDuration / 1000))
+	currentEpochRound, currentEpochFinishRound, epochLoadPercent, remainingTime := presenterStatusHandler.GetEpochInfo()
+	assert.Equal(t, currentRound, currentEpochRound)
+	assert.Equal(t, numRoundsPerEpoch+roundAtEpochStart, currentEpochFinishRound)
+	assert.Equal(t, expectedRemainingTime, remainingTime)
+	assert.Equal(t, 50, epochLoadPercent)
 }
