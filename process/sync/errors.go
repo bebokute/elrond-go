@@ -23,8 +23,8 @@ var ErrLowerRoundInBlock = errors.New("lower round in block")
 // ErrHigherRoundInBlock signals that the round index in block is higher than the current round of chronology
 var ErrHigherRoundInBlock = errors.New("higher round in block")
 
-// ErrBlockIsNotSigned signals that the block is not signed
-var ErrBlockIsNotSigned = errors.New("block is not signed")
+// ErrCorruptBootstrapFromStorageDb signals that the bootstrap database is corrupt
+var ErrCorruptBootstrapFromStorageDb = errors.New("corrupt bootstrap storage database")
 
 // ErrSignedBlock signals that a block is signed
 type ErrSignedBlock struct {
@@ -39,8 +39,25 @@ func (err ErrSignedBlock) Error() string {
 // ErrRollBackBehindFinalHeader signals that a roll back behind final header has been attempted
 var ErrRollBackBehindFinalHeader = errors.New("roll back behind final header is not permitted")
 
-// ErrRandomSeedNotValid signals that the random seed is not valid
-var ErrRandomSeedNotValid = errors.New("random seed is not valid")
+// ErrRollBackBehindForkNonce signals that a roll back behind fork nonce is not permitted
+var ErrRollBackBehindForkNonce = errors.New("roll back behind fork nonce is not permitted")
 
-// ErrInvalidShardId signals that an invalid shard id has been provided
-var ErrInvalidShardId = errors.New("invalid shard id")
+// ErrGenesisTimeMissmatch signals that a received header has a genesis time missmatch
+var ErrGenesisTimeMissmatch = errors.New("genesis time missmatch")
+
+// ErrHeaderNotFound signals that the needed header is not found
+var ErrHeaderNotFound = errors.New("header is not found")
+
+// ErrExecutionRealignPending signals that a failed execution state realignment blocks syncing
+var ErrExecutionRealignPending = errors.New("execution state realignment pending after roll back")
+
+// ErrInconsistentRollBackState signals that the chain tip no longer matches an interrupted roll back
+var ErrInconsistentRollBackState = errors.New("inconsistent chain state while completing an interrupted roll back")
+
+// ErrPendingStorageRepair signals that data moved by an interrupted roll back is not yet written back
+var ErrPendingStorageRepair = errors.New("pending storage repair after an interrupted roll back")
+
+// ErrRollBackExecutionBaseMissing signals a roll back refused for a non-recreatable execution base
+var ErrRollBackExecutionBaseMissing = errors.New("roll back refused: execution base state is missing")
+
+var errBranchAwareSyncRetry = errors.New("waiting for branch-aware sync candidate")

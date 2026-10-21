@@ -1,0 +1,345 @@
+package shardchain
+
+import (
+	"encoding/json"
+	"testing"
+
+	"github.com/multiversx/mx-chain-core-go/data"
+	"github.com/multiversx/mx-chain-core-go/data/block"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/dataRetriever"
+	"github.com/multiversx/mx-chain-go/storage"
+	"github.com/multiversx/mx-chain-go/testscommon/genericMocks"
+	storageStubs "github.com/multiversx/mx-chain-go/testscommon/storage"
+)
+
+func cloneTrigger(t *trigger) *trigger {
+	rt := &trigger{}
+	t.mutTrigger.RLock()
+	defer t.mutTrigger.RUnlock()
+
+	rt.epoch = t.epoch
+	rt.metaEpoch = t.metaEpoch
+	rt.currentRoundIndex = t.currentRoundIndex
+	rt.epochStartRound = t.epochStartRound
+	rt.epochMetaBlockHash = t.epochMetaBlockHash
+	rt.triggerStateKey = t.triggerStateKey
+	rt.isEpochStart = t.isEpochStart
+	rt.finality = t.finality
+	rt.validity = t.validity
+	rt.epochFinalityAttestingRound = t.epochFinalityAttestingRound
+	rt.newEpochHdrReceived = t.newEpochHdrReceived
+	rt.mapHashHdr = t.mapHashHdr
+	rt.mapNonceHashes = t.mapNonceHashes
+	rt.mapEpochStartHdrs = t.mapEpochStartHdrs
+	rt.metaHdrStorage = t.metaHdrStorage
+	rt.triggerStorage = t.triggerStorage
+	rt.metaNonceHdrStorage = t.metaNonceHdrStorage
+	rt.uint64Converter = t.uint64Converter
+	rt.marshaller = t.marshaller
+	rt.hasher = t.hasher
+	rt.headerValidator = t.headerValidator
+	rt.requestHandler = t.requestHandler
+	rt.epochStartNotifier = t.epochStartNotifier
+	rt.headersPool = t.headersPool
+	rt.proofsPool = t.proofsPool
+	rt.metaFinalityView = t.metaFinalityView
+	rt.epochStartShardHeader = t.epochStartShardHeader
+	rt.epochStartMeta = t.epochStartMeta
+	rt.shardHdrStorage = t.shardHdrStorage
+	rt.peerMiniBlocksSyncer = t.peerMiniBlocksSyncer
+	rt.appStatusHandler = t.appStatusHandler
+	rt.miniBlocksPool = t.miniBlocksPool
+	rt.currentEpochValidatorInfoPool = t.currentEpochValidatorInfoPool
+	rt.validatorInfoPool = t.validatorInfoPool
+	rt.mapMissingValidatorsInfo = t.mapMissingValidatorsInfo
+	rt.mapMissingMiniBlocks = t.mapMissingMiniBlocks
+	rt.mapFinalizedEpochs = t.mapFinalizedEpochs
+	rt.roundHandler = t.roundHandler
+	rt.shardID = t.shardID
+	rt.enableEpochsHandler = t.enableEpochsHandler
+	rt.processConfigsHandler = t.processConfigsHandler
+	rt.chanMetaBlockReceived = t.chanMetaBlockReceived
+	rt.mapPreparedEpochStartHdrs = t.mapPreparedEpochStartHdrs
+	t.mutPendingEpochStartData.Lock()
+	rt.pendingEpochStartProofs = t.pendingEpochStartProofs
+	rt.pendingEpochStartHeaders = t.pendingEpochStartHeaders
+	rt.pendingFinalityEvidence = t.pendingFinalityEvidence
+	rt.epochStartRecoveryCandidates = t.epochStartRecoveryCandidates
+	rt.pendingLastFinalizedHeader = t.pendingLastFinalizedHeader
+	rt.recoveryRequestCursors = t.recoveryRequestCursors
+	rt.finalityCandidateCursor = t.finalityCandidateCursor
+	rt.chanPendingEpochStartData = t.chanPendingEpochStartData
+	rt.pendingProofRetryInterval = t.pendingProofRetryInterval
+	rt.nextProofRequestSequence = t.nextProofRequestSequence
+	rt.recoveryClosed = t.recoveryClosed
+	rt.callbackAdmission.SetValue(t.callbackAdmission.IsSet())
+	t.mutPendingEpochStartData.Unlock()
+	return rt
+}
+
+func createDummyEpochStartTriggers(arguments *ArgsShardEpochStartTrigger, key []byte) (*trigger, *trigger) {
+	epochStartTrigger1, _ := NewEpochStartTrigger(arguments)
+	// create a copy
+	epochStartTrigger2 := cloneTrigger(epochStartTrigger1)
+
+	epochStartTrigger1.mutTrigger.Lock()
+	defer epochStartTrigger1.mutTrigger.Unlock()
+
+	epochStartTrigger1.triggerStateKey = key
+	epochStartTrigger1.epoch = 10
+	epochStartTrigger1.metaEpoch = 11
+	epochStartTrigger1.currentRoundIndex = 800
+	epochStartTrigger1.epochStartRound = 650
+	epochStartTrigger1.epochMetaBlockHash = []byte("meta block hash")
+	epochStartTrigger1.isEpochStart = false
+	epochStartTrigger1.epochFinalityAttestingRound = 680
+	epochStartTrigger1.cancelFunc = nil
+	epochStartTrigger1.epochStartShardHeader = &block.Header{}
+	return epochStartTrigger1, epochStartTrigger2
+}
+
+func TestTrigger_LoadHeaderV1StateAfterSave(t *testing.T) {
+	t.Parallel()
+
+	epoch := uint32(5)
+	arguments := createMockShardEpochStartTriggerArguments()
+	arguments.Epoch = epoch
+	bootStorer := genericMocks.NewStorerMock()
+
+	arguments.Storage = &storageStubs.ChainStorerStub{
+		GetStorerCalled: func(unitType dataRetriever.UnitType) (storage.Storer, error) {
+			return bootStorer, nil
+		},
+	}
+	key := []byte("key")
+	epochStartTrigger1, epochStartTrigger2 := createDummyEpochStartTriggers(arguments, key)
+
+	epochStartTrigger1.mutTrigger.RLock()
+	err := epochStartTrigger1.saveState(key)
+	epochStartTrigger1.mutTrigger.RUnlock()
+
+	assert.Nil(t, err)
+	trigger1Clone := cloneTrigger(epochStartTrigger1)
+	assert.NotEqual(t, trigger1Clone, epochStartTrigger2)
+
+	err = epochStartTrigger2.LoadState(key)
+	assert.Nil(t, err)
+	trigger2Clone := cloneTrigger(epochStartTrigger2)
+	assert.Equal(t, trigger1Clone, trigger2Clone)
+}
+
+func TestTrigger_LoadHeaderV2StateAfterSave(t *testing.T) {
+	t.Parallel()
+
+	epoch := uint32(5)
+	arguments := createMockShardEpochStartTriggerArguments()
+	arguments.Epoch = epoch
+	bootStorer := genericMocks.NewStorerMock()
+
+	arguments.Storage = &storageStubs.ChainStorerStub{
+		GetStorerCalled: func(unitType dataRetriever.UnitType) (storage.Storer, error) {
+			return bootStorer, nil
+		},
+	}
+
+	key := []byte("key")
+	epochStartTrigger1, epochStartTrigger2 := createDummyEpochStartTriggers(arguments, key)
+	epochStartTrigger1.epochStartShardHeader = &block.HeaderV2{
+		Header:            &block.Header{},
+		ScheduledRootHash: []byte("scheduled root hash")}
+
+	epochStartTrigger1.mutTrigger.RLock()
+	err := epochStartTrigger1.saveState(key)
+	epochStartTrigger1.mutTrigger.RUnlock()
+	assert.Nil(t, err)
+	trigger1Clone := cloneTrigger(epochStartTrigger1)
+	assert.NotEqual(t, trigger1Clone, epochStartTrigger2)
+
+	err = epochStartTrigger2.LoadState(key)
+	assert.Nil(t, err)
+	trigger2Clone := cloneTrigger(epochStartTrigger2)
+	assert.Equal(t, trigger1Clone, trigger2Clone)
+}
+
+func TestTrigger_LoadStateBackwardsCompatibility(t *testing.T) {
+	t.Parallel()
+
+	epoch := uint32(5)
+	key := []byte("key")
+
+	arguments := createMockShardEpochStartTriggerArguments()
+	arguments.Epoch = epoch
+
+	t.Run("backwards compatibility", func(t *testing.T) {
+		bootStorer := genericMocks.NewStorerMock()
+		arguments.Storage = &storageStubs.ChainStorerStub{
+			GetStorerCalled: func(unitType dataRetriever.UnitType) (storage.Storer, error) {
+				return bootStorer, nil
+			},
+		}
+
+		epochStartTrigger1, epochStartTrigger2 := createDummyEpochStartTriggers(arguments, key)
+
+		epochStartTrigger1.mutTrigger.RLock()
+		trigger1Clone := cloneTrigger(epochStartTrigger1)
+		epochStartTrigger1.mutTrigger.RUnlock()
+
+		trig := createLegacyTriggerRegistryFromTrigger(trigger1Clone)
+		d, _ := json.Marshal(trig)
+		trigInternalKey := append([]byte(common.TriggerRegistryKeyPrefix), key...)
+
+		err := bootStorer.Put(trigInternalKey, d)
+		require.Nil(t, err)
+
+		err = epochStartTrigger2.LoadState(key)
+		require.Nil(t, err)
+		epochStartTrigger1.recoveryGeneration = epochStartTrigger2.recoveryGeneration
+		require.Equal(t, epochStartTrigger1, epochStartTrigger2)
+	})
+
+	t.Run("header v1", func(t *testing.T) {
+		triggerRegistry := &block.ShardTriggerRegistry{
+			Epoch:                 epoch,
+			MetaEpoch:             epoch,
+			EpochStartShardHeader: &block.Header{},
+		}
+		triggerRegistryBytes, _ := arguments.Marshalizer.Marshal(triggerRegistry)
+
+		bootStorer := &storageStubs.StorerStub{
+			GetCalled: func(key []byte) ([]byte, error) {
+				return triggerRegistryBytes, nil
+			},
+		}
+
+		arguments.Storage = &storageStubs.ChainStorerStub{
+			GetStorerCalled: func(unitType dataRetriever.UnitType) (storage.Storer, error) {
+				return bootStorer, nil
+			},
+		}
+
+		epochStartTrigger1, err := NewEpochStartTrigger(arguments)
+		require.Nil(t, err)
+		epochStartTrigger2 := cloneTrigger(epochStartTrigger1)
+
+		epochStartTrigger1.mutTrigger.Lock()
+		epochStartTrigger1.epoch = epoch
+		epochStartTrigger1.triggerStateKey = key
+		epochStartTrigger1.cancelFunc = nil
+		epochStartTrigger1.mutTrigger.Unlock()
+
+		err = epochStartTrigger2.LoadState(key)
+		require.Nil(t, err)
+		triggerClone := cloneTrigger(epochStartTrigger1)
+		triggerClone.recoveryGeneration = epochStartTrigger2.recoveryGeneration
+		require.Equal(t, triggerClone, epochStartTrigger2)
+	})
+
+	t.Run("header v2", func(t *testing.T) {
+		triggerRegistry := &block.ShardTriggerRegistryV2{
+			Epoch:     epoch,
+			MetaEpoch: epoch,
+			EpochStartShardHeader: &block.HeaderV2{
+				Header: &block.Header{},
+			},
+		}
+		triggerRegistryBytes, _ := arguments.Marshalizer.Marshal(triggerRegistry)
+
+		bootStorer := &storageStubs.StorerStub{
+			GetCalled: func(key []byte) ([]byte, error) {
+				return triggerRegistryBytes, nil
+			},
+		}
+
+		arguments.Storage = &storageStubs.ChainStorerStub{
+			GetStorerCalled: func(unitType dataRetriever.UnitType) (storage.Storer, error) {
+				return bootStorer, nil
+			},
+		}
+
+		epochStartTrigger1, err := NewEpochStartTrigger(arguments)
+		require.Nil(t, err)
+		epochStartTrigger2 := cloneTrigger(epochStartTrigger1)
+
+		epochStartTrigger1.mutTrigger.Lock()
+		epochStartTrigger1.epoch = epoch
+		epochStartTrigger1.triggerStateKey = key
+		epochStartTrigger1.epochStartShardHeader = &block.HeaderV2{
+			Header: &block.Header{},
+		}
+		epochStartTrigger1.cancelFunc = nil
+		epochStartTrigger1.mutTrigger.Unlock()
+
+		err = epochStartTrigger2.LoadState(key)
+		require.Nil(t, err)
+		triggerClone := cloneTrigger(epochStartTrigger1)
+		triggerClone.recoveryGeneration = epochStartTrigger2.recoveryGeneration
+		require.Equal(t, triggerClone, epochStartTrigger2)
+	})
+
+	t.Run("header v3", func(t *testing.T) {
+		triggerRegistry := &block.ShardTriggerRegistryV3{
+			Epoch:                 epoch,
+			MetaEpoch:             epoch,
+			EpochStartShardHeader: &block.HeaderV3{},
+		}
+		triggerRegistryBytes, _ := arguments.Marshalizer.Marshal(triggerRegistry)
+
+		arguments.Storage = &storageStubs.ChainStorerStub{
+			GetStorerCalled: func(unitType dataRetriever.UnitType) (storage.Storer, error) {
+				return &storageStubs.StorerStub{
+					GetCalled: func(key []byte) ([]byte, error) {
+						return triggerRegistryBytes, nil
+					},
+				}, nil
+			},
+		}
+
+		epochStartTrigger1, err := NewEpochStartTrigger(arguments)
+		require.Nil(t, err)
+		epochStartTrigger2 := cloneTrigger(epochStartTrigger1)
+
+		epochStartTrigger1.mutTrigger.Lock()
+		epochStartTrigger1.epoch = epoch
+		epochStartTrigger1.triggerStateKey = key
+		epochStartTrigger1.epochStartShardHeader = &block.HeaderV3{}
+		epochStartTrigger1.cancelFunc = nil
+		epochStartTrigger1.mutTrigger.Unlock()
+
+		err = epochStartTrigger2.LoadState(key)
+		require.Nil(t, err)
+		triggerClone := cloneTrigger(epochStartTrigger1)
+		triggerClone.recoveryGeneration = epochStartTrigger2.recoveryGeneration
+		require.Equal(t, triggerClone, epochStartTrigger2)
+	})
+}
+
+type legacyTriggerRegistry struct {
+	IsEpochStart                bool
+	NewEpochHeaderReceived      bool
+	Epoch                       uint32
+	MetaEpoch                   uint32
+	CurrentRoundIndex           int64
+	EpochStartRound             uint64
+	EpochFinalityAttestingRound uint64
+	EpochMetaBlockHash          []byte
+	EpochStartShardHeader       data.HeaderHandler
+}
+
+func createLegacyTriggerRegistryFromTrigger(t *trigger) *legacyTriggerRegistry {
+	header, _ := t.epochStartShardHeader.(*block.Header)
+	return &legacyTriggerRegistry{
+		IsEpochStart:                t.isEpochStart,
+		NewEpochHeaderReceived:      t.newEpochHdrReceived,
+		Epoch:                       t.epoch,
+		MetaEpoch:                   t.metaEpoch,
+		CurrentRoundIndex:           t.currentRoundIndex,
+		EpochStartRound:             t.epochStartRound,
+		EpochFinalityAttestingRound: t.epochFinalityAttestingRound,
+		EpochMetaBlockHash:          t.epochMetaBlockHash,
+		EpochStartShardHeader:       header,
+	}
+}

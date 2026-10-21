@@ -1,13 +1,16 @@
 package containers_test
 
 import (
+	"errors"
 	"testing"
 
-	"github.com/ElrondNetwork/elrond-go/data/block"
-	"github.com/ElrondNetwork/elrond-go/process"
-	"github.com/ElrondNetwork/elrond-go/process/factory/containers"
-	"github.com/ElrondNetwork/elrond-go/process/mock"
+	"github.com/multiversx/mx-chain-core-go/data/block"
+
 	"github.com/stretchr/testify/assert"
+
+	"github.com/multiversx/mx-chain-go/process"
+	"github.com/multiversx/mx-chain-go/process/factory/containers"
+	"github.com/multiversx/mx-chain-go/testscommon/preprocMocks"
 )
 
 func TestNewPreProcessorsContainer_ShouldWork(t *testing.T) {
@@ -16,17 +19,18 @@ func TestNewPreProcessorsContainer_ShouldWork(t *testing.T) {
 	c := containers.NewPreProcessorsContainer()
 
 	assert.NotNil(t, c)
+	assert.False(t, c.IsInterfaceNil())
 }
 
-//------- Add
+// ------- Add
 
 func TestPreProcessorsContainer_AddAlreadyExistingShouldErr(t *testing.T) {
 	t.Parallel()
 
 	c := containers.NewPreProcessorsContainer()
 
-	_ = c.Add(block.TxBlock, &mock.PreProcessorMock{})
-	err := c.Add(block.TxBlock, &mock.PreProcessorMock{})
+	_ = c.Add(block.TxBlock, &preprocMocks.PreProcessorMock{})
+	err := c.Add(block.TxBlock, &preprocMocks.PreProcessorMock{})
 
 	assert.Equal(t, process.ErrContainerKeyAlreadyExists, err)
 }
@@ -46,13 +50,13 @@ func TestPreProcessorsContainer_AddShouldWork(t *testing.T) {
 
 	c := containers.NewPreProcessorsContainer()
 
-	err := c.Add(block.TxBlock, &mock.PreProcessorMock{})
+	err := c.Add(block.TxBlock, &preprocMocks.PreProcessorMock{})
 
 	assert.Nil(t, err)
 	assert.Equal(t, 1, c.Len())
 }
 
-//------- AddMultiple
+// ------- AddMultiple
 
 func TestPreProcessorsContainer_AddMultipleAlreadyExistingShouldErr(t *testing.T) {
 	t.Parallel()
@@ -60,7 +64,7 @@ func TestPreProcessorsContainer_AddMultipleAlreadyExistingShouldErr(t *testing.T
 	c := containers.NewPreProcessorsContainer()
 
 	keys := []block.Type{block.TxBlock, block.TxBlock}
-	preprocessors := []process.PreProcessor{&mock.PreProcessorMock{}, &mock.PreProcessorMock{}}
+	preprocessors := []process.PreProcessor{&preprocMocks.PreProcessorMock{}, &preprocMocks.PreProcessorMock{}}
 
 	err := c.AddMultiple(keys, preprocessors)
 
@@ -73,7 +77,7 @@ func TestPreProcessorsContainer_AddMultipleLenMismatchShouldErr(t *testing.T) {
 	c := containers.NewPreProcessorsContainer()
 
 	keys := []block.Type{block.TxBlock}
-	preprocessors := []process.PreProcessor{&mock.PreProcessorMock{}, &mock.PreProcessorMock{}}
+	preprocessors := []process.PreProcessor{&preprocMocks.PreProcessorMock{}, &preprocMocks.PreProcessorMock{}}
 
 	err := c.AddMultiple(keys, preprocessors)
 
@@ -86,7 +90,7 @@ func TestPreProcessorsContainer_AddMultipleShouldWork(t *testing.T) {
 	c := containers.NewPreProcessorsContainer()
 
 	keys := []block.Type{block.TxBlock, block.SmartContractResultBlock}
-	preprocessors := []process.PreProcessor{&mock.PreProcessorMock{}, &mock.PreProcessorMock{}}
+	preprocessors := []process.PreProcessor{&preprocMocks.PreProcessorMock{}, &preprocMocks.PreProcessorMock{}}
 
 	err := c.AddMultiple(keys, preprocessors)
 
@@ -94,7 +98,7 @@ func TestPreProcessorsContainer_AddMultipleShouldWork(t *testing.T) {
 	assert.Equal(t, 2, c.Len())
 }
 
-//------- Get
+// ------- Get
 
 func TestPreProcessorsContainer_GetNotFoundShouldErr(t *testing.T) {
 	t.Parallel()
@@ -103,13 +107,13 @@ func TestPreProcessorsContainer_GetNotFoundShouldErr(t *testing.T) {
 
 	key := block.TxBlock
 	keyNotFound := block.SmartContractResultBlock
-	val := &mock.PreProcessorMock{}
+	val := &preprocMocks.PreProcessorMock{}
 
 	_ = c.Add(key, val)
 	valRecovered, err := c.Get(keyNotFound)
 
 	assert.Nil(t, valRecovered)
-	assert.Equal(t, process.ErrInvalidContainerKey, err)
+	assert.True(t, errors.Is(err, process.ErrInvalidContainerKey))
 }
 
 func TestPreProcessorsContainer_GetWrongTypeShouldErr(t *testing.T) {
@@ -132,7 +136,7 @@ func TestPreProcessorsContainer_GetShouldWork(t *testing.T) {
 	c := containers.NewPreProcessorsContainer()
 
 	key := block.TxBlock
-	val := &mock.PreProcessorMock{}
+	val := &preprocMocks.PreProcessorMock{}
 
 	_ = c.Add(key, val)
 	valRecovered, err := c.Get(key)
@@ -141,7 +145,7 @@ func TestPreProcessorsContainer_GetShouldWork(t *testing.T) {
 	assert.Nil(t, err)
 }
 
-//------- Replace
+// ------- Replace
 
 func TestPreProcessorsContainer_ReplaceNilValueShouldErrAndNotModify(t *testing.T) {
 	t.Parallel()
@@ -149,7 +153,7 @@ func TestPreProcessorsContainer_ReplaceNilValueShouldErrAndNotModify(t *testing.
 	c := containers.NewPreProcessorsContainer()
 
 	key := block.TxBlock
-	val := &mock.PreProcessorMock{}
+	val := &preprocMocks.PreProcessorMock{}
 
 	_ = c.Add(key, val)
 	err := c.Replace(key, nil)
@@ -166,8 +170,8 @@ func TestPreProcessorsContainer_ReplaceShouldWork(t *testing.T) {
 	c := containers.NewPreProcessorsContainer()
 
 	key := block.TxBlock
-	val := &mock.PreProcessorMock{}
-	val2 := &mock.PreProcessorMock{}
+	val := &preprocMocks.PreProcessorMock{}
+	val2 := &preprocMocks.PreProcessorMock{}
 
 	_ = c.Add(key, val)
 	err := c.Replace(key, val2)
@@ -178,7 +182,7 @@ func TestPreProcessorsContainer_ReplaceShouldWork(t *testing.T) {
 	assert.Nil(t, err)
 }
 
-//------- Remove
+// ------- Remove
 
 func TestPreProcessorsContainer_RemoveShouldWork(t *testing.T) {
 	t.Parallel()
@@ -186,7 +190,7 @@ func TestPreProcessorsContainer_RemoveShouldWork(t *testing.T) {
 	c := containers.NewPreProcessorsContainer()
 
 	key := block.TxBlock
-	val := &mock.PreProcessorMock{}
+	val := &preprocMocks.PreProcessorMock{}
 
 	_ = c.Add(key, val)
 	c.Remove(key)
@@ -194,24 +198,24 @@ func TestPreProcessorsContainer_RemoveShouldWork(t *testing.T) {
 	valRecovered, err := c.Get(key)
 
 	assert.Nil(t, valRecovered)
-	assert.Equal(t, process.ErrInvalidContainerKey, err)
+	assert.True(t, errors.Is(err, process.ErrInvalidContainerKey))
 }
 
-//------- Len
+// ------- Len
 
 func TestPreProcessorsContainer_LenShouldWork(t *testing.T) {
 	t.Parallel()
 
 	c := containers.NewPreProcessorsContainer()
 
-	_ = c.Add(block.TxBlock, &mock.PreProcessorMock{})
+	_ = c.Add(block.TxBlock, &preprocMocks.PreProcessorMock{})
 	assert.Equal(t, 1, c.Len())
 
 	keys := c.Keys()
 	assert.Equal(t, 1, len(keys))
 	assert.Equal(t, block.TxBlock, keys[0])
 
-	_ = c.Add(block.PeerBlock, &mock.PreProcessorMock{})
+	_ = c.Add(block.PeerBlock, &preprocMocks.PreProcessorMock{})
 	assert.Equal(t, 2, c.Len())
 
 	keys = c.Keys()

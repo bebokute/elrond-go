@@ -3,32 +3,65 @@ package spos_test
 import (
 	"testing"
 
-	"github.com/ElrondNetwork/elrond-go/consensus/mock"
-	"github.com/ElrondNetwork/elrond-go/consensus/spos"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/multiversx/mx-chain-go/consensus/spos"
+	"github.com/multiversx/mx-chain-go/consensus/spos/bls"
+	"github.com/multiversx/mx-chain-go/testscommon/consensus"
+	"github.com/multiversx/mx-chain-go/testscommon/cryptoMocks"
 )
+
+func createDefaultConsensusCoreArgs() *spos.ConsensusCoreArgs {
+	consensusCoreMock := consensus.InitConsensusCore()
+
+	scheduledProcessor := &consensus.ScheduledProcessorStub{}
+	messagesHandler, _ := bls.NewConsensusService()
+
+	args := &spos.ConsensusCoreArgs{
+		BlockChain:                    consensusCoreMock.Blockchain(),
+		BlockProcessor:                consensusCoreMock.BlockProcessor(),
+		ExecutionManager:              consensusCoreMock.ExecutionManager(),
+		Bootstrapper:                  consensusCoreMock.BootStrapper(),
+		BroadcastMessenger:            consensusCoreMock.BroadcastMessenger(),
+		ChronologyHandler:             consensusCoreMock.Chronology(),
+		Hasher:                        consensusCoreMock.Hasher(),
+		Marshalizer:                   consensusCoreMock.Marshalizer(),
+		MultiSignerContainer:          consensusCoreMock.MultiSignerContainer(),
+		RoundHandler:                  consensusCoreMock.RoundHandler(),
+		ShardCoordinator:              consensusCoreMock.ShardCoordinator(),
+		NodesCoordinator:              consensusCoreMock.NodesCoordinator(),
+		SyncTimer:                     consensusCoreMock.SyncTimer(),
+		EpochStartRegistrationHandler: consensusCoreMock.EpochStartRegistrationHandler(),
+		AntifloodHandler:              consensusCoreMock.GetAntiFloodHandler(),
+		PeerHonestyHandler:            consensusCoreMock.PeerHonestyHandler(),
+		HeaderSigVerifier:             consensusCoreMock.HeaderSigVerifier(),
+		FallbackHeaderValidator:       consensusCoreMock.FallbackHeaderValidator(),
+		NodeRedundancyHandler:         consensusCoreMock.NodeRedundancyHandler(),
+		ScheduledProcessor:            scheduledProcessor,
+		MessageSigningHandler:         consensusCoreMock.MessageSigningHandler(),
+		PeerBlacklistHandler:          consensusCoreMock.PeerBlacklistHandler(),
+		PeerSignatureHandler:          consensusCoreMock.PeerSignatureHandler(),
+		SigningHandler:                consensusCoreMock.SigningHandler(),
+		EnableEpochsHandler:           consensusCoreMock.EnableEpochsHandler(),
+		EnableRoundsHandler:           consensusCoreMock.EnableRoundsHandler(),
+		EquivalentProofsPool:          consensusCoreMock.EquivalentProofsPool(),
+		HeadersPool:                   consensusCoreMock.HeadersPool(),
+		EpochNotifier:                 consensusCoreMock.EpochNotifier(),
+		InvalidSignersCache:           &consensus.InvalidSignersCacheMock{},
+		MessagesHandler:               messagesHandler,
+		CommonConfigsHandler:          consensusCoreMock.CommonConfigsHandler(),
+	}
+	return args
+}
 
 func TestConsensusCore_WithNilBlockchainShouldFail(t *testing.T) {
 	t.Parallel()
 
-	consensusCoreMock := mock.InitConsensusCore()
+	args := createDefaultConsensusCoreArgs()
+	args.BlockChain = nil
 
 	consensusCore, err := spos.NewConsensusCore(
-		nil,
-		consensusCoreMock.BlockProcessor(),
-		consensusCoreMock.BlocksTracker(),
-		consensusCoreMock.BootStrapper(),
-		consensusCoreMock.BroadcastMessenger(),
-		consensusCoreMock.Chronology(),
-		consensusCoreMock.Hasher(),
-		consensusCoreMock.Marshalizer(),
-		consensusCoreMock.RandomnessPrivateKey(),
-		consensusCoreMock.RandomnessSingleSigner(),
-		consensusCoreMock.MultiSigner(),
-		consensusCoreMock.Rounder(),
-		consensusCoreMock.ShardCoordinator(),
-		consensusCoreMock.NodesCoordinator(),
-		consensusCoreMock.SyncTimer(),
+		args,
 	)
 
 	assert.Nil(t, consensusCore)
@@ -38,80 +71,40 @@ func TestConsensusCore_WithNilBlockchainShouldFail(t *testing.T) {
 func TestConsensusCore_WithNilBlockProcessorShouldFail(t *testing.T) {
 	t.Parallel()
 
-	consensusCoreMock := mock.InitConsensusCore()
+	args := createDefaultConsensusCoreArgs()
+	args.BlockProcessor = nil
 
 	consensusCore, err := spos.NewConsensusCore(
-		consensusCoreMock.Blockchain(),
-		nil,
-		consensusCoreMock.BlocksTracker(),
-		consensusCoreMock.BootStrapper(),
-		consensusCoreMock.BroadcastMessenger(),
-		consensusCoreMock.Chronology(),
-		consensusCoreMock.Hasher(),
-		consensusCoreMock.Marshalizer(),
-		consensusCoreMock.RandomnessPrivateKey(),
-		consensusCoreMock.RandomnessSingleSigner(),
-		consensusCoreMock.MultiSigner(),
-		consensusCoreMock.Rounder(),
-		consensusCoreMock.ShardCoordinator(),
-		consensusCoreMock.NodesCoordinator(),
-		consensusCoreMock.SyncTimer(),
+		args,
 	)
 
 	assert.Nil(t, consensusCore)
 	assert.Equal(t, spos.ErrNilBlockProcessor, err)
 }
 
-func TestConsensusCore_WithNilBlocksTrackerShouldFail(t *testing.T) {
+func TestConsensusCore_WithNilExecutionManagerShouldFail(t *testing.T) {
 	t.Parallel()
 
-	consensusCoreMock := mock.InitConsensusCore()
+	args := createDefaultConsensusCoreArgs()
+	args.ExecutionManager = nil
 
 	consensusCore, err := spos.NewConsensusCore(
-		consensusCoreMock.Blockchain(),
-		consensusCoreMock.BlockProcessor(),
-		nil,
-		consensusCoreMock.BootStrapper(),
-		consensusCoreMock.BroadcastMessenger(),
-		consensusCoreMock.Chronology(),
-		consensusCoreMock.Hasher(),
-		consensusCoreMock.Marshalizer(),
-		consensusCoreMock.RandomnessPrivateKey(),
-		consensusCoreMock.RandomnessSingleSigner(),
-		consensusCoreMock.MultiSigner(),
-		consensusCoreMock.Rounder(),
-		consensusCoreMock.ShardCoordinator(),
-		consensusCoreMock.NodesCoordinator(),
-		consensusCoreMock.SyncTimer(),
+		args,
 	)
 
 	assert.Nil(t, consensusCore)
-	assert.Equal(t, spos.ErrNilBlocksTracker, err)
+	assert.Equal(t, spos.ErrNilExecutionManager, err)
 }
 
 func TestConsensusCore_WithNilBootstrapperShouldFail(t *testing.T) {
 	t.Parallel()
 
-	consensusCoreMock := mock.InitConsensusCore()
+	args := createDefaultConsensusCoreArgs()
+	args.Bootstrapper = nil
 
 	consensusCore, err := spos.NewConsensusCore(
-		consensusCoreMock.Blockchain(),
-		consensusCoreMock.BlockProcessor(),
-		consensusCoreMock.BlocksTracker(),
-		nil,
-		consensusCoreMock.BroadcastMessenger(),
-		consensusCoreMock.Chronology(),
-		consensusCoreMock.Hasher(),
-		consensusCoreMock.Marshalizer(),
-		consensusCoreMock.RandomnessPrivateKey(),
-		consensusCoreMock.RandomnessSingleSigner(),
-		consensusCoreMock.MultiSigner(),
-		consensusCoreMock.Rounder(),
-		consensusCoreMock.ShardCoordinator(),
-		consensusCoreMock.NodesCoordinator(),
-		consensusCoreMock.SyncTimer(),
+		args,
 	)
-
 	assert.Nil(t, consensusCore)
 	assert.Equal(t, spos.ErrNilBootstrapper, err)
 }
@@ -119,24 +112,11 @@ func TestConsensusCore_WithNilBootstrapperShouldFail(t *testing.T) {
 func TestConsensusCore_WithNilBroadcastMessengerShouldFail(t *testing.T) {
 	t.Parallel()
 
-	consensusCoreMock := mock.InitConsensusCore()
+	args := createDefaultConsensusCoreArgs()
+	args.BroadcastMessenger = nil
 
 	consensusCore, err := spos.NewConsensusCore(
-		consensusCoreMock.Blockchain(),
-		consensusCoreMock.BlockProcessor(),
-		consensusCoreMock.BlocksTracker(),
-		consensusCoreMock.BootStrapper(),
-		nil,
-		consensusCoreMock.Chronology(),
-		consensusCoreMock.Hasher(),
-		consensusCoreMock.Marshalizer(),
-		consensusCoreMock.RandomnessPrivateKey(),
-		consensusCoreMock.RandomnessSingleSigner(),
-		consensusCoreMock.MultiSigner(),
-		consensusCoreMock.Rounder(),
-		consensusCoreMock.ShardCoordinator(),
-		consensusCoreMock.NodesCoordinator(),
-		consensusCoreMock.SyncTimer(),
+		args,
 	)
 
 	assert.Nil(t, consensusCore)
@@ -146,26 +126,12 @@ func TestConsensusCore_WithNilBroadcastMessengerShouldFail(t *testing.T) {
 func TestConsensusCore_WithNilChronologyShouldFail(t *testing.T) {
 	t.Parallel()
 
-	consensusCoreMock := mock.InitConsensusCore()
+	args := createDefaultConsensusCoreArgs()
+	args.ChronologyHandler = nil
 
 	consensusCore, err := spos.NewConsensusCore(
-		consensusCoreMock.Blockchain(),
-		consensusCoreMock.BlockProcessor(),
-		consensusCoreMock.BlocksTracker(),
-		consensusCoreMock.BootStrapper(),
-		consensusCoreMock.BroadcastMessenger(),
-		nil,
-		consensusCoreMock.Hasher(),
-		consensusCoreMock.Marshalizer(),
-		consensusCoreMock.RandomnessPrivateKey(),
-		consensusCoreMock.RandomnessSingleSigner(),
-		consensusCoreMock.MultiSigner(),
-		consensusCoreMock.Rounder(),
-		consensusCoreMock.ShardCoordinator(),
-		consensusCoreMock.NodesCoordinator(),
-		consensusCoreMock.SyncTimer(),
+		args,
 	)
-
 	assert.Nil(t, consensusCore)
 	assert.Equal(t, spos.ErrNilChronologyHandler, err)
 }
@@ -173,24 +139,11 @@ func TestConsensusCore_WithNilChronologyShouldFail(t *testing.T) {
 func TestConsensusCore_WithNilHasherShouldFail(t *testing.T) {
 	t.Parallel()
 
-	consensusCoreMock := mock.InitConsensusCore()
+	args := createDefaultConsensusCoreArgs()
+	args.Hasher = nil
 
 	consensusCore, err := spos.NewConsensusCore(
-		consensusCoreMock.Blockchain(),
-		consensusCoreMock.BlockProcessor(),
-		consensusCoreMock.BlocksTracker(),
-		consensusCoreMock.BootStrapper(),
-		consensusCoreMock.BroadcastMessenger(),
-		consensusCoreMock.Chronology(),
-		nil,
-		consensusCoreMock.Marshalizer(),
-		consensusCoreMock.RandomnessPrivateKey(),
-		consensusCoreMock.RandomnessSingleSigner(),
-		consensusCoreMock.MultiSigner(),
-		consensusCoreMock.Rounder(),
-		consensusCoreMock.ShardCoordinator(),
-		consensusCoreMock.NodesCoordinator(),
-		consensusCoreMock.SyncTimer(),
+		args,
 	)
 
 	assert.Nil(t, consensusCore)
@@ -200,240 +153,275 @@ func TestConsensusCore_WithNilHasherShouldFail(t *testing.T) {
 func TestConsensusCore_WithNilMarshalizerShouldFail(t *testing.T) {
 	t.Parallel()
 
-	consensusCoreMock := mock.InitConsensusCore()
+	args := createDefaultConsensusCoreArgs()
+	args.Marshalizer = nil
 
 	consensusCore, err := spos.NewConsensusCore(
-		consensusCoreMock.Blockchain(),
-		consensusCoreMock.BlockProcessor(),
-		consensusCoreMock.BlocksTracker(),
-		consensusCoreMock.BootStrapper(),
-		consensusCoreMock.BroadcastMessenger(),
-		consensusCoreMock.Chronology(),
-		consensusCoreMock.Hasher(),
-		nil,
-		consensusCoreMock.RandomnessPrivateKey(),
-		consensusCoreMock.RandomnessSingleSigner(),
-		consensusCoreMock.MultiSigner(),
-		consensusCoreMock.Rounder(),
-		consensusCoreMock.ShardCoordinator(),
-		consensusCoreMock.NodesCoordinator(),
-		consensusCoreMock.SyncTimer(),
+		args,
 	)
 
 	assert.Nil(t, consensusCore)
 	assert.Equal(t, spos.ErrNilMarshalizer, err)
 }
 
-func TestConsensusCore_WithNilBlsPrivateKeyShouldFail(t *testing.T) {
+func TestConsensusCore_WithNilMultiSignerContainerShouldFail(t *testing.T) {
 	t.Parallel()
 
-	consensusCoreMock := mock.InitConsensusCore()
+	args := createDefaultConsensusCoreArgs()
+	args.MultiSignerContainer = nil
 
 	consensusCore, err := spos.NewConsensusCore(
-		consensusCoreMock.Blockchain(),
-		consensusCoreMock.BlockProcessor(),
-		consensusCoreMock.BlocksTracker(),
-		consensusCoreMock.BootStrapper(),
-		consensusCoreMock.BroadcastMessenger(),
-		consensusCoreMock.Chronology(),
-		consensusCoreMock.Hasher(),
-		consensusCoreMock.Marshalizer(),
-		nil,
-		consensusCoreMock.RandomnessSingleSigner(),
-		consensusCoreMock.MultiSigner(),
-		consensusCoreMock.Rounder(),
-		consensusCoreMock.ShardCoordinator(),
-		consensusCoreMock.NodesCoordinator(),
-		consensusCoreMock.SyncTimer(),
+		args,
 	)
 
 	assert.Nil(t, consensusCore)
-	assert.Equal(t, spos.ErrNilBlsPrivateKey, err)
-}
-
-func TestConsensusCore_WithNilBlsSingleSignerShouldFail(t *testing.T) {
-	t.Parallel()
-
-	consensusCoreMock := mock.InitConsensusCore()
-
-	consensusCore, err := spos.NewConsensusCore(
-		consensusCoreMock.Blockchain(),
-		consensusCoreMock.BlockProcessor(),
-		consensusCoreMock.BlocksTracker(),
-		consensusCoreMock.BootStrapper(),
-		consensusCoreMock.BroadcastMessenger(),
-		consensusCoreMock.Chronology(),
-		consensusCoreMock.Hasher(),
-		consensusCoreMock.Marshalizer(),
-		consensusCoreMock.RandomnessPrivateKey(),
-		nil,
-		consensusCoreMock.MultiSigner(),
-		consensusCoreMock.Rounder(),
-		consensusCoreMock.ShardCoordinator(),
-		consensusCoreMock.NodesCoordinator(),
-		consensusCoreMock.SyncTimer(),
-	)
-
-	assert.Nil(t, consensusCore)
-	assert.Equal(t, spos.ErrNilBlsSingleSigner, err)
+	assert.Equal(t, spos.ErrNilMultiSignerContainer, err)
 }
 
 func TestConsensusCore_WithNilMultiSignerShouldFail(t *testing.T) {
 	t.Parallel()
 
-	consensusCoreMock := mock.InitConsensusCore()
+	args := createDefaultConsensusCoreArgs()
+	args.MultiSignerContainer = cryptoMocks.NewMultiSignerContainerMock(nil)
 
 	consensusCore, err := spos.NewConsensusCore(
-		consensusCoreMock.Blockchain(),
-		consensusCoreMock.BlockProcessor(),
-		consensusCoreMock.BlocksTracker(),
-		consensusCoreMock.BootStrapper(),
-		consensusCoreMock.BroadcastMessenger(),
-		consensusCoreMock.Chronology(),
-		consensusCoreMock.Hasher(),
-		consensusCoreMock.Marshalizer(),
-		consensusCoreMock.RandomnessPrivateKey(),
-		consensusCoreMock.RandomnessSingleSigner(),
-		nil,
-		consensusCoreMock.Rounder(),
-		consensusCoreMock.ShardCoordinator(),
-		consensusCoreMock.NodesCoordinator(),
-		consensusCoreMock.SyncTimer(),
+		args,
 	)
 
 	assert.Nil(t, consensusCore)
 	assert.Equal(t, spos.ErrNilMultiSigner, err)
 }
 
-func TestConsensusCore_WithNilRounderShouldFail(t *testing.T) {
+func TestConsensusCore_WithNilRoundHandlerShouldFail(t *testing.T) {
 	t.Parallel()
 
-	consensusCoreMock := mock.InitConsensusCore()
+	args := createDefaultConsensusCoreArgs()
+	args.RoundHandler = nil
 
 	consensusCore, err := spos.NewConsensusCore(
-		consensusCoreMock.Blockchain(),
-		consensusCoreMock.BlockProcessor(),
-		consensusCoreMock.BlocksTracker(),
-		consensusCoreMock.BootStrapper(),
-		consensusCoreMock.BroadcastMessenger(),
-		consensusCoreMock.Chronology(),
-		consensusCoreMock.Hasher(),
-		consensusCoreMock.Marshalizer(),
-		consensusCoreMock.RandomnessPrivateKey(),
-		consensusCoreMock.RandomnessSingleSigner(),
-		consensusCoreMock.MultiSigner(),
-		nil,
-		consensusCoreMock.ShardCoordinator(),
-		consensusCoreMock.NodesCoordinator(),
-		consensusCoreMock.SyncTimer(),
+		args,
 	)
 
 	assert.Nil(t, consensusCore)
-	assert.Equal(t, spos.ErrNilRounder, err)
+	assert.Equal(t, spos.ErrNilRoundHandler, err)
 }
 
 func TestConsensusCore_WithNilShardCoordinatorShouldFail(t *testing.T) {
 	t.Parallel()
 
-	consensusCoreMock := mock.InitConsensusCore()
+	args := createDefaultConsensusCoreArgs()
+	args.ShardCoordinator = nil
 
 	consensusCore, err := spos.NewConsensusCore(
-		consensusCoreMock.Blockchain(),
-		consensusCoreMock.BlockProcessor(),
-		consensusCoreMock.BlocksTracker(),
-		consensusCoreMock.BootStrapper(),
-		consensusCoreMock.BroadcastMessenger(),
-		consensusCoreMock.Chronology(),
-		consensusCoreMock.Hasher(),
-		consensusCoreMock.Marshalizer(),
-		consensusCoreMock.RandomnessPrivateKey(),
-		consensusCoreMock.RandomnessSingleSigner(),
-		consensusCoreMock.MultiSigner(),
-		consensusCoreMock.Rounder(),
-		nil,
-		consensusCoreMock.NodesCoordinator(),
-		consensusCoreMock.SyncTimer(),
+		args,
 	)
 
 	assert.Nil(t, consensusCore)
 	assert.Equal(t, spos.ErrNilShardCoordinator, err)
 }
 
-func TestConsensusCore_WithNilValidatorGroupSelectorShouldFail(t *testing.T) {
+func TestConsensusCore_WithNilNodesCoordinatorShouldFail(t *testing.T) {
 	t.Parallel()
 
-	consensusCoreMock := mock.InitConsensusCore()
+	args := createDefaultConsensusCoreArgs()
+	args.NodesCoordinator = nil
 
 	consensusCore, err := spos.NewConsensusCore(
-		consensusCoreMock.Blockchain(),
-		consensusCoreMock.BlockProcessor(),
-		consensusCoreMock.BlocksTracker(),
-		consensusCoreMock.BootStrapper(),
-		consensusCoreMock.BroadcastMessenger(),
-		consensusCoreMock.Chronology(),
-		consensusCoreMock.Hasher(),
-		consensusCoreMock.Marshalizer(),
-		consensusCoreMock.RandomnessPrivateKey(),
-		consensusCoreMock.RandomnessSingleSigner(),
-		consensusCoreMock.MultiSigner(),
-		consensusCoreMock.Rounder(),
-		consensusCoreMock.ShardCoordinator(),
-		nil,
-		consensusCoreMock.SyncTimer(),
+		args,
 	)
 
 	assert.Nil(t, consensusCore)
-	assert.Equal(t, spos.ErrNilValidatorGroupSelector, err)
+	assert.Equal(t, spos.ErrNilNodesCoordinator, err)
 }
 
 func TestConsensusCore_WithNilSyncTimerShouldFail(t *testing.T) {
 	t.Parallel()
 
-	consensusCoreMock := mock.InitConsensusCore()
+	args := createDefaultConsensusCoreArgs()
+	args.SyncTimer = nil
 
 	consensusCore, err := spos.NewConsensusCore(
-		consensusCoreMock.Blockchain(),
-		consensusCoreMock.BlockProcessor(),
-		consensusCoreMock.BlocksTracker(),
-		consensusCoreMock.BootStrapper(),
-		consensusCoreMock.BroadcastMessenger(),
-		consensusCoreMock.Chronology(),
-		consensusCoreMock.Hasher(),
-		consensusCoreMock.Marshalizer(),
-		consensusCoreMock.RandomnessPrivateKey(),
-		consensusCoreMock.RandomnessSingleSigner(),
-		consensusCoreMock.MultiSigner(),
-		consensusCoreMock.Rounder(),
-		consensusCoreMock.ShardCoordinator(),
-		consensusCoreMock.NodesCoordinator(),
-		nil,
+		args,
 	)
 
 	assert.Nil(t, consensusCore)
 	assert.Equal(t, spos.ErrNilSyncTimer, err)
 }
 
+func TestConsensusCore_WithNilAntifloodHandlerShouldFail(t *testing.T) {
+	t.Parallel()
+
+	args := createDefaultConsensusCoreArgs()
+	args.AntifloodHandler = nil
+
+	consensusCore, err := spos.NewConsensusCore(
+		args,
+	)
+
+	assert.Nil(t, consensusCore)
+	assert.Equal(t, spos.ErrNilAntifloodHandler, err)
+}
+
+func TestConsensusCore_WithNilPeerHonestyHandlerShouldFail(t *testing.T) {
+	t.Parallel()
+
+	args := createDefaultConsensusCoreArgs()
+	args.PeerHonestyHandler = nil
+
+	consensusCore, err := spos.NewConsensusCore(
+		args,
+	)
+
+	assert.Nil(t, consensusCore)
+	assert.Equal(t, spos.ErrNilPeerHonestyHandler, err)
+}
+
+func TestConsensusCore_WithNilHeaderSigVerifierShouldFail(t *testing.T) {
+	t.Parallel()
+
+	args := createDefaultConsensusCoreArgs()
+	args.HeaderSigVerifier = nil
+
+	consensusCore, err := spos.NewConsensusCore(
+		args,
+	)
+
+	assert.Nil(t, consensusCore)
+	assert.Equal(t, spos.ErrNilHeaderSigVerifier, err)
+}
+
+func TestConsensusCore_WithNilFallbackHeaderValidatorShouldFail(t *testing.T) {
+	t.Parallel()
+
+	args := createDefaultConsensusCoreArgs()
+	args.FallbackHeaderValidator = nil
+
+	consensusCore, err := spos.NewConsensusCore(
+		args,
+	)
+
+	assert.Nil(t, consensusCore)
+	assert.Equal(t, spos.ErrNilFallbackHeaderValidator, err)
+}
+
+func TestConsensusCore_WithNilNodeRedundancyHandlerShouldFail(t *testing.T) {
+	t.Parallel()
+
+	args := createDefaultConsensusCoreArgs()
+	args.NodeRedundancyHandler = nil
+
+	consensusCore, err := spos.NewConsensusCore(
+		args,
+	)
+
+	assert.Nil(t, consensusCore)
+	assert.Equal(t, spos.ErrNilNodeRedundancyHandler, err)
+}
+
+func TestConsensusCore_WithNilScheduledProcessorShouldFail(t *testing.T) {
+	t.Parallel()
+
+	args := createDefaultConsensusCoreArgs()
+	args.ScheduledProcessor = nil
+
+	consensusCore, err := spos.NewConsensusCore(
+		args,
+	)
+
+	assert.Nil(t, consensusCore)
+	assert.Equal(t, spos.ErrNilScheduledProcessor, err)
+}
+
+func TestConsensusCore_WithNilMessageSigningHandlerShouldFail(t *testing.T) {
+	t.Parallel()
+
+	args := createDefaultConsensusCoreArgs()
+	args.MessageSigningHandler = nil
+
+	consensusCore, err := spos.NewConsensusCore(
+		args,
+	)
+
+	assert.Nil(t, consensusCore)
+	assert.Equal(t, spos.ErrNilMessageSigningHandler, err)
+}
+
+func TestConsensusCore_WithNilPeerBlacklistHandlerShouldFail(t *testing.T) {
+	t.Parallel()
+
+	args := createDefaultConsensusCoreArgs()
+	args.PeerBlacklistHandler = nil
+
+	consensusCore, err := spos.NewConsensusCore(
+		args,
+	)
+
+	assert.Nil(t, consensusCore)
+	assert.Equal(t, spos.ErrNilPeerBlacklistHandler, err)
+}
+
+func TestConsensusCore_WithNilPeerSignatureHandlerShouldFail(t *testing.T) {
+	t.Parallel()
+
+	args := createDefaultConsensusCoreArgs()
+	args.PeerSignatureHandler = nil
+
+	consensusCore, err := spos.NewConsensusCore(
+		args,
+	)
+
+	assert.Nil(t, consensusCore)
+	assert.Equal(t, spos.ErrNilPeerSignatureHandler, err)
+}
+
+func TestConsensusCore_WithNilEnableEpochsHandlerShouldFail(t *testing.T) {
+	t.Parallel()
+
+	args := createDefaultConsensusCoreArgs()
+	args.EnableEpochsHandler = nil
+
+	consensusCore, err := spos.NewConsensusCore(
+		args,
+	)
+
+	assert.Nil(t, consensusCore)
+	assert.Equal(t, spos.ErrNilEnableEpochsHandler, err)
+}
+
+func TestConsensusCore_WithNilEnableRoundsHandlerShouldFail(t *testing.T) {
+	t.Parallel()
+
+	args := createDefaultConsensusCoreArgs()
+	args.EnableRoundsHandler = nil
+
+	consensusCore, err := spos.NewConsensusCore(
+		args,
+	)
+
+	assert.Nil(t, consensusCore)
+	assert.Equal(t, spos.ErrNilEnableRoundsHandler, err)
+}
+
+func TestConsensusCore_WithNilEpochStartRegistrationHandlerShouldFail(t *testing.T) {
+	t.Parallel()
+
+	args := createDefaultConsensusCoreArgs()
+	args.EpochStartRegistrationHandler = nil
+
+	consensusCore, err := spos.NewConsensusCore(
+		args,
+	)
+
+	assert.Nil(t, consensusCore)
+	assert.Equal(t, spos.ErrNilEpochStartNotifier, err)
+}
+
 func TestConsensusCore_CreateConsensusCoreShouldWork(t *testing.T) {
 	t.Parallel()
 
-	consensusCoreMock := mock.InitConsensusCore()
-
+	args := createDefaultConsensusCoreArgs()
 	consensusCore, err := spos.NewConsensusCore(
-		consensusCoreMock.Blockchain(),
-		consensusCoreMock.BlockProcessor(),
-		consensusCoreMock.BlocksTracker(),
-		consensusCoreMock.BootStrapper(),
-		consensusCoreMock.BroadcastMessenger(),
-		consensusCoreMock.Chronology(),
-		consensusCoreMock.Hasher(),
-		consensusCoreMock.Marshalizer(),
-		consensusCoreMock.RandomnessPrivateKey(),
-		consensusCoreMock.RandomnessSingleSigner(),
-		consensusCoreMock.MultiSigner(),
-		consensusCoreMock.Rounder(),
-		consensusCoreMock.ShardCoordinator(),
-		consensusCoreMock.NodesCoordinator(),
-		consensusCoreMock.SyncTimer(),
+		args,
 	)
 
 	assert.NotNil(t, consensusCore)

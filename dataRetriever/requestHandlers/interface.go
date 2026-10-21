@@ -1,7 +1,33 @@
 package requestHandlers
 
-// HashSliceResolver can request multiple hashes at once
-type HashSliceResolver interface {
-	RequestDataFromHashArray(hashes [][]byte) error
+// HashSliceRequester can request multiple hashes at once
+type HashSliceRequester interface {
+	RequestDataFromHashArray(hashes [][]byte, epoch uint32) error
 	IsInterfaceNil() bool
+}
+
+// ChunkRequester can request a chunk of a large data
+type ChunkRequester interface {
+	RequestDataFromReferenceAndChunk(reference []byte, chunkIndex uint32) error
+}
+
+// NonceRequester can request data for a specific nonce
+type NonceRequester interface {
+	RequestDataFromNonce(nonce uint64, epoch uint32) error
+}
+
+// EpochRequester can request data for a specific epoch
+type EpochRequester interface {
+	RequestDataFromEpoch(identifier []byte) error
+}
+
+// HeaderRequester defines what a block header requester can do
+type HeaderRequester interface {
+	NonceRequester
+	EpochRequester
+}
+
+// EquivalentProofsRequester defines what an equivalent proofs requester can do
+type EquivalentProofsRequester interface {
+	RequestDataFromNonce(nonceShardKey []byte, epoch uint32) error
 }

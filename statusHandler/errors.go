@@ -8,8 +8,20 @@ var ErrHandlersSliceIsNil = errors.New("no AppStatusHandler provided")
 // ErrNilHandlerInSlice will be returned when one of the handlers passed to the Facade is nil
 var ErrNilHandlerInSlice = errors.New("nil AppStatusHandler")
 
-// ErrorNilPresenterInterface will be returned when a nil PresenterInterface is passed as parameter
-var ErrorNilPresenterInterface = errors.New("nil presenter interface")
+// ErrNilAppStatusHandler signals that a nil status handler has been provided
+var ErrNilAppStatusHandler = errors.New("appStatusHandler is nil")
 
-// ErrorNilGrid will be returned when a nil grid is returned
-var ErrorNilGrid = errors.New("nil grid")
+// ErrNilMarshalizer signals that an operation has been attempted to or with a nil Marshalizer implementation
+var ErrNilMarshalizer = errors.New("nil Marshalizer")
+
+// ErrNilUint64Converter signals that uint64converter is nil
+var ErrNilUint64Converter = errors.New("uint64converter is nil")
+
+// ErrNilStorage signals that a nil storage has been provided
+var ErrNilStorage = errors.New("nil storage")
+
+// ErrNilEnableEpochsHandler signals that a nil enable epochs handler has been provided
+var ErrNilEnableEpochsHandler = errors.New("nil enable epochs handler")
+
+// ErrNilEnableRoundsHandler signals that a nil enable rounds handler has been provided
+var ErrNilEnableRoundsHandler = errors.New("nil enable rounds handler")

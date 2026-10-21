@@ -1,0 +1,276 @@
+package factory
+
+import (
+	"bytes"
+	"errors"
+	"testing"
+
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/core/check"
+	"github.com/multiversx/mx-chain-core-go/core/versioning"
+	"github.com/multiversx/mx-chain-core-go/data/block"
+	crypto "github.com/multiversx/mx-chain-crypto-go"
+	"github.com/multiversx/mx-chain-go/testscommon/cache"
+	"github.com/stretchr/testify/assert"
+
+	"github.com/multiversx/mx-chain-go/common/graceperiod"
+	"github.com/multiversx/mx-chain-go/config"
+	"github.com/multiversx/mx-chain-go/process"
+	"github.com/multiversx/mx-chain-go/process/block/interceptedBlocks"
+	processMocks "github.com/multiversx/mx-chain-go/process/mock"
+	"github.com/multiversx/mx-chain-go/testscommon"
+	"github.com/multiversx/mx-chain-go/testscommon/consensus"
+	"github.com/multiversx/mx-chain-go/testscommon/cryptoMocks"
+	"github.com/multiversx/mx-chain-go/testscommon/economicsmocks"
+	"github.com/multiversx/mx-chain-go/testscommon/enableEpochsHandlerMock"
+	"github.com/multiversx/mx-chain-go/testscommon/epochNotifier"
+	"github.com/multiversx/mx-chain-go/testscommon/hashingMocks"
+	"github.com/multiversx/mx-chain-go/testscommon/shardingMocks"
+)
+
+var errSingleSignKeyGenMock = errors.New("errSingleSignKeyGenMock")
+var errSignerMockVerifySigFails = errors.New("errSignerMockVerifySigFails")
+var sigOk = []byte("signature")
+
+func createMockKeyGen() crypto.KeyGenerator {
+	return &processMocks.SingleSignKeyGenMock{
+		PublicKeyFromByteArrayCalled: func(b []byte) (key crypto.PublicKey, e error) {
+			if string(b) == "" {
+				return nil, errSingleSignKeyGenMock
+			}
+
+			return &processMocks.SingleSignPublicKey{}, nil
+		},
+	}
+}
+
+func createMockSigner() crypto.SingleSigner {
+	return &processMocks.SignerMock{
+		VerifyStub: func(public crypto.PublicKey, msg []byte, sig []byte) error {
+			if !bytes.Equal(sig, sigOk) {
+				return errSignerMockVerifySigFails
+			}
+			return nil
+		},
+	}
+}
+
+func createMockPubkeyConverter() core.PubkeyConverter {
+	return testscommon.NewPubkeyConverterMock(32)
+}
+
+func createMockFeeHandler() process.FeeHandler {
+	return &economicsmocks.EconomicsHandlerMock{}
+}
+
+func createMockComponentHolders() (*processMocks.CoreComponentsMock, *processMocks.CryptoComponentsMock) {
+	gracePeriod, _ := graceperiod.NewEpochChangeGracePeriod([]config.EpochChangeGracePeriodByEpoch{{EnableEpoch: 0, GracePeriodInRounds: 1}})
+	coreComponents := &processMocks.CoreComponentsMock{
+		IntMarsh:            &processMocks.MarshalizerMock{},
+		TxMarsh:             &processMocks.MarshalizerMock{},
+		Hash:                &hashingMocks.HasherMock{},
+		TxSignHasherField:   &hashingMocks.HasherMock{},
+		UInt64ByteSliceConv: processMocks.NewNonceHashConverterMock(),
+		AddrPubKeyConv:      createMockPubkeyConverter(),
+		ChainIdCalled: func() string {
+			return "chainID"
+		},
+		TxVersionCheckField:                versioning.NewTxVersionChecker(1),
+		EpochNotifierField:                 &epochNotifier.EpochNotifierStub{},
+		HardforkTriggerPubKeyField:         []byte("provided hardfork pub key"),
+		EnableEpochsHandlerField:           &enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+		FieldsSizeCheckerField:             &testscommon.FieldsSizeCheckerMock{},
+		EpochChangeGracePeriodHandlerField: gracePeriod,
+		ProcessConfigsHandlerField:         testscommon.GetDefaultProcessConfigsHandler(),
+	}
+	cryptoComponents := &processMocks.CryptoComponentsMock{
+		BlockSig:          createMockSigner(),
+		TxSig:             createMockSigner(),
+		MultiSigContainer: cryptoMocks.NewMultiSignerContainerMock(cryptoMocks.NewMultiSigner()),
+		BlKeyGen:          createMockKeyGen(),
+		TxKeyGen:          createMockKeyGen(),
+		ManagedPeers:      &testscommon.ManagedPeersHolderStub{},
+	}
+
+	return coreComponents, cryptoComponents
+}
+
+func createMockArgMetaHeaderFactoryArgument(
+	coreComponents *processMocks.CoreComponentsMock,
+	cryptoComponents *processMocks.CryptoComponentsMock,
+) *ArgInterceptedMetaHeaderFactory {
+	return &ArgInterceptedMetaHeaderFactory{
+		ArgInterceptedDataFactory: ArgInterceptedDataFactory{
+			CoreComponents:                          coreComponents,
+			CryptoComponents:                        cryptoComponents,
+			ShardCoordinator:                        processMocks.NewOneShardCoordinatorMock(),
+			NodesCoordinator:                        shardingMocks.NewNodesCoordinatorMock(),
+			FeeHandler:                              createMockFeeHandler(),
+			WhiteListerVerifiedTxs:                  &testscommon.WhiteListHandlerStub{},
+			HeaderSigVerifier:                       &consensus.HeaderSigVerifierMock{},
+			ValidityAttester:                        &processMocks.ValidityAttesterStub{},
+			HeaderIntegrityVerifier:                 &processMocks.HeaderIntegrityVerifierStub{},
+			EpochStartTrigger:                       &processMocks.EpochStartTriggerStub{},
+			ArgsParser:                              &testscommon.ArgumentParserMock{},
+			PeerSignatureHandler:                    &processMocks.PeerSignatureHandlerStub{},
+			SignaturesHandler:                       &processMocks.SignaturesHandlerStub{},
+			HeartbeatExpiryTimespanInSec:            30,
+			PeerID:                                  "pid",
+			PeerAuthCacher:                          cache.NewCacherStub(),
+			PeerAuthenticationTimeBetweenSendsInSec: 60,
+		},
+	}
+}
+
+func createMockArgument(
+	coreComponents *processMocks.CoreComponentsMock,
+	cryptoComponents *processMocks.CryptoComponentsMock,
+) *ArgInterceptedDataFactory {
+	return &ArgInterceptedDataFactory{
+		CoreComponents:                          coreComponents,
+		CryptoComponents:                        cryptoComponents,
+		ShardCoordinator:                        processMocks.NewOneShardCoordinatorMock(),
+		NodesCoordinator:                        shardingMocks.NewNodesCoordinatorMock(),
+		FeeHandler:                              createMockFeeHandler(),
+		WhiteListerVerifiedTxs:                  &testscommon.WhiteListHandlerStub{},
+		HeaderSigVerifier:                       &consensus.HeaderSigVerifierMock{},
+		ValidityAttester:                        &processMocks.ValidityAttesterStub{},
+		HeaderIntegrityVerifier:                 &processMocks.HeaderIntegrityVerifierStub{},
+		EpochStartTrigger:                       &processMocks.EpochStartTriggerStub{},
+		ArgsParser:                              &testscommon.ArgumentParserMock{},
+		PeerSignatureHandler:                    &processMocks.PeerSignatureHandlerStub{},
+		SignaturesHandler:                       &processMocks.SignaturesHandlerStub{},
+		HeartbeatExpiryTimespanInSec:            30,
+		PeerID:                                  "pid",
+		PeerShardMapper:                         &processMocks.PeerShardMapperStub{},
+		PeerAuthCacher:                          cache.NewCacherStub(),
+		PeerAuthenticationTimeBetweenSendsInSec: 60,
+	}
+}
+
+func TestNewInterceptedMetaHeaderDataFactory_NilArgumentShouldErr(t *testing.T) {
+	t.Parallel()
+
+	imh, err := NewInterceptedMetaHeaderDataFactory(nil)
+
+	assert.True(t, check.IfNil(imh))
+	assert.Equal(t, process.ErrNilArgumentStruct, err)
+}
+
+func TestNewInterceptedMetaHeaderDataFactory_NilMarshalizerShouldErr(t *testing.T) {
+	t.Parallel()
+
+	coreComp, cryptoComp := createMockComponentHolders()
+	coreComp.IntMarsh = nil
+	arg := createMockArgMetaHeaderFactoryArgument(coreComp, cryptoComp)
+
+	imh, err := NewInterceptedMetaHeaderDataFactory(arg)
+	assert.Nil(t, imh)
+	assert.Equal(t, process.ErrNilMarshalizer, err)
+}
+
+func TestNewInterceptedMetaHeaderDataFactory_NilSignMarshalizerShouldErr(t *testing.T) {
+	t.Parallel()
+
+	coreComp, cryptoComp := createMockComponentHolders()
+	coreComp.TxMarsh = nil
+	arg := createMockArgMetaHeaderFactoryArgument(coreComp, cryptoComp)
+
+	imh, err := NewInterceptedMetaHeaderDataFactory(arg)
+	assert.True(t, check.IfNil(imh))
+	assert.Equal(t, process.ErrNilMarshalizer, err)
+}
+
+func TestNewInterceptedMetaHeaderDataFactory_NilHasherShouldErr(t *testing.T) {
+	t.Parallel()
+
+	coreComp, cryptoComp := createMockComponentHolders()
+	coreComp.Hash = nil
+	arg := createMockArgMetaHeaderFactoryArgument(coreComp, cryptoComp)
+
+	imh, err := NewInterceptedMetaHeaderDataFactory(arg)
+	assert.True(t, check.IfNil(imh))
+	assert.Equal(t, process.ErrNilHasher, err)
+}
+
+func TestNewInterceptedMetaHeaderDataFactory_NilHeaderSigVerifierShouldErr(t *testing.T) {
+	t.Parallel()
+	coreComp, cryptoComp := createMockComponentHolders()
+	arg := createMockArgMetaHeaderFactoryArgument(coreComp, cryptoComp)
+	arg.HeaderSigVerifier = nil
+
+	imh, err := NewInterceptedMetaHeaderDataFactory(arg)
+	assert.True(t, check.IfNil(imh))
+	assert.Equal(t, process.ErrNilHeaderSigVerifier, err)
+}
+
+func TestNewInterceptedMetaHeaderDataFactory_NilHeaderIntegrityVerifierShouldErr(t *testing.T) {
+	t.Parallel()
+
+	coreComp, cryptoComp := createMockComponentHolders()
+	arg := createMockArgMetaHeaderFactoryArgument(coreComp, cryptoComp)
+	arg.HeaderIntegrityVerifier = nil
+
+	imh, err := NewInterceptedMetaHeaderDataFactory(arg)
+	assert.True(t, check.IfNil(imh))
+	assert.Equal(t, process.ErrNilHeaderIntegrityVerifier, err)
+}
+
+func TestNewInterceptedMetaHeaderDataFactory_NilShardCoordinatorShouldErr(t *testing.T) {
+	t.Parallel()
+
+	coreComp, cryptoComp := createMockComponentHolders()
+	arg := createMockArgMetaHeaderFactoryArgument(coreComp, cryptoComp)
+	arg.ShardCoordinator = nil
+
+	imh, err := NewInterceptedMetaHeaderDataFactory(arg)
+	assert.True(t, check.IfNil(imh))
+	assert.Equal(t, process.ErrNilShardCoordinator, err)
+}
+
+func TestNewInterceptedMetaHeaderDataFactory_NilChainIdShouldErr(t *testing.T) {
+	t.Parallel()
+
+	coreComp, cryptoComp := createMockComponentHolders()
+	coreComp.ChainIdCalled = func() string {
+		return ""
+	}
+	arg := createMockArgMetaHeaderFactoryArgument(coreComp, cryptoComp)
+
+	imh, err := NewInterceptedMetaHeaderDataFactory(arg)
+	assert.True(t, check.IfNil(imh))
+	assert.Equal(t, process.ErrInvalidChainID, err)
+}
+
+func TestNewInterceptedMetaHeaderDataFactory_NilValidityAttesterShouldErr(t *testing.T) {
+	t.Parallel()
+
+	coreComp, cryptoComp := createMockComponentHolders()
+	arg := createMockArgMetaHeaderFactoryArgument(coreComp, cryptoComp)
+	arg.ValidityAttester = nil
+
+	imh, err := NewInterceptedMetaHeaderDataFactory(arg)
+	assert.True(t, check.IfNil(imh))
+	assert.Equal(t, process.ErrNilValidityAttester, err)
+}
+
+func TestNewInterceptedMetaHeaderDataFactory_ShouldWorkAndCreate(t *testing.T) {
+	t.Parallel()
+
+	coreComp, cryptoComp := createMockComponentHolders()
+	arg := createMockArgMetaHeaderFactoryArgument(coreComp, cryptoComp)
+
+	imh, err := NewInterceptedMetaHeaderDataFactory(arg)
+	assert.False(t, check.IfNil(imh))
+	assert.Nil(t, err)
+	assert.False(t, imh.IsInterfaceNil())
+
+	marshalizer := &processMocks.MarshalizerMock{}
+	emptyMetaHeader := &block.Header{}
+	emptyMetaHeaderBuff, _ := marshalizer.Marshal(emptyMetaHeader)
+	interceptedData, err := imh.Create(emptyMetaHeaderBuff, "")
+	assert.Nil(t, err)
+
+	_, ok := interceptedData.(*interceptedBlocks.InterceptedMetaHeader)
+	assert.True(t, ok)
+}

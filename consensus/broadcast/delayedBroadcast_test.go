@@ -1,0 +1,2538 @@
+package broadcast_test
+
+import (
+	"bytes"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"strconv"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/core/alarm"
+	"github.com/multiversx/mx-chain-core-go/core/atomic"
+	"github.com/multiversx/mx-chain-core-go/data"
+	"github.com/multiversx/mx-chain-core-go/data/block"
+	logger "github.com/multiversx/mx-chain-logger-go"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/consensus"
+	"github.com/multiversx/mx-chain-go/consensus/broadcast"
+	"github.com/multiversx/mx-chain-go/consensus/mock"
+	"github.com/multiversx/mx-chain-go/consensus/spos"
+	"github.com/multiversx/mx-chain-go/process"
+	"github.com/multiversx/mx-chain-go/testscommon"
+	dataRetrieverMock "github.com/multiversx/mx-chain-go/testscommon/dataRetriever"
+	"github.com/multiversx/mx-chain-go/testscommon/enableEpochsHandlerMock"
+	"github.com/multiversx/mx-chain-go/testscommon/pool"
+)
+
+const (
+	testExtraDelayForBroadcastBlockInfo     = 30 * time.Millisecond
+	testExtraDelayBetweenBroadcastMbsAndTxs = 50 * time.Millisecond
+)
+
+func createTestProcessConfigsHandler() common.ProcessConfigsHandler {
+	return &testscommon.ProcessConfigsHandlerStub{
+		GetExtraDelayForBroadcastBlockInfoCalled: func(_ uint64) time.Duration {
+			return testExtraDelayForBroadcastBlockInfo
+		},
+		GetExtraDelayBetweenBroadcastMbsAndTxsCalled: func(_ uint64) time.Duration {
+			return testExtraDelayBetweenBroadcastMbsAndTxs
+		},
+	}
+}
+
+type validatorDelayArgs struct {
+	headerHash       []byte
+	header           data.HeaderHandler
+	miniBlocks       map[uint32][]byte
+	transactions     map[string][][]byte
+	miniBlockHashes  map[string]map[string]struct{}
+	metaMiniBlocks   map[uint32][]byte
+	metaTransactions map[string][][]byte
+	order            uint32
+}
+
+type syncLogObserver struct {
+	sync.Mutex
+	buffer *bytes.Buffer
+}
+
+// Write method that locks the mutex before writing
+func (o *syncLogObserver) Write(p []byte) (n int, err error) {
+	o.Lock()
+	defer o.Unlock()
+	return o.buffer.Write(p)
+}
+
+func (o *syncLogObserver) getBufferStr() string {
+	o.Lock()
+	logOutputStr := o.buffer.String()
+	o.Unlock()
+
+	return logOutputStr
+}
+
+func createLogsObserver() *syncLogObserver {
+	return &syncLogObserver{
+		buffer: &bytes.Buffer{},
+	}
+}
+
+func createValidatorDelayArgs(index int) *validatorDelayArgs {
+	iStr := strconv.Itoa(index)
+	return &validatorDelayArgs{
+		headerHash: []byte("header hash" + iStr),
+		header: &block.HeaderV2{
+			Header: &block.Header{
+				PrevRandSeed: []byte("prev rand seed" + iStr),
+				Round:        uint64(0),
+				MiniBlockHeaders: []block.MiniBlockHeader{
+					{
+						Hash:            []byte("miniBlockHash0" + iStr),
+						SenderShardID:   0,
+						ReceiverShardID: 0,
+					},
+					{
+						Hash:            []byte("miniBlockHash1" + iStr),
+						SenderShardID:   0,
+						ReceiverShardID: 1,
+					},
+				},
+			},
+		},
+		miniBlocks:       map[uint32][]byte{0: []byte("miniblock data sh0" + iStr), 1: []byte("miniblock data sh1" + iStr)},
+		miniBlockHashes:  map[string]map[string]struct{}{"txBlockBodies_0": {"miniBlockHash0" + iStr: struct{}{}}, "txBlockBodies_0_1": {"miniBlockHash1" + iStr: struct{}{}}},
+		transactions:     map[string][][]byte{"transactions_0_1": {[]byte("tx1" + iStr), []byte("tx2" + iStr)}},
+		metaMiniBlocks:   map[uint32][]byte{0: []byte("meta miniblock data sh0" + iStr), 1: []byte("meta miniblock data sh1" + iStr)},
+		metaTransactions: map[string][][]byte{"mtopic": {[]byte("mtx1" + iStr), []byte("mtx2" + iStr)}},
+		order:            uint32(1),
+	}
+}
+
+func getDataToNotifyFromArgs(args *validatorDelayArgs) map[string][][]byte {
+	mbHashesToNotify := make(map[string][][]byte)
+
+	for shardIdDest, hashesMap := range args.miniBlockHashes {
+		for mbHash := range hashesMap {
+			mbHashesToNotify[shardIdDest] = append(mbHashesToNotify[shardIdDest], []byte(mbHash))
+		}
+	}
+
+	return mbHashesToNotify
+}
+
+func createMetaBlock() *block.MetaBlock {
+	return &block.MetaBlock{
+		Nonce: 0,
+		Round: 0,
+		ShardInfo: []block.ShardData{
+			{
+				HeaderHash: []byte("shard0 headerHash"),
+				ShardMiniBlockHeaders: []block.MiniBlockHeader{
+					{
+						Hash:            []byte("miniblock hash"),
+						ReceiverShardID: 1,
+						SenderShardID:   0,
+						TxCount:         2,
+					},
+				},
+				ShardID: 0,
+			},
+		},
+	}
+}
+
+func createDefaultDelayedBroadcasterArgs() *broadcast.ArgsDelayedBlockBroadcaster {
+	headersSubscriber := &pool.HeadersPoolStub{}
+	interceptorsContainer := createInterceptorContainer()
+	dbbArgs := &broadcast.ArgsDelayedBlockBroadcaster{
+		ShardCoordinator:      &mock.ShardCoordinatorMock{},
+		InterceptorsContainer: interceptorsContainer,
+		HeadersSubscriber:     headersSubscriber,
+		ProofsPool:            &dataRetrieverMock.ProofsPoolMock{},
+		EnableEpochsHandler:   &enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+		ProcessConfigsHandler: createTestProcessConfigsHandler(),
+		LeaderCacheSize:       2,
+		ValidatorCacheSize:    2,
+		AlarmScheduler:        alarm.NewAlarmScheduler(),
+	}
+
+	return dbbArgs
+}
+
+func TestNewDelayedBlockBroadcaster_NilShardCoordinatorShouldErr(t *testing.T) {
+	t.Parallel()
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	delayBroadcasterArgs.ShardCoordinator = nil
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Equal(t, spos.ErrNilShardCoordinator, err)
+	require.Nil(t, dbb)
+}
+
+func TestNewDelayedBlockBroadcaster_NilHeadersSubscriberShouldErr(t *testing.T) {
+	t.Parallel()
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	delayBroadcasterArgs.HeadersSubscriber = nil
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Equal(t, spos.ErrNilHeadersSubscriber, err)
+	require.Nil(t, dbb)
+}
+
+func TestNewDelayedBlockBroadcaster_NilInterceptorsContainerShouldErr(t *testing.T) {
+	t.Parallel()
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	delayBroadcasterArgs.InterceptorsContainer = nil
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Equal(t, spos.ErrNilInterceptorsContainer, err)
+	require.Nil(t, dbb)
+}
+
+func TestNewDelayedBlockBroadcaster_NilAlarmSchedulerShouldErr(t *testing.T) {
+	t.Parallel()
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	delayBroadcasterArgs.AlarmScheduler = nil
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Equal(t, spos.ErrNilAlarmScheduler, err)
+	require.Nil(t, dbb)
+}
+
+func TestNewDelayedBlockBroadcaster_NilHeadersPoolShouldErr(t *testing.T) {
+	t.Parallel()
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	delayBroadcasterArgs.HeadersSubscriber = nil
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Equal(t, spos.ErrNilHeadersSubscriber, err)
+	require.Nil(t, dbb)
+}
+
+func TestNewDelayedBlockBroadcaster_NilProofsPoolShouldErr(t *testing.T) {
+	t.Parallel()
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	delayBroadcasterArgs.ProofsPool = nil
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Equal(t, spos.ErrNilEquivalentProofPool, err)
+	require.Nil(t, dbb)
+}
+
+func TestNewDelayedBlockBroadcaster_NilEnableEpochsHandlerShouldErr(t *testing.T) {
+	t.Parallel()
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	delayBroadcasterArgs.EnableEpochsHandler = nil
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Equal(t, spos.ErrNilEnableEpochsHandler, err)
+	require.Nil(t, dbb)
+}
+
+func TestNewDelayedBlockBroadcasterOK(t *testing.T) {
+	t.Parallel()
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+	require.NotNil(t, dbb)
+}
+
+func TestDelayedBlockBroadcaster_HeaderReceivedProofsEnabled_ShouldNotBroadcastWithoutProof(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Flag{}
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	delayBroadcasterArgs.EnableEpochsHandler = &enableEpochsHandlerMock.EnableEpochsHandlerStub{
+		IsFlagEnabledInEpochCalled: func(flag core.EnableEpochFlag, epoch uint32) bool {
+			return flag == common.AndromedaFlag
+		},
+	}
+	delayBroadcasterArgs.ProofsPool = &dataRetrieverMock.ProofsPoolMock{
+		HasProofCalled: func(shardID uint32, headerHash []byte) bool {
+			return false // no proof available
+		},
+	}
+
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(
+		func(mbData map[uint32][]byte, pk []byte) error {
+			mbBroadcastCalled.SetValue(true)
+			return nil
+		},
+		func(txData map[string][][]byte, pk []byte) error { return nil },
+		func(header data.HeaderHandler, pk []byte) error { return nil },
+		func(message *consensus.Message) error { return nil },
+	)
+	require.Nil(t, err)
+
+	headerHash, _, miniblocksData, transactionsData := createDelayData("1")
+	delayedData := broadcast.CreateDelayBroadcastDataForLeader(headerHash, miniblocksData, transactionsData)
+	_ = dbb.SetLeaderData(delayedData)
+
+	metaBlock := createMetaBlock()
+	metaBlock.Nonce = 1 // nonce > 0 so proofs flag applies
+
+	dbb.HeaderReceived(metaBlock, []byte("meta hash"))
+	time.Sleep(testExtraDelayForBroadcastBlockInfo + testExtraDelayBetweenBroadcastMbsAndTxs + 100*time.Millisecond)
+
+	assert.False(t, mbBroadcastCalled.IsSet(), "should NOT broadcast when proof is missing and proofs flag enabled")
+}
+
+func TestDelayedBlockBroadcaster_ReceivedProof_HeaderNotInPoolShouldNotBroadcast(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Flag{}
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	delayBroadcasterArgs.EnableEpochsHandler = &enableEpochsHandlerMock.EnableEpochsHandlerStub{
+		IsFlagEnabledInEpochCalled: func(flag core.EnableEpochFlag, epoch uint32) bool {
+			return flag == common.AndromedaFlag
+		},
+	}
+	delayBroadcasterArgs.HeadersSubscriber = &pool.HeadersPoolStub{
+		GetHeaderByHashCalled: func(hash []byte) (data.HeaderHandler, error) {
+			return nil, errors.New("not found")
+		},
+	}
+
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(
+		func(mbData map[uint32][]byte, pk []byte) error {
+			mbBroadcastCalled.SetValue(true)
+			return nil
+		},
+		func(txData map[string][][]byte, pk []byte) error { return nil },
+		func(header data.HeaderHandler, pk []byte) error { return nil },
+		func(message *consensus.Message) error { return nil },
+	)
+	require.Nil(t, err)
+
+	headerHash, _, miniblocksData, transactionsData := createDelayData("1")
+	delayedData := broadcast.CreateDelayBroadcastDataForLeader(headerHash, miniblocksData, transactionsData)
+	_ = dbb.SetLeaderData(delayedData)
+
+	proof := &block.HeaderProof{
+		HeaderHash:    []byte("meta hash"),
+		HeaderShardId: core.MetachainShardId,
+		HeaderNonce:   1,
+	}
+	dbb.ProofReceived(proof)
+	time.Sleep(testExtraDelayForBroadcastBlockInfo + testExtraDelayBetweenBroadcastMbsAndTxs + 100*time.Millisecond)
+
+	assert.False(t, mbBroadcastCalled.IsSet(), "should NOT broadcast when header is not in pool")
+}
+
+func TestDelayedBlockBroadcaster_ReceivedProof_NonMetaShouldBeIgnored(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Flag{}
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(
+		func(mbData map[uint32][]byte, pk []byte) error {
+			mbBroadcastCalled.SetValue(true)
+			return nil
+		},
+		func(txData map[string][][]byte, pk []byte) error { return nil },
+		func(header data.HeaderHandler, pk []byte) error { return nil },
+		func(message *consensus.Message) error { return nil },
+	)
+	require.Nil(t, err)
+
+	proof := &block.HeaderProof{
+		HeaderHash:    []byte("shard hash"),
+		HeaderShardId: 0, // not metachain
+	}
+	dbb.ProofReceived(proof)
+	time.Sleep(50 * time.Millisecond)
+
+	assert.False(t, mbBroadcastCalled.IsSet(), "should NOT broadcast for non-metachain proofs")
+}
+
+func TestDelayedBlockBroadcaster_ReceivedProof_NilProofShouldNotPanic(t *testing.T) {
+	t.Parallel()
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	require.NotPanics(t, func() {
+		dbb.ProofReceived(nil)
+	})
+}
+
+func TestDelayedBlockBroadcaster_HeaderReceivedProofsDisabled_ShouldBroadcastImmediately(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Flag{}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	// default EnableEpochsHandlerStub returns false for IsFlagEnabledInEpoch -> proofs disabled
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(
+		func(mbData map[uint32][]byte, pk []byte) error {
+			mbBroadcastCalled.SetValue(true)
+			return nil
+		},
+		func(txData map[string][][]byte, pk []byte) error { return nil },
+		func(header data.HeaderHandler, pk []byte) error { return nil },
+		func(message *consensus.Message) error { return nil },
+	)
+	require.Nil(t, err)
+
+	headerHash := []byte("shard0 headerHash")
+	miniblocksData := map[uint32][]byte{1: []byte("miniblock data")}
+	transactionsData := map[string][][]byte{"txBlockBodies_0_1": {[]byte("tx0")}}
+	delayedData := broadcast.CreateDelayBroadcastDataForLeader(headerHash, miniblocksData, transactionsData)
+	_ = dbb.SetLeaderData(delayedData)
+
+	metaBlock := createMetaBlock()
+	dbb.HeaderReceived(metaBlock, []byte("meta hash"))
+	time.Sleep(testExtraDelayForBroadcastBlockInfo + testExtraDelayBetweenBroadcastMbsAndTxs + 100*time.Millisecond)
+
+	assert.True(t, mbBroadcastCalled.IsSet(), "should broadcast when proofs flag is disabled (backwards compat)")
+}
+
+func TestDelayedBlockBroadcaster_HeaderArrivesFirst_ThenProofTriggersBroadcast(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Flag{}
+	proofAvailable := atomic.Flag{}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	delayBroadcasterArgs.EnableEpochsHandler = &enableEpochsHandlerMock.EnableEpochsHandlerStub{
+		IsFlagEnabledInEpochCalled: func(flag core.EnableEpochFlag, epoch uint32) bool {
+			return flag == common.AndromedaFlag
+		},
+	}
+	delayBroadcasterArgs.ProofsPool = &dataRetrieverMock.ProofsPoolMock{
+		HasProofCalled: func(shardID uint32, headerHash []byte) bool {
+			return proofAvailable.IsSet()
+		},
+	}
+
+	metaBlock := createMetaBlock()
+	metaBlock.Nonce = 1
+	metaHash := []byte("meta hash")
+
+	delayBroadcasterArgs.HeadersSubscriber = &pool.HeadersPoolStub{
+		GetHeaderByHashCalled: func(hash []byte) (data.HeaderHandler, error) {
+			if bytes.Equal(hash, metaHash) {
+				return metaBlock, nil
+			}
+			return nil, errors.New("not found")
+		},
+	}
+
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(
+		func(mbData map[uint32][]byte, pk []byte) error {
+			mbBroadcastCalled.SetValue(true)
+			return nil
+		},
+		func(txData map[string][][]byte, pk []byte) error { return nil },
+		func(header data.HeaderHandler, pk []byte) error { return nil },
+		func(message *consensus.Message) error { return nil },
+	)
+	require.Nil(t, err)
+
+	headerHash := []byte("shard0 headerHash")
+	miniblocksData := map[uint32][]byte{1: []byte("miniblock data")}
+	transactionsData := map[string][][]byte{"txBlockBodies_0_1": {[]byte("tx0")}}
+	delayedData := broadcast.CreateDelayBroadcastDataForLeader(headerHash, miniblocksData, transactionsData)
+	_ = dbb.SetLeaderData(delayedData)
+
+	// Step 1: header arrives, no proof yet -> should NOT broadcast
+	dbb.HeaderReceived(metaBlock, metaHash)
+	time.Sleep(testExtraDelayForBroadcastBlockInfo + testExtraDelayBetweenBroadcastMbsAndTxs + 100*time.Millisecond)
+	assert.False(t, mbBroadcastCalled.IsSet(), "should not broadcast before proof arrives")
+
+	// Step 2: proof arrives -> should trigger broadcast via headerReceived delegation
+	proofAvailable.SetValue(true)
+	proof := &block.HeaderProof{
+		HeaderHash:    metaHash,
+		HeaderShardId: core.MetachainShardId,
+		HeaderNonce:   1,
+	}
+	dbb.ProofReceived(proof)
+	time.Sleep(testExtraDelayForBroadcastBlockInfo + testExtraDelayBetweenBroadcastMbsAndTxs + 100*time.Millisecond)
+	assert.True(t, mbBroadcastCalled.IsSet(), "should broadcast after proof arrives")
+}
+
+func TestDelayedBlockBroadcaster_HeaderReceivedNoDelayedDataRegistered(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Flag{}
+	txBroadcastCalled := atomic.Flag{}
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		_ = mbBroadcastCalled.SetReturningPrevious()
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		_ = txBroadcastCalled.SetReturningPrevious()
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	metaBlock := createMetaBlock()
+
+	dbb.HeaderReceived(metaBlock, []byte("metablock hash"))
+	time.Sleep(10 * time.Millisecond)
+	assert.False(t, mbBroadcastCalled.IsSet())
+	assert.False(t, txBroadcastCalled.IsSet())
+}
+
+func TestDelayedBlockBroadcaster_HeaderReceivedForRegisteredDelayedDataShouldBroadcastTheData(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Flag{}
+	txBroadcastCalled := atomic.Flag{}
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		_ = mbBroadcastCalled.SetReturningPrevious()
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		_ = txBroadcastCalled.SetReturningPrevious()
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	headerHash, _, miniblocksData, transactionsData := createDelayData("1")
+	delayedData := broadcast.CreateDelayBroadcastDataForLeader(headerHash, miniblocksData, transactionsData)
+	err = dbb.SetLeaderData(delayedData)
+
+	metaBlock := createMetaBlock()
+	metaBlock.ShardInfo[0].HeaderHash = headerHash
+
+	assert.Nil(t, err)
+	time.Sleep(10 * time.Millisecond)
+	assert.False(t, mbBroadcastCalled.IsSet())
+	assert.False(t, txBroadcastCalled.IsSet())
+
+	dbb.HeaderReceived(metaBlock, []byte("meta hash"))
+	sleepTime := testExtraDelayForBroadcastBlockInfo +
+		testExtraDelayBetweenBroadcastMbsAndTxs +
+		100*time.Millisecond
+	time.Sleep(sleepTime)
+	assert.True(t, mbBroadcastCalled.IsSet())
+	assert.True(t, txBroadcastCalled.IsSet())
+}
+
+func TestDelayedBlockBroadcaster_HeaderReceivedForNotRegisteredDelayedDataShouldNotBroadcast(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Flag{}
+	txBroadcastCalled := atomic.Flag{}
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		_ = mbBroadcastCalled.SetReturningPrevious()
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		_ = txBroadcastCalled.SetReturningPrevious()
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	headerHash, _, miniblocksData, transactionsData := createDelayData("1")
+	delayedData := broadcast.CreateDelayBroadcastDataForLeader(headerHash, miniblocksData, transactionsData)
+	err = dbb.SetLeaderData(delayedData)
+	require.Nil(t, err)
+
+	metaBlock := createMetaBlock()
+	metaBlock.ShardInfo[0].HeaderHash = headerHash[1:]
+
+	err = dbb.SetLeaderData(delayedData)
+	assert.Nil(t, err)
+	time.Sleep(10 * time.Millisecond)
+	assert.False(t, mbBroadcastCalled.IsSet())
+	assert.False(t, txBroadcastCalled.IsSet())
+
+	dbb.HeaderReceived(metaBlock, []byte("meta hash"))
+	time.Sleep(10 * time.Millisecond)
+	assert.False(t, mbBroadcastCalled.IsSet())
+	assert.False(t, txBroadcastCalled.IsSet())
+}
+
+func TestDelayedBlockBroadcaster_HeaderReceivedWithoutSignaturesForShardShouldNotBroadcastTheData(t *testing.T) {
+	observer := createLogsObserver()
+	err := logger.AddLogObserver(observer, &logger.PlainFormatter{})
+	require.Nil(t, err)
+
+	originalLogPattern := logger.GetLogLevelPattern()
+	err = logger.SetLogLevel("*:TRACE")
+	require.Nil(t, err)
+
+	defer func() {
+		err = logger.RemoveLogObserver(observer)
+		require.Nil(t, err)
+		err = logger.SetLogLevel(originalLogPattern)
+		require.Nil(t, err)
+	}()
+
+	mbBroadcastCalled := atomic.Flag{}
+	txBroadcastCalled := atomic.Flag{}
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		mbBroadcastCalled.SetValue(true)
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		txBroadcastCalled.SetValue(true)
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	headerHash, _, miniblocksData, transactionsData := createDelayData("1")
+	delayedData := broadcast.CreateDelayBroadcastDataForLeader(headerHash, miniblocksData, transactionsData)
+	err = dbb.SetLeaderData(delayedData)
+
+	metaBlock := createMetaBlock()
+	metaBlock.ShardInfo = []block.ShardData{}
+
+	assert.Nil(t, err)
+	time.Sleep(10 * time.Millisecond)
+	assert.False(t, mbBroadcastCalled.IsSet())
+	assert.False(t, txBroadcastCalled.IsSet())
+
+	dbb.HeaderReceived(metaBlock, []byte("meta hash"))
+	sleepTime := testExtraDelayForBroadcastBlockInfo +
+		testExtraDelayBetweenBroadcastMbsAndTxs +
+		100*time.Millisecond
+	time.Sleep(sleepTime)
+
+	logOutputStr := observer.getBufferStr()
+	expectedLogMsg := "delayedBlockBroadcaster.processMetachainHeader: no shardData for current shard"
+	require.Contains(t, logOutputStr, expectedLogMsg)
+	require.Contains(t, logOutputStr, fmt.Sprintf("headerHash = %s", hex.EncodeToString(headerHash)))
+
+	assert.False(t, mbBroadcastCalled.IsSet())
+	assert.False(t, txBroadcastCalled.IsSet())
+}
+
+func TestDelayedBlockBroadcaster_HeaderReceivedForNextRegisteredDelayedDataShouldBroadcastBoth(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Counter{}
+	txBroadcastCalled := atomic.Counter{}
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		mbBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		txBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	headerHash, _, miniblocksData, transactionsData := createDelayData("1")
+	delayedData := broadcast.CreateDelayBroadcastDataForLeader(headerHash, miniblocksData, transactionsData)
+	err = dbb.SetLeaderData(delayedData)
+	require.Nil(t, err)
+	time.Sleep(10 * time.Millisecond)
+	assert.Equal(t, int64(0), mbBroadcastCalled.Get())
+	assert.Equal(t, int64(0), txBroadcastCalled.Get())
+
+	headerHash2, _, miniBlockData2, transactionsData2 := createDelayData("2")
+	delayedData = broadcast.CreateDelayBroadcastDataForLeader(headerHash2, miniBlockData2, transactionsData2)
+	err = dbb.SetLeaderData(delayedData)
+	require.Nil(t, err)
+	time.Sleep(10 * time.Millisecond)
+
+	assert.Equal(t, int64(0), mbBroadcastCalled.Get())
+	assert.Equal(t, int64(0), txBroadcastCalled.Get())
+
+	metaBlock := createMetaBlock()
+	metaBlock.ShardInfo[0].HeaderHash = headerHash2
+
+	dbb.HeaderReceived(metaBlock, []byte("meta hash"))
+	sleepTime := testExtraDelayForBroadcastBlockInfo +
+		testExtraDelayBetweenBroadcastMbsAndTxs +
+		10*time.Millisecond
+	time.Sleep(sleepTime)
+	assert.Equal(t, int64(2), mbBroadcastCalled.Get())
+	assert.Equal(t, int64(2), txBroadcastCalled.Get())
+
+	vbd := dbb.GetValidatorBroadcastData()
+	assert.Equal(t, 0, len(vbd))
+}
+
+func TestDelayedBlockBroadcaster_SetLeaderDataNilDataShouldErr(t *testing.T) {
+	t.Parallel()
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetLeaderData(nil)
+	require.Equal(t, spos.ErrNilParameter, err)
+}
+
+func TestDelayedBlockBroadcaster_SetLeaderData(t *testing.T) {
+	t.Parallel()
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	headerHash, _, miniBlockData, transactionsData := createDelayData("1")
+	delayedData := broadcast.CreateDelayBroadcastDataForLeader(headerHash, miniBlockData, transactionsData)
+	err = dbb.SetLeaderData(delayedData)
+	require.Nil(t, err)
+
+	vbb := dbb.GetLeaderBroadcastData()
+	require.Equal(t, 1, len(vbb))
+}
+
+func TestDelayedBlockBroadcaster_SetLeaderDataOverCacheSizeShouldBroadcastOldest(t *testing.T) {
+	observer := createLogsObserver()
+	err := logger.AddLogObserver(observer, &logger.PlainFormatter{})
+	require.Nil(t, err)
+
+	originalLogPattern := logger.GetLogLevelPattern()
+	err = logger.SetLogLevel("*:DEBUG")
+	require.Nil(t, err)
+
+	defer func() {
+		err = logger.RemoveLogObserver(observer)
+		require.Nil(t, err)
+		err = logger.SetLogLevel(originalLogPattern)
+		require.Nil(t, err)
+	}()
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	headerHash1, _, miniBlockData1, transactionsData1 := createDelayData("1")
+	delayedData1 := broadcast.CreateDelayBroadcastDataForLeader(headerHash1, miniBlockData1, transactionsData1)
+	err = dbb.SetLeaderData(delayedData1)
+	require.Nil(t, err)
+	time.Sleep(10 * time.Millisecond)
+
+	headerHash2, _, miniBlockData2, transactionsData2 := createDelayData("2")
+	delayedData2 := broadcast.CreateDelayBroadcastDataForLeader(headerHash2, miniBlockData2, transactionsData2)
+	err = dbb.SetLeaderData(delayedData2)
+	require.Nil(t, err)
+	time.Sleep(10 * time.Millisecond)
+
+	// should trigger the log message
+	headerHash3, _, miniBlockData3, transactionsData3 := createDelayData("3")
+	delayedData3 := broadcast.CreateDelayBroadcastDataForLeader(headerHash3, miniBlockData3, transactionsData3)
+	err = dbb.SetLeaderData(delayedData3)
+	require.Nil(t, err)
+	time.Sleep(10 * time.Millisecond)
+
+	logOutputStr := observer.getBufferStr()
+	expectedLogMsg := "delayedBlockBroadcaster.SetLeaderData: leader broadcasts old data before alarm due to too much delay data"
+	require.Contains(t, logOutputStr, expectedLogMsg)
+	require.Contains(t, logOutputStr, fmt.Sprintf("headerHash = %s", hex.EncodeToString(headerHash1)))
+	require.Contains(t, logOutputStr, "nbDelayedData = 3")
+	require.Contains(t, logOutputStr, "maxDelayCacheSize = 2")
+
+	vbb := dbb.GetLeaderBroadcastData()
+	require.Equal(t, 2, len(vbb))
+}
+
+func TestDelayedBlockBroadcaster_SetValidatorDataNilDataShouldErr(t *testing.T) {
+	t.Parallel()
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetValidatorData(nil)
+	require.Equal(t, spos.ErrNilParameter, err)
+
+	vbb := dbb.GetLeaderBroadcastData()
+	require.Equal(t, 0, len(vbb))
+}
+
+func TestDelayedBlockBroadcaster_SetValidatorData(t *testing.T) {
+	t.Parallel()
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	vArgs := createValidatorDelayArgs(0)
+	delayedData := broadcast.CreateDelayBroadcastDataForValidator(
+		vArgs.headerHash,
+		vArgs.header,
+		vArgs.miniBlocks,
+		vArgs.miniBlockHashes,
+		vArgs.transactions,
+		vArgs.order,
+	)
+	err = dbb.SetValidatorData(delayedData)
+	require.Nil(t, err)
+
+	vbb := dbb.GetValidatorBroadcastData()
+	require.Equal(t, 1, len(vbb))
+}
+
+func TestDelayedBlockBroadcaster_SetBroadcastHandlersFailsIfNilHandler(t *testing.T) {
+	t.Parallel()
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(nil, nil, nil, nil)
+	require.Equal(t, spos.ErrNilParameter, err)
+}
+
+func TestDelayedBlockBroadcaster_SetHeaderForValidatorWithoutSignaturesShouldNotSetAlarm(t *testing.T) {
+	observer := createLogsObserver()
+	err := logger.AddLogObserver(observer, &logger.PlainFormatter{})
+	require.Nil(t, err)
+
+	originalLogPattern := logger.GetLogLevelPattern()
+	err = logger.SetLogLevel("*:TRACE")
+	require.Nil(t, err)
+
+	defer func() {
+		err = logger.RemoveLogObserver(observer)
+		require.Nil(t, err)
+		err = logger.SetLogLevel(originalLogPattern)
+		require.Nil(t, err)
+	}()
+
+	mbBroadcastCalled := atomic.Counter{}
+	txBroadcastCalled := atomic.Counter{}
+	headerBroadcastCalled := atomic.Counter{}
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		mbBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		txBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		headerBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	vArgs := createValidatorDelayArgs(0)
+
+	valHeaderData := broadcast.CreateValidatorHeaderBroadcastData(
+		vArgs.headerHash,
+		vArgs.header,
+		vArgs.metaMiniBlocks,
+		vArgs.metaTransactions,
+		vArgs.order,
+	)
+	err = dbb.SetHeaderForValidator(valHeaderData)
+	require.Nil(t, err)
+
+	logOutputStr := observer.getBufferStr()
+	expectedLogMsg := "delayedBlockBroadcaster.SetHeaderForValidator: header alarm has not been set"
+	require.Contains(t, logOutputStr, expectedLogMsg)
+	require.Contains(t, logOutputStr, fmt.Sprintf("validatorConsensusOrder = %d", vArgs.order))
+
+	vbb := dbb.GetValidatorHeaderBroadcastData()
+	require.Equal(t, 0, len(vbb))
+
+	sleepTime := broadcast.ValidatorDelayPerOrder()*time.Duration(vArgs.order) +
+		time.Millisecond*100
+	time.Sleep(sleepTime)
+
+	vbb = dbb.GetValidatorHeaderBroadcastData()
+	require.Equal(t, 0, len(vbb))
+}
+
+func TestDelayedBlockBroadcaster_SetHeaderForValidatorShouldSetAlarmAndBroadcastHeader(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Counter{}
+	txBroadcastCalled := atomic.Counter{}
+	headerBroadcastCalled := atomic.Counter{}
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		mbBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		txBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		headerBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	vArgs := createValidatorDelayArgs(0)
+	err = vArgs.header.SetSignature([]byte("agg sig"))
+	require.Nil(t, err)
+
+	valHeaderData := broadcast.CreateValidatorHeaderBroadcastData(
+		vArgs.headerHash,
+		vArgs.header,
+		vArgs.metaMiniBlocks,
+		vArgs.metaTransactions,
+		vArgs.order,
+	)
+	err = dbb.SetHeaderForValidator(valHeaderData)
+	require.Nil(t, err)
+
+	vbb := dbb.GetValidatorHeaderBroadcastData()
+	require.Equal(t, 1, len(vbb))
+	require.Equal(t, int64(0), headerBroadcastCalled.Get())
+	require.Equal(t, int64(0), mbBroadcastCalled.Get())
+	require.Equal(t, int64(0), txBroadcastCalled.Get())
+
+	sleepTime := broadcast.ValidatorDelayPerOrder()*time.Duration(vArgs.order) +
+		time.Millisecond*100
+	time.Sleep(sleepTime)
+
+	// alarm expired and sent header
+	require.Equal(t, int64(1), headerBroadcastCalled.Get())
+	require.Equal(t, int64(0), mbBroadcastCalled.Get())
+	require.Equal(t, int64(0), txBroadcastCalled.Get())
+
+	vbb = dbb.GetValidatorHeaderBroadcastData()
+	require.Equal(t, 0, len(vbb))
+}
+
+func TestDelayedBlockBroadcaster_SetHeaderForValidator_BroadcastHeaderError(t *testing.T) {
+	observer := createLogsObserver()
+	err := logger.AddLogObserver(observer, &logger.PlainFormatter{})
+	require.Nil(t, err)
+
+	defer func() {
+		err = logger.RemoveLogObserver(observer)
+		require.Nil(t, err)
+	}()
+
+	mbBroadcastCalled := atomic.Counter{}
+	txBroadcastCalled := atomic.Counter{}
+
+	broadcastError := "broadcast error"
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		mbBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		txBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		return errors.New(broadcastError)
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	vArgs := createValidatorDelayArgs(0)
+	err = vArgs.header.SetSignature([]byte("agg sig"))
+	require.Nil(t, err)
+
+	valHeaderData := broadcast.CreateValidatorHeaderBroadcastData(
+		vArgs.headerHash,
+		vArgs.header,
+		vArgs.metaMiniBlocks,
+		vArgs.metaTransactions,
+		vArgs.order,
+	)
+	err = dbb.SetHeaderForValidator(valHeaderData)
+	require.Nil(t, err)
+
+	vbb := dbb.GetValidatorHeaderBroadcastData()
+	require.Equal(t, 1, len(vbb))
+	require.Equal(t, int64(0), mbBroadcastCalled.Get())
+	require.Equal(t, int64(0), txBroadcastCalled.Get())
+
+	sleepTime := broadcast.ValidatorDelayPerOrder()*time.Duration(vArgs.order) +
+		time.Millisecond*100
+	time.Sleep(sleepTime)
+
+	logOutputStr := observer.getBufferStr()
+	expectedLogMsg := "delayedBlockBroadcaster.headerAlarmExpired error = %s"
+	require.Contains(t, logOutputStr, fmt.Sprintf(expectedLogMsg, broadcastError))
+
+	require.Equal(t, int64(0), mbBroadcastCalled.Get())
+	require.Equal(t, int64(0), txBroadcastCalled.Get())
+
+	vbb = dbb.GetValidatorHeaderBroadcastData()
+	require.Equal(t, 0, len(vbb))
+}
+
+func TestDelayedBlockBroadcaster_SetValidatorDataFinalizedMetaHeaderShouldSetAlarmAndBroadcastHeaderAndData(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Counter{}
+	txBroadcastCalled := atomic.Counter{}
+	headerBroadcastCalled := atomic.Counter{}
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		mbBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		txBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		headerBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	delayBroadcasterArgs.ShardCoordinator = mock.ShardCoordinatorMock{
+		ShardID: core.MetachainShardId,
+	}
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	vArgs := createValidatorDelayArgs(0)
+	err = vArgs.header.SetSignature([]byte("agg sig"))
+	require.Nil(t, err)
+
+	err = vArgs.header.SetShardID(core.MetachainShardId)
+	require.Nil(t, err)
+
+	valData := broadcast.CreateValidatorHeaderBroadcastData(
+		vArgs.headerHash,
+		vArgs.header,
+		vArgs.metaMiniBlocks,
+		vArgs.metaTransactions,
+		vArgs.order,
+	)
+	err = dbb.SetHeaderForValidator(valData)
+	require.Nil(t, err)
+
+	vhbd := dbb.GetValidatorHeaderBroadcastData()
+	require.Equal(t, 1, len(vhbd))
+	require.Equal(t, int64(0), headerBroadcastCalled.Get())
+	require.Equal(t, int64(0), mbBroadcastCalled.Get())
+	require.Equal(t, int64(0), txBroadcastCalled.Get())
+
+	sleepTime := broadcast.ValidatorDelayPerOrder()*time.Duration(vArgs.order) +
+		testExtraDelayForBroadcastBlockInfo +
+		testExtraDelayBetweenBroadcastMbsAndTxs +
+		time.Millisecond*100
+	time.Sleep(sleepTime)
+
+	// alarm expired and sent header
+	require.Equal(t, int64(1), headerBroadcastCalled.Get())
+	require.Equal(t, int64(1), mbBroadcastCalled.Get())
+	require.Equal(t, int64(1), txBroadcastCalled.Get())
+
+	vhbd = dbb.GetValidatorHeaderBroadcastData()
+	require.Equal(t, 0, len(vhbd))
+}
+
+func TestDelayedBlockBroadcaster_InterceptedHeaderShouldCancelAlarm(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Counter{}
+	txBroadcastCalled := atomic.Counter{}
+	headerBroadcastCalled := atomic.Counter{}
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		mbBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		txBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		headerBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	delayBroadcasterArgs.ShardCoordinator = mock.ShardCoordinatorMock{
+		ShardID: core.MetachainShardId,
+	}
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	vArgs := createValidatorDelayArgs(0)
+	err = vArgs.header.SetSignature([]byte("agg sig"))
+	require.Nil(t, err)
+
+	err = vArgs.header.SetShardID(core.MetachainShardId)
+	require.Nil(t, err)
+
+	delayedData := broadcast.CreateDelayBroadcastDataForValidator(
+		vArgs.headerHash,
+		vArgs.header,
+		vArgs.miniBlocks,
+		vArgs.miniBlockHashes,
+		vArgs.transactions,
+		vArgs.order,
+	)
+	err = dbb.SetValidatorData(delayedData)
+	require.Nil(t, err)
+
+	vbb := dbb.GetValidatorBroadcastData()
+	require.Equal(t, 1, len(vbb))
+	require.Equal(t, int64(0), headerBroadcastCalled.Get())
+	require.Equal(t, int64(0), mbBroadcastCalled.Get())
+	require.Equal(t, int64(0), txBroadcastCalled.Get())
+
+	sleepTime := broadcast.ValidatorDelayPerOrder()*time.Duration(vArgs.order) +
+		time.Second
+
+	// should cancel alarm
+	dbb.InterceptedHeaderData("headerTopic", vArgs.headerHash, vArgs.header)
+	time.Sleep(sleepTime)
+
+	require.Equal(t, int64(0), headerBroadcastCalled.Get())
+	require.Equal(t, int64(0), mbBroadcastCalled.Get())
+	require.Equal(t, int64(0), txBroadcastCalled.Get())
+
+	vbb = dbb.GetValidatorBroadcastData()
+	require.Equal(t, 1, len(vbb))
+}
+
+func TestDelayedBlockBroadcaster_InterceptedHeaderShouldCancelAlarmForHeaderBroadcast(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Counter{}
+	txBroadcastCalled := atomic.Counter{}
+	headerBroadcastCalled := atomic.Counter{}
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		mbBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		txBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		headerBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	delayBroadcasterArgs.ShardCoordinator = mock.ShardCoordinatorMock{
+		ShardID: core.MetachainShardId,
+	}
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	vArgs := createValidatorDelayArgs(0)
+	err = vArgs.header.SetSignature([]byte("agg sig"))
+	require.Nil(t, err)
+
+	err = vArgs.header.SetShardID(core.MetachainShardId)
+	require.Nil(t, err)
+
+	validatorHeaderBroadcastData := broadcast.CreateValidatorHeaderBroadcastData(
+		vArgs.headerHash,
+		vArgs.header,
+		vArgs.metaMiniBlocks,
+		vArgs.metaTransactions,
+		vArgs.order,
+	)
+	err = dbb.SetHeaderForValidator(validatorHeaderBroadcastData)
+	require.Nil(t, err)
+
+	vhbd := dbb.GetValidatorHeaderBroadcastData()
+	require.Equal(t, 1, len(vhbd))
+	require.Equal(t, int64(0), headerBroadcastCalled.Get())
+	require.Equal(t, int64(0), mbBroadcastCalled.Get())
+	require.Equal(t, int64(0), txBroadcastCalled.Get())
+
+	sleepTime := broadcast.ValidatorDelayPerOrder()*time.Duration(vArgs.order) +
+		time.Second
+
+	// should cancel alarm
+	dbb.InterceptedHeaderData("headerTopic", vArgs.headerHash, vArgs.header)
+	time.Sleep(sleepTime)
+
+	require.Equal(t, int64(0), headerBroadcastCalled.Get())
+	require.Equal(t, int64(0), mbBroadcastCalled.Get())
+	require.Equal(t, int64(0), txBroadcastCalled.Get())
+
+	vhbd = dbb.GetValidatorHeaderBroadcastData()
+	require.Equal(t, 0, len(vhbd))
+}
+
+func TestDelayedBlockBroadcaster_InterceptedHeaderInvalidOrDifferentShouldIgnore(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Counter{}
+	txBroadcastCalled := atomic.Counter{}
+	headerBroadcastCalled := atomic.Counter{}
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		mbBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		txBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		headerBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	delayBroadcasterArgs.ShardCoordinator = mock.ShardCoordinatorMock{
+		ShardID: core.MetachainShardId,
+	}
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	vArgs := createValidatorDelayArgs(0)
+	err = vArgs.header.SetSignature([]byte("agg sig"))
+	require.Nil(t, err)
+
+	err = vArgs.header.SetShardID(core.MetachainShardId)
+	require.Nil(t, err)
+
+	valHeaderData := broadcast.CreateValidatorHeaderBroadcastData(
+		vArgs.headerHash,
+		vArgs.header,
+		vArgs.metaMiniBlocks,
+		vArgs.metaTransactions,
+		vArgs.order,
+	)
+	err = dbb.SetHeaderForValidator(valHeaderData)
+	require.Nil(t, err)
+
+	vhbd := dbb.GetValidatorHeaderBroadcastData()
+	require.Equal(t, 1, len(vhbd))
+	require.Equal(t, int64(0), headerBroadcastCalled.Get())
+	require.Equal(t, int64(0), mbBroadcastCalled.Get())
+	require.Equal(t, int64(0), txBroadcastCalled.Get())
+
+	invalidHeader := []byte("not a header")
+	prevRandSeed := append([]byte(nil), vArgs.header.GetPrevRandSeed()...)
+	prevRandSeed[0] = ^prevRandSeed[0]
+	differentHeader := block.Header{
+		PrevRandSeed: prevRandSeed,
+		Round:        vArgs.header.GetRound() + 1,
+	}
+	headerHash := append([]byte(nil), vArgs.headerHash...)
+	headerHash[0] = ^headerHash[0]
+
+	// should not cancel alarm
+	dbb.InterceptedHeaderData("headerTopic", headerHash, differentHeader)
+	dbb.InterceptedMiniBlockData("headerTopic", headerHash, invalidHeader)
+	sleepTime := broadcast.ValidatorDelayPerOrder()*time.Duration(vArgs.order) +
+		testExtraDelayForBroadcastBlockInfo +
+		testExtraDelayBetweenBroadcastMbsAndTxs +
+		time.Millisecond*100
+	time.Sleep(sleepTime)
+
+	// alarm expired and sent header
+	require.Equal(t, int64(1), headerBroadcastCalled.Get())
+	require.Equal(t, int64(1), mbBroadcastCalled.Get())
+	require.Equal(t, int64(1), txBroadcastCalled.Get())
+
+	vhbd = dbb.GetValidatorHeaderBroadcastData()
+	require.Equal(t, 0, len(vhbd))
+}
+
+func TestDelayedBlockBroadcaster_SetValidatorDelayBroadcastAccumulatedDataBounded(t *testing.T) {
+	t.Parallel()
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	vbd := dbb.GetValidatorBroadcastData()
+	expectedLen := 0
+	require.Equal(t, expectedLen, len(vbd))
+
+	for i := 1; i < 100; i++ {
+		vArgs := createValidatorDelayArgs(i)
+		delayedData := broadcast.CreateDelayBroadcastDataForValidator(
+			vArgs.headerHash,
+			vArgs.header,
+			vArgs.miniBlocks,
+			vArgs.miniBlockHashes,
+			vArgs.transactions,
+			vArgs.order,
+		)
+
+		err = dbb.SetValidatorData(delayedData)
+		require.Nil(t, err)
+
+		vbd = dbb.GetValidatorBroadcastData()
+		expectedLen = i
+		if i > int(delayBroadcasterArgs.ValidatorCacheSize) {
+			expectedLen = int(delayBroadcasterArgs.ValidatorCacheSize)
+		}
+		require.Equal(t, expectedLen, len(vbd))
+	}
+}
+
+func TestDelayedBlockBroadcaster_ScheduleValidatorBroadcastDifferentHeaderRoundShouldDoNothing(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Counter{}
+	txBroadcastCalled := atomic.Counter{}
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		mbBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		txBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	vArgs := createValidatorDelayArgs(0)
+	delayedData := broadcast.CreateDelayBroadcastDataForValidator(
+		vArgs.headerHash,
+		vArgs.header,
+		vArgs.miniBlocks,
+		vArgs.miniBlockHashes,
+		vArgs.transactions,
+		vArgs.order,
+	)
+	err = dbb.SetValidatorData(delayedData)
+
+	require.Nil(t, err)
+	vbd := dbb.GetValidatorBroadcastData()
+	require.Equal(t, 1, len(vbd))
+
+	hdfv := &broadcast.HeaderDataForValidator{
+		Round:      vArgs.header.GetRound() + 1,
+		HeaderHash: vArgs.headerHash,
+	}
+
+	dbb.ScheduleValidatorBroadcast([]*broadcast.HeaderDataForValidator{hdfv})
+	sleepTime := time.Duration(vArgs.order)*broadcast.ValidatorDelayPerOrder() +
+		100*time.Millisecond
+	time.Sleep(sleepTime)
+
+	// check there was no broadcast and validator delay data still present
+	require.Equal(t, int64(0), mbBroadcastCalled.Get())
+
+	vbd = dbb.GetValidatorBroadcastData()
+	require.Equal(t, 1, len(vbd))
+}
+
+func TestDelayedBlockBroadcaster_ScheduleValidatorBroadcastDifferentPrevRandShouldDoNothing(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Counter{}
+	txBroadcastCalled := atomic.Counter{}
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		mbBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		txBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	vArgs := createValidatorDelayArgs(0)
+	delayedData := broadcast.CreateDelayBroadcastDataForValidator(
+		vArgs.headerHash,
+		vArgs.header,
+		vArgs.miniBlocks,
+		vArgs.miniBlockHashes,
+		vArgs.transactions,
+		vArgs.order,
+	)
+	err = dbb.SetValidatorData(delayedData)
+
+	require.Nil(t, err)
+	vbd := dbb.GetValidatorBroadcastData()
+	require.Equal(t, 1, len(vbd))
+
+	differentHeaderHash := make([]byte, len(vArgs.header.GetPrevRandSeed()))
+	copy(differentHeaderHash, vArgs.header.GetPrevRandSeed())
+	differentHeaderHash[0] = ^differentHeaderHash[0]
+	hdfv := &broadcast.HeaderDataForValidator{
+		Round:      vArgs.header.GetRound(),
+		HeaderHash: differentHeaderHash,
+	}
+
+	dbb.ScheduleValidatorBroadcast([]*broadcast.HeaderDataForValidator{hdfv})
+	sleepTime := time.Duration(vArgs.order)*broadcast.ValidatorDelayPerOrder() +
+		100*time.Millisecond
+	time.Sleep(sleepTime)
+
+	// check there was no broadcast and validator delay data still present
+	require.Equal(t, int64(0), mbBroadcastCalled.Get())
+
+	vbd = dbb.GetValidatorBroadcastData()
+	require.Equal(t, 1, len(vbd))
+}
+
+func TestDelayedBlockBroadcaster_ScheduleValidatorBroadcastSameRoundAndPrevRandShouldBroadcast(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Counter{}
+	txBroadcastCalled := atomic.Counter{}
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		mbBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		txBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	vArgs := createValidatorDelayArgs(0)
+	delayedData := broadcast.CreateDelayBroadcastDataForValidator(
+		vArgs.headerHash,
+		vArgs.header,
+		vArgs.miniBlocks,
+		vArgs.miniBlockHashes,
+		vArgs.transactions,
+		vArgs.order,
+	)
+	err = dbb.SetValidatorData(delayedData)
+
+	require.Nil(t, err)
+	vbd := dbb.GetValidatorBroadcastData()
+	require.Equal(t, 1, len(vbd))
+
+	hdfv := &broadcast.HeaderDataForValidator{
+		Round:      vArgs.header.GetRound(),
+		HeaderHash: vArgs.headerHash,
+	}
+
+	dbb.ScheduleValidatorBroadcast([]*broadcast.HeaderDataForValidator{hdfv})
+	sleepTime := time.Duration(vArgs.order)*broadcast.ValidatorDelayPerOrder() +
+		testExtraDelayForBroadcastBlockInfo +
+		testExtraDelayBetweenBroadcastMbsAndTxs +
+		100*time.Millisecond
+	time.Sleep(sleepTime)
+
+	// check there was a broadcast and validator delay data empty
+	require.Equal(t, int64(1), mbBroadcastCalled.Get())
+	require.Equal(t, int64(1), txBroadcastCalled.Get())
+
+	vbd = dbb.GetValidatorBroadcastData()
+	require.Equal(t, 0, len(vbd))
+}
+
+func TestDelayedBlockBroadcaster_AlarmExpiredShouldBroadcastTheDataForRegisteredDelayedData(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Counter{}
+	txBroadcastCalled := atomic.Counter{}
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		mbBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		txBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	vArgs := createValidatorDelayArgs(0)
+	delayedData := broadcast.CreateDelayBroadcastDataForValidator(
+		vArgs.headerHash,
+		vArgs.header,
+		vArgs.miniBlocks,
+		vArgs.miniBlockHashes,
+		vArgs.transactions,
+		vArgs.order,
+	)
+	err = dbb.SetValidatorData(delayedData)
+
+	require.Nil(t, err)
+	vbd := dbb.GetValidatorBroadcastData()
+	require.Equal(t, 1, len(vbd))
+
+	dbb.AlarmExpired(hex.EncodeToString(vArgs.headerHash))
+	sleepTime := testExtraDelayBetweenBroadcastMbsAndTxs +
+		time.Millisecond*100
+	time.Sleep(sleepTime)
+
+	// check there was a broadcast and validator delay data empty
+	require.Equal(t, int64(1), mbBroadcastCalled.Get())
+	require.Equal(t, int64(1), txBroadcastCalled.Get())
+
+	vbd = dbb.GetValidatorBroadcastData()
+	require.Equal(t, 0, len(vbd))
+}
+
+func TestDelayedBlockBroadcaster_AlarmExpiredShouldDoNothingForNotRegisteredData(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Counter{}
+	txBroadcastCalled := atomic.Counter{}
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		mbBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		txBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	vArgs := createValidatorDelayArgs(0)
+	delayedData := broadcast.CreateDelayBroadcastDataForValidator(
+		vArgs.headerHash,
+		vArgs.header,
+		vArgs.miniBlocks,
+		vArgs.miniBlockHashes,
+		vArgs.transactions,
+		vArgs.order,
+	)
+	err = dbb.SetValidatorData(delayedData)
+
+	require.Nil(t, err)
+	vbd := dbb.GetValidatorBroadcastData()
+	require.Equal(t, 1, len(vbd))
+
+	differentHeaderHash := make([]byte, len(vArgs.headerHash))
+	copy(differentHeaderHash, vArgs.headerHash)
+	differentHeaderHash[0] = ^differentHeaderHash[0]
+	dbb.AlarmExpired(string(differentHeaderHash))
+	time.Sleep(time.Millisecond * 100)
+
+	// check there was no broadcast and validator delay data still present
+	require.Equal(t, int64(0), mbBroadcastCalled.Get())
+	require.Equal(t, int64(0), txBroadcastCalled.Get())
+
+	vbd = dbb.GetValidatorBroadcastData()
+	require.Equal(t, 1, len(vbd))
+}
+
+func TestDelayedBlockBroadcaster_HeaderAlarmExpired_InvalidAlarmID(t *testing.T) {
+	observer := createLogsObserver()
+	err := logger.AddLogObserver(observer, &logger.PlainFormatter{})
+	require.Nil(t, err)
+
+	defer func() {
+		err = logger.RemoveLogObserver(observer)
+		require.Nil(t, err)
+	}()
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	invalidAlarmID := "invalid_alarm_id"
+	dbb.HeaderAlarmExpired(invalidAlarmID)
+
+	logOutputStr := observer.getBufferStr()
+	expectedLogMsg := "delayedBlockBroadcaster.headerAlarmExpired"
+	require.Contains(t, logOutputStr, expectedLogMsg)
+	require.Contains(t, logOutputStr, fmt.Sprintf("alarmID = %s", invalidAlarmID))
+}
+
+func TestDelayedBlockBroadcaster_HeaderAlarmExpired_HeaderDataNil(t *testing.T) {
+	observer := createLogsObserver()
+	err := logger.AddLogObserver(observer, &logger.PlainFormatter{})
+	require.Nil(t, err)
+
+	originalLogPattern := logger.GetLogLevelPattern()
+	err = logger.SetLogLevel("*:DEBUG")
+	require.Nil(t, err)
+
+	defer func() {
+		err = logger.RemoveLogObserver(observer)
+		require.Nil(t, err)
+		err = logger.SetLogLevel(originalLogPattern)
+		require.Nil(t, err)
+	}()
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	invalidHeaderHash := []byte("invalid_header_hash")
+	alarmID := "header_" + hex.EncodeToString(invalidHeaderHash)
+
+	dbb.HeaderAlarmExpired(alarmID)
+
+	logOutputStr := observer.getBufferStr()
+	expectedLogMsg := "delayedBlockBroadcaster.headerAlarmExpired: alarm data is nil"
+	require.Contains(t, logOutputStr, expectedLogMsg)
+	require.Contains(t, logOutputStr, "alarmID = "+alarmID)
+}
+
+func TestDelayedBlockBroadcaster_RegisterInterceptorCallback(t *testing.T) {
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	var cbsHeader []func(topic string, hash []byte, data interface{})
+	var cbsMiniblock []func(topic string, hash []byte, data interface{})
+	mutCbs := &sync.Mutex{}
+
+	registerHandlerHeaders := func(handler func(topic string, hash []byte, data interface{})) {
+		mutCbs.Lock()
+		cbsHeader = append(cbsHeader, handler)
+		mutCbs.Unlock()
+	}
+
+	registerHandlerMiniblocks := func(handler func(topic string, hash []byte, data interface{})) {
+		mutCbs.Lock()
+		cbsMiniblock = append(cbsMiniblock, handler)
+		mutCbs.Unlock()
+	}
+
+	delayBroadcasterArgs.InterceptorsContainer = &testscommon.InterceptorsContainerStub{
+		GetCalled: func(topic string) (process.Interceptor, error) {
+			var hdl func(handler func(topic string, hash []byte, data interface{}))
+			switch topic {
+			case "shardBlocks_0_META":
+				hdl = registerHandlerHeaders
+			case "txBlockBodies_0_1":
+			case "txBlockBodies_0_META":
+				hdl = registerHandlerMiniblocks
+			default:
+				return nil, errors.New("unexpected topic")
+			}
+
+			return &testscommon.InterceptorStub{
+				RegisterHandlerCalled: hdl,
+			}, nil
+		},
+	}
+
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	vArgs := createValidatorDelayArgs(0)
+	delayedData := broadcast.CreateDelayBroadcastDataForValidator(
+		vArgs.headerHash,
+		vArgs.header,
+		vArgs.miniBlocks,
+		vArgs.miniBlockHashes,
+		vArgs.transactions,
+		vArgs.order,
+	)
+
+	mutCbs.Lock()
+	nbRegisteredMbsHandlers := len(cbsMiniblock)
+	nbRegisteredHeaderHandlers := len(cbsHeader)
+	mutCbs.Unlock()
+	require.Equal(t, 1, nbRegisteredMbsHandlers)
+	require.Equal(t, 1, nbRegisteredHeaderHandlers)
+
+	err = dbb.SetValidatorData(delayedData)
+	require.Nil(t, err)
+
+	cb := func(topic string, hash []byte, data interface{}) {}
+	err = dbb.RegisterInterceptorCallback(cb)
+	require.Nil(t, err)
+
+	mutCbs.Lock()
+	nbRegisteredMbsHandlers = len(cbsMiniblock)
+	mutCbs.Unlock()
+	require.Equal(t, 2, nbRegisteredMbsHandlers)
+}
+
+func TestDelayedBlockBroadcaster_BroadcastBlockDataFailedBroadcast(t *testing.T) {
+	observer := createLogsObserver()
+	err := logger.AddLogObserver(observer, &logger.PlainFormatter{})
+	require.Nil(t, err)
+
+	defer func() {
+		err = logger.RemoveLogObserver(observer)
+		require.Nil(t, err)
+	}()
+
+	errMiniBlocks := "mini blocks broadcast error"
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		return errors.New(errMiniBlocks)
+	}
+	errTxs := "transactions broadcast error"
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		return errors.New(errTxs)
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	dbb.BroadcastBlockData(nil, nil, nil, time.Millisecond*100, 0)
+
+	logOutputStr := observer.getBufferStr()
+	require.Contains(t, logOutputStr, errMiniBlocks)
+	require.Contains(t, logOutputStr, errTxs)
+}
+
+func TestDelayedBlockBroadcaster_GetShardDataFromMetaChainBlock(t *testing.T) {
+	t.Parallel()
+
+	shardID := uint32(0)
+
+	t.Run("nil header", func(t *testing.T) {
+		t.Parallel()
+
+		headerHashes, dataForValidators, err := broadcast.GetShardDataFromMetaChainBlock(nil, shardID)
+		require.NotNil(t, err)
+		require.Nil(t, headerHashes)
+		require.Empty(t, dataForValidators)
+
+		require.Equal(t, spos.ErrNilHeader, err)
+	})
+
+	t.Run("shard header, should fail", func(t *testing.T) {
+		t.Parallel()
+
+		headerHashes, dataForValidators, err := broadcast.GetShardDataFromMetaChainBlock(&block.HeaderV3{}, shardID)
+		require.NotNil(t, err)
+		require.Nil(t, headerHashes)
+		require.Empty(t, dataForValidators)
+
+		require.Equal(t, spos.ErrInvalidMetaHeader, err)
+	})
+
+	t.Run("should work before header v3", func(t *testing.T) {
+		t.Parallel()
+
+		headerHash0 := []byte("headerHash0")
+		headerRound0 := uint64(2)
+		shardID := uint32(1)
+
+		metaHeader := &block.MetaBlock{
+			Nonce: 5,
+			Round: 1,
+			ShardInfo: []block.ShardData{
+				{
+					HeaderHash: headerHash0,
+					ShardMiniBlockHeaders: []block.MiniBlockHeader{
+						{
+							Hash:            []byte("miniblock hash"),
+							ReceiverShardID: 1,
+							SenderShardID:   0,
+							TxCount:         2,
+						},
+					},
+					Round:   headerRound0,
+					ShardID: shardID,
+				},
+			},
+		}
+
+		expHeaderHashes := [][]byte{
+			headerHash0,
+		}
+
+		expValData := []*broadcast.HeaderDataForValidator{
+			{
+				Round:      headerRound0,
+				HeaderHash: headerHash0,
+			},
+		}
+
+		headerHashes, dfv, err := broadcast.GetShardDataFromMetaChainBlock(metaHeader, shardID)
+		require.Nil(t, err)
+		require.Equal(t, expHeaderHashes, headerHashes)
+		require.Equal(t, expValData, dfv)
+	})
+
+	t.Run("should work with meta header v3", func(t *testing.T) {
+		t.Parallel()
+
+		headerHashP0 := []byte("headerHashP0")
+		headerRoundP0 := uint64(2)
+		headerHashP1 := []byte("headerHashP1")
+		headerRoundP1 := uint64(3)
+		headerHashP2 := []byte("headerHashP2")
+		headerRoundP2 := uint64(4)
+
+		shardID := uint32(1)
+
+		metaHeader := &block.MetaBlockV3{
+			Nonce: 5,
+			Round: 1,
+			ShardInfo: []block.ShardData{
+				{
+					HeaderHash: []byte("headerHash"), // this should not be referenced
+					ShardMiniBlockHeaders: []block.MiniBlockHeader{
+						{
+							Hash:            []byte("miniblock hash"),
+							ReceiverShardID: 1,
+							SenderShardID:   0,
+							TxCount:         2,
+						},
+					},
+				},
+			},
+			ShardInfoProposal: []block.ShardDataProposal{
+				{
+					HeaderHash: headerHashP0,
+					Round:      headerRoundP0,
+					ShardID:    shardID,
+				},
+				{
+					HeaderHash: headerHashP1,
+					Round:      headerRoundP1,
+					ShardID:    shardID,
+				},
+				{
+					HeaderHash: headerHashP2,
+					Round:      headerRoundP2,
+					ShardID:    shardID,
+				},
+			},
+		}
+
+		expHeaderHashes := [][]byte{
+			headerHashP0,
+			headerHashP1,
+			headerHashP2,
+		}
+
+		expValData := []*broadcast.HeaderDataForValidator{
+			{
+				Round:      headerRoundP0,
+				HeaderHash: headerHashP0,
+			},
+			{
+				Round:      headerRoundP1,
+				HeaderHash: headerHashP1,
+			},
+			{
+				Round:      headerRoundP2,
+				HeaderHash: headerHashP2,
+			},
+		}
+
+		headerHashes, dfv, err := broadcast.GetShardDataFromMetaChainBlock(metaHeader, shardID)
+		require.Nil(t, err)
+
+		require.Equal(t, expHeaderHashes, headerHashes)
+		require.Equal(t, expValData, dfv)
+	})
+}
+
+func TestDelayedBlockBroadcaster_InterceptedMiniBlockForNotSetValDataShouldBroadcast(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Counter{}
+	txBroadcastCalled := atomic.Counter{}
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		mbBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		txBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	vArgs := createValidatorDelayArgs(0)
+	delayedData := broadcast.CreateDelayBroadcastDataForValidator(
+		vArgs.headerHash,
+		vArgs.header,
+		vArgs.miniBlocks,
+		vArgs.miniBlockHashes,
+		vArgs.transactions,
+		vArgs.order,
+	)
+	err = dbb.SetValidatorData(delayedData)
+	require.Nil(t, err)
+
+	vbd := dbb.GetValidatorBroadcastData()
+	require.Equal(t, 1, len(vbd))
+	hdfv := &broadcast.HeaderDataForValidator{
+		Round:      vArgs.header.GetRound(),
+		HeaderHash: vArgs.headerHash,
+	}
+
+	dbb.InterceptedMiniBlockData("txBlockBodies_0_1", []byte("some other miniBlock hash"), &block.MiniBlock{})
+	vbd = dbb.GetValidatorBroadcastData()
+	require.Equal(t, 1, len(vbd))
+
+	dbb.ScheduleValidatorBroadcast([]*broadcast.HeaderDataForValidator{hdfv})
+	sleepTime := time.Duration(vArgs.order)*broadcast.ValidatorDelayPerOrder() +
+		testExtraDelayForBroadcastBlockInfo +
+		testExtraDelayBetweenBroadcastMbsAndTxs +
+		100*time.Millisecond
+	time.Sleep(sleepTime)
+
+	// check there was a broadcast and validator delay data empty
+	require.Equal(t, int64(1), mbBroadcastCalled.Get())
+	require.Equal(t, int64(1), txBroadcastCalled.Get())
+
+	vbd = dbb.GetValidatorBroadcastData()
+	require.Equal(t, 0, len(vbd))
+}
+
+func TestDelayedBlockBroadcaster_InterceptedMiniBlockOutOfManyForSetValDataShouldBroadcast(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Counter{}
+	txBroadcastCalled := atomic.Counter{}
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		mbBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		txBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	vArgs := createValidatorDelayArgs(0)
+	miniBlockHashToNotify := []byte("miniBlockHash to notify")
+	destShardID := 1
+	vArgs.miniBlockHashes["txBlockBodies_0_"+strconv.Itoa(destShardID)][string(miniBlockHashToNotify)] = struct{}{}
+	delayedData := broadcast.CreateDelayBroadcastDataForValidator(
+		vArgs.headerHash,
+		vArgs.header,
+		vArgs.miniBlocks,
+		vArgs.miniBlockHashes,
+		vArgs.transactions,
+		vArgs.order,
+	)
+	err = dbb.SetValidatorData(delayedData)
+	require.Nil(t, err)
+
+	vbd := dbb.GetValidatorBroadcastData()
+	require.Equal(t, 1, len(vbd))
+
+	hdfv := &broadcast.HeaderDataForValidator{
+		Round:      vArgs.header.GetRound(),
+		HeaderHash: vArgs.headerHash,
+	}
+
+	dbb.ScheduleValidatorBroadcast([]*broadcast.HeaderDataForValidator{hdfv})
+	dbb.InterceptedMiniBlockData("txBlockBodies_0_"+strconv.Itoa(destShardID), miniBlockHashToNotify, &block.MiniBlock{})
+	sleepTime := time.Duration(vArgs.order)*broadcast.ValidatorDelayPerOrder() +
+		testExtraDelayForBroadcastBlockInfo +
+		testExtraDelayBetweenBroadcastMbsAndTxs +
+		100*time.Millisecond
+	time.Sleep(sleepTime)
+
+	// check there was a broadcast and validator delay data empty
+	require.Equal(t, int64(1), mbBroadcastCalled.Get())
+	require.Equal(t, int64(1), txBroadcastCalled.Get())
+
+	vbd = dbb.GetValidatorBroadcastData()
+	require.Equal(t, 0, len(vbd))
+}
+
+func TestDelayedBlockBroadcaster_InterceptedMiniBlockFinalForSetValDataShouldNotBroadcast(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Counter{}
+	txBroadcastCalled := atomic.Counter{}
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		mbBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		txBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	vArgs := createValidatorDelayArgs(0)
+	mbHahsesToNotify := getDataToNotifyFromArgs(vArgs)
+	delayedData := broadcast.CreateDelayBroadcastDataForValidator(
+		vArgs.headerHash,
+		vArgs.header,
+		vArgs.miniBlocks,
+		vArgs.miniBlockHashes,
+		vArgs.transactions,
+		vArgs.order,
+	)
+	err = dbb.SetValidatorData(delayedData)
+	require.Nil(t, err)
+
+	vbd := dbb.GetValidatorBroadcastData()
+	require.Equal(t, 1, len(vbd))
+
+	hdfv := &broadcast.HeaderDataForValidator{
+		Round:      vArgs.header.GetRound(),
+		HeaderHash: vArgs.headerHash,
+	}
+
+	dbb.ScheduleValidatorBroadcast([]*broadcast.HeaderDataForValidator{hdfv})
+	for destShardID, hashes := range mbHahsesToNotify {
+		for _, hash := range hashes {
+			dbb.InterceptedMiniBlockData(destShardID, hash, &block.MiniBlock{})
+		}
+	}
+	sleepTime := time.Duration(vArgs.order)*broadcast.ValidatorDelayPerOrder() +
+		100*time.Millisecond
+	time.Sleep(sleepTime)
+
+	// check there was no broadcast and validator delay data empty
+	require.Equal(t, int64(0), mbBroadcastCalled.Get())
+	require.Equal(t, int64(0), txBroadcastCalled.Get())
+
+	vbd = dbb.GetValidatorBroadcastData()
+	require.Equal(t, 0, len(vbd))
+}
+
+func TestDelayedBlockBroadcaster_Close(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Counter{}
+	txBroadcastCalled := atomic.Counter{}
+
+	broadcastMiniBlocks := func(mbData map[uint32][]byte, pk []byte) error {
+		mbBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastTransactions := func(txData map[string][][]byte, pk []byte) error {
+		txBroadcastCalled.Increment()
+		return nil
+	}
+	broadcastHeader := func(header data.HeaderHandler, pk []byte) error {
+		return nil
+	}
+	broadcastConsensusMessage := func(message *consensus.Message) error {
+		return nil
+	}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(broadcastMiniBlocks, broadcastTransactions, broadcastHeader, broadcastConsensusMessage)
+	require.Nil(t, err)
+
+	vArgs := createValidatorDelayArgs(0)
+	delayedData := broadcast.CreateDelayBroadcastDataForValidator(
+		vArgs.headerHash,
+		vArgs.header,
+		vArgs.miniBlocks,
+		vArgs.miniBlockHashes,
+		vArgs.transactions,
+		vArgs.order,
+	)
+	err = dbb.SetValidatorData(delayedData)
+	require.Nil(t, err)
+
+	vbd := dbb.GetValidatorBroadcastData()
+	require.Equal(t, 1, len(vbd))
+
+	hdfv := &broadcast.HeaderDataForValidator{
+		Round:      vArgs.header.GetRound(),
+		HeaderHash: vArgs.headerHash,
+	}
+
+	dbb.ScheduleValidatorBroadcast([]*broadcast.HeaderDataForValidator{hdfv})
+	dbb.Close()
+
+	sleepTime := time.Duration(vArgs.order)*broadcast.ValidatorDelayPerOrder() +
+		100*time.Millisecond
+	time.Sleep(sleepTime)
+
+	// check there was no broadcast
+	require.Equal(t, int64(0), mbBroadcastCalled.Get())
+	require.Equal(t, int64(0), txBroadcastCalled.Get())
+
+	vbd = dbb.GetValidatorBroadcastData()
+	require.Equal(t, 1, len(vbd))
+}
+
+func TestDelayedBlockBroadcaster_HeaderReceivedWithProofsEnabled_DefersUntilProof(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Flag{}
+	txBroadcastCalled := atomic.Flag{}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	delayBroadcasterArgs.EnableEpochsHandler = &enableEpochsHandlerMock.EnableEpochsHandlerStub{
+		IsFlagEnabledInEpochCalled: func(flag core.EnableEpochFlag, epoch uint32) bool {
+			return flag == common.AndromedaFlag
+		},
+	}
+
+	hasProof := false
+	delayBroadcasterArgs.ProofsPool = &dataRetrieverMock.ProofsPoolMock{
+		HasProofCalled: func(shardID uint32, headerHash []byte) bool {
+			return hasProof
+		},
+	}
+
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(
+		func(mbData map[uint32][]byte, pk []byte) error {
+			mbBroadcastCalled.SetValue(true)
+			return nil
+		},
+		func(txData map[string][][]byte, pk []byte) error {
+			txBroadcastCalled.SetValue(true)
+			return nil
+		},
+		func(header data.HeaderHandler, pk []byte) error { return nil },
+		func(message *consensus.Message) error { return nil },
+	)
+	require.Nil(t, err)
+
+	headerHash, _, miniblocksData, transactionsData := createDelayData("1")
+	delayedData := broadcast.CreateDelayBroadcastDataForLeader(headerHash, miniblocksData, transactionsData)
+	err = dbb.SetLeaderData(delayedData)
+	require.Nil(t, err)
+
+	metaBlock := createMetaBlock()
+	metaBlock.ShardInfo[0].HeaderHash = headerHash
+	metaBlock.Epoch = 1
+	metaBlock.Nonce = 10
+	metaHash := []byte("meta hash")
+
+	dbb.HeaderReceived(metaBlock, metaHash)
+
+	sleepTime := testExtraDelayForBroadcastBlockInfo +
+		testExtraDelayBetweenBroadcastMbsAndTxs +
+		100*time.Millisecond
+	time.Sleep(sleepTime)
+
+	assert.False(t, mbBroadcastCalled.IsSet(), "should not broadcast without proof")
+	assert.False(t, txBroadcastCalled.IsSet(), "should not broadcast without proof")
+	assert.Equal(t, 1, dbb.GetPendingMetaHeadersCount(), "header should be pending")
+
+	hasProof = true
+	proof := &block.HeaderProof{
+		HeaderHash:    metaHash,
+		HeaderShardId: core.MetachainShardId,
+		HeaderNonce:   10,
+		HeaderEpoch:   1,
+	}
+	dbb.ProofReceived(proof)
+
+	time.Sleep(sleepTime)
+
+	assert.True(t, mbBroadcastCalled.IsSet(), "should broadcast after proof arrives")
+	assert.True(t, txBroadcastCalled.IsSet(), "should broadcast after proof arrives")
+	assert.Equal(t, 0, dbb.GetPendingMetaHeadersCount(), "pending should be cleared")
+}
+
+func TestDelayedBlockBroadcaster_ProofReceivedEvictsOlderNonces(t *testing.T) {
+	t.Parallel()
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	delayBroadcasterArgs.EnableEpochsHandler = &enableEpochsHandlerMock.EnableEpochsHandlerStub{
+		IsFlagEnabledInEpochCalled: func(flag core.EnableEpochFlag, epoch uint32) bool {
+			return flag == common.AndromedaFlag
+		},
+	}
+	delayBroadcasterArgs.ProofsPool = &dataRetrieverMock.ProofsPoolMock{
+		HasProofCalled: func(shardID uint32, headerHash []byte) bool {
+			return false
+		},
+	}
+
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(
+		func(mbData map[uint32][]byte, pk []byte) error { return nil },
+		func(txData map[string][][]byte, pk []byte) error { return nil },
+		func(header data.HeaderHandler, pk []byte) error { return nil },
+		func(message *consensus.Message) error { return nil },
+	)
+	require.Nil(t, err)
+
+	for i := 0; i < 3; i++ {
+		headerHash, _, miniblocksData, transactionsData := createDelayData(strconv.Itoa(i))
+		delayedData := broadcast.CreateDelayBroadcastDataForLeader(headerHash, miniblocksData, transactionsData)
+		err = dbb.SetLeaderData(delayedData)
+		require.Nil(t, err)
+
+		metaBlock := createMetaBlock()
+		metaBlock.ShardInfo[0].HeaderHash = headerHash
+		metaBlock.Epoch = 1
+		metaBlock.Nonce = uint64(10 + i)
+
+		dbb.HeaderReceived(metaBlock, []byte(fmt.Sprintf("meta hash %d", i)))
+	}
+
+	assert.Equal(t, 3, dbb.GetPendingMetaHeadersCount())
+
+	proof := &block.HeaderProof{
+		HeaderHash:    []byte("unknown hash"),
+		HeaderShardId: core.MetachainShardId,
+		HeaderNonce:   11,
+		HeaderEpoch:   1,
+	}
+	dbb.ProofReceived(proof)
+
+	assert.Equal(t, 1, dbb.GetPendingMetaHeadersCount(), "only nonce 12 should remain")
+}
+
+func TestDelayedBlockBroadcaster_HeaderReceivedWithProofsEnabled_ProofAlreadyAvailable(t *testing.T) {
+	t.Parallel()
+
+	mbBroadcastCalled := atomic.Flag{}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	delayBroadcasterArgs.EnableEpochsHandler = &enableEpochsHandlerMock.EnableEpochsHandlerStub{
+		IsFlagEnabledInEpochCalled: func(flag core.EnableEpochFlag, epoch uint32) bool {
+			return flag == common.AndromedaFlag
+		},
+	}
+	delayBroadcasterArgs.ProofsPool = &dataRetrieverMock.ProofsPoolMock{
+		HasProofCalled: func(shardID uint32, headerHash []byte) bool {
+			return true
+		},
+	}
+
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(
+		func(mbData map[uint32][]byte, pk []byte) error {
+			mbBroadcastCalled.SetValue(true)
+			return nil
+		},
+		func(txData map[string][][]byte, pk []byte) error { return nil },
+		func(header data.HeaderHandler, pk []byte) error { return nil },
+		func(message *consensus.Message) error { return nil },
+	)
+	require.Nil(t, err)
+
+	headerHash, _, miniblocksData, transactionsData := createDelayData("1")
+	delayedData := broadcast.CreateDelayBroadcastDataForLeader(headerHash, miniblocksData, transactionsData)
+	err = dbb.SetLeaderData(delayedData)
+	require.Nil(t, err)
+
+	metaBlock := createMetaBlock()
+	metaBlock.ShardInfo[0].HeaderHash = headerHash
+	metaBlock.Epoch = 1
+	metaBlock.Nonce = 10
+
+	dbb.HeaderReceived(metaBlock, []byte("meta hash"))
+
+	sleepTime := testExtraDelayForBroadcastBlockInfo +
+		testExtraDelayBetweenBroadcastMbsAndTxs +
+		100*time.Millisecond
+	time.Sleep(sleepTime)
+
+	assert.True(t, mbBroadcastCalled.IsSet(), "should broadcast immediately when proof is already available")
+	assert.Equal(t, 0, dbb.GetPendingMetaHeadersCount())
+}
+
+func TestDelayedBlockBroadcaster_DuplicateProcessingPrevented(t *testing.T) {
+	t.Parallel()
+
+	broadcastCount := atomic.Counter{}
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	delayBroadcasterArgs.EnableEpochsHandler = &enableEpochsHandlerMock.EnableEpochsHandlerStub{
+		IsFlagEnabledInEpochCalled: func(flag core.EnableEpochFlag, epoch uint32) bool {
+			return flag == common.AndromedaFlag
+		},
+	}
+	delayBroadcasterArgs.ProofsPool = &dataRetrieverMock.ProofsPoolMock{
+		HasProofCalled: func(shardID uint32, headerHash []byte) bool {
+			return true
+		},
+	}
+
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	err = dbb.SetBroadcastHandlers(
+		func(mbData map[uint32][]byte, pk []byte) error {
+			broadcastCount.Increment()
+			return nil
+		},
+		func(txData map[string][][]byte, pk []byte) error { return nil },
+		func(header data.HeaderHandler, pk []byte) error { return nil },
+		func(message *consensus.Message) error { return nil },
+	)
+	require.Nil(t, err)
+
+	headerHash, _, miniblocksData, transactionsData := createDelayData("1")
+	delayedData := broadcast.CreateDelayBroadcastDataForLeader(headerHash, miniblocksData, transactionsData)
+	err = dbb.SetLeaderData(delayedData)
+	require.Nil(t, err)
+
+	metaBlock := createMetaBlock()
+	metaBlock.ShardInfo[0].HeaderHash = headerHash
+	metaBlock.Epoch = 1
+	metaBlock.Nonce = 10
+	metaHash := []byte("meta hash")
+
+	dbb.HeaderReceived(metaBlock, metaHash)
+	dbb.HeaderReceived(metaBlock, metaHash)
+
+	sleepTime := testExtraDelayForBroadcastBlockInfo +
+		testExtraDelayBetweenBroadcastMbsAndTxs +
+		100*time.Millisecond
+	time.Sleep(sleepTime)
+
+	assert.Equal(t, int64(1), broadcastCount.Get(), "should broadcast only once despite two HeaderReceived calls")
+}
+
+func TestDelayedBlockBroadcaster_ProofReceivedNonMetaShouldBeIgnored(t *testing.T) {
+	t.Parallel()
+
+	delayBroadcasterArgs := createDefaultDelayedBroadcasterArgs()
+	dbb, err := broadcast.NewDelayedBlockBroadcaster(delayBroadcasterArgs)
+	require.Nil(t, err)
+
+	proof := &block.HeaderProof{
+		HeaderHash:    []byte("some hash"),
+		HeaderShardId: 0,
+		HeaderNonce:   10,
+	}
+	dbb.ProofReceived(proof)
+
+	assert.Equal(t, 0, dbb.GetPendingMetaHeadersCount())
+}

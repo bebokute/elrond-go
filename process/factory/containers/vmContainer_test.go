@@ -1,12 +1,13 @@
 package containers_test
 
 import (
+	"errors"
 	"testing"
 
-	"github.com/ElrondNetwork/elrond-go/process"
-	"github.com/ElrondNetwork/elrond-go/process/factory/containers"
-	"github.com/ElrondNetwork/elrond-go/process/mock"
-	"github.com/ElrondNetwork/elrond-vm-common"
+	"github.com/multiversx/mx-chain-go/process"
+	"github.com/multiversx/mx-chain-go/process/factory/containers"
+	"github.com/multiversx/mx-chain-go/process/mock"
+	vmcommon "github.com/multiversx/mx-chain-vm-common-go"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -16,6 +17,7 @@ func TestNewVirtualMachinesContainer_ShouldWork(t *testing.T) {
 	c := containers.NewVirtualMachinesContainer()
 
 	assert.NotNil(t, c)
+	assert.False(t, c.IsInterfaceNil())
 }
 
 //------- Add
@@ -109,7 +111,7 @@ func TestVirtualMachinesContainer_GetNotFoundShouldErr(t *testing.T) {
 	valRecovered, err := c.Get(keyNotFound)
 
 	assert.Nil(t, valRecovered)
-	assert.Equal(t, process.ErrInvalidContainerKey, err)
+	assert.True(t, errors.Is(err, process.ErrInvalidContainerKey))
 }
 
 func TestVirtualMachinesContainer_GetWrongTypeShouldErr(t *testing.T) {
@@ -194,7 +196,7 @@ func TestVirtualMachinesContainer_RemoveShouldWork(t *testing.T) {
 	valRecovered, err := c.Get(key)
 
 	assert.Nil(t, valRecovered)
-	assert.Equal(t, process.ErrInvalidContainerKey, err)
+	assert.True(t, errors.Is(err, process.ErrInvalidContainerKey))
 }
 
 //------- Len
@@ -225,4 +227,50 @@ func TestVirtualMachinesContainer_LenShouldWork(t *testing.T) {
 	keys = c.Keys()
 	assert.Equal(t, 1, len(keys))
 	assert.Equal(t, []byte("0001"), keys[0])
+}
+
+func TestVirtualMachinesContainer_Close(t *testing.T) {
+	t.Parallel()
+
+	c := containers.NewVirtualMachinesContainer()
+
+	closeCalledItem1 := false
+	item1 := &mock.VMExecutionHandlerStub{
+		CloseCalled: func() error {
+			closeCalledItem1 = true
+
+			return nil
+		},
+	}
+
+	closeCalledItem2 := false
+	expectedErr := errors.New("expected Error")
+	item2 := &mock.VMExecutionHandlerStub{
+		CloseCalled: func() error {
+			closeCalledItem2 = true
+
+			return expectedErr
+		},
+	}
+
+	item3 := &mock.VMExecutionHandlerStub{}
+	closeCalledItem4 := false
+	item4 := &mock.VMExecutionHandlerStub{
+		CloseCalled: func() error {
+			closeCalledItem4 = true
+
+			return nil
+		},
+	}
+
+	_ = c.Add([]byte("key1"), item1)
+	_ = c.Add([]byte("key2"), item2)
+	_ = c.Add([]byte("key3"), item3)
+	_ = c.Add([]byte("key4"), item4)
+
+	err := c.Close()
+	assert.Equal(t, expectedErr, err)
+	assert.True(t, closeCalledItem1)
+	assert.True(t, closeCalledItem2)
+	assert.True(t, closeCalledItem4)
 }

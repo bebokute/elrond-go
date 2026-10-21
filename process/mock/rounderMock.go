@@ -5,43 +5,85 @@ import (
 	"time"
 )
 
-type RounderMock struct {
-	RoundIndex        int64
-	RoundTimeStamp    time.Time
-	RoundTimeDuration time.Duration
+// RoundHandlerMock -
+type RoundHandlerMock struct {
+	RoundIndex                int64
+	RoundIndexForCurrentTime  int64
+	IndexForCurrentTimeCalled func() int64
+	RoundTimeStamp            time.Time
+	RoundTimeDuration         time.Duration
+	BeforeGenesisCalled       func() bool
 }
 
-func (rndm *RounderMock) Index() int64 {
+// BeforeGenesis -
+func (rndm *RoundHandlerMock) BeforeGenesis() bool {
+	if rndm.BeforeGenesisCalled != nil {
+		return rndm.BeforeGenesisCalled()
+	}
+	return false
+}
+
+// RevertOneRound -
+func (rndm *RoundHandlerMock) RevertOneRound() {
+	rndm.RoundIndex--
+	rndm.RoundTimeStamp = rndm.RoundTimeStamp.Add(-rndm.RoundTimeDuration)
+}
+
+// Index -
+func (rndm *RoundHandlerMock) Index() int64 {
 	return rndm.RoundIndex
 }
 
-func (rndm *RounderMock) TimeDuration() time.Duration {
+// IndexForCurrentTime -
+func (rndm *RoundHandlerMock) IndexForCurrentTime() int64 {
+	if rndm.IndexForCurrentTimeCalled != nil {
+		return rndm.IndexForCurrentTimeCalled()
+	}
+	if rndm.RoundIndexForCurrentTime != 0 {
+		return rndm.RoundIndexForCurrentTime
+	}
+
+	return rndm.Index()
+}
+
+// TimeDuration -
+func (rndm *RoundHandlerMock) TimeDuration() time.Duration {
 	return rndm.RoundTimeDuration
 }
 
-func (rndm *RounderMock) TimeStamp() time.Time {
+// TimeDurationForRound -
+func (rndm *RoundHandlerMock) TimeDurationForRound(_ uint64) time.Duration {
+	return rndm.RoundTimeDuration
+}
+
+// TimeStamp -
+func (rndm *RoundHandlerMock) TimeStamp() time.Time {
 	return rndm.RoundTimeStamp
 }
 
-func (rndm *RounderMock) UpdateRound(genesisRoundTimeStamp time.Time, timeStamp time.Time) {
+// UpdateRound -
+func (rndm *RoundHandlerMock) UpdateRound(genesisRoundTimeStamp time.Time, timeStamp time.Time) {
 	delta := timeStamp.Sub(genesisRoundTimeStamp).Nanoseconds()
 
 	index := int64(math.Floor(float64(delta) / float64(rndm.RoundTimeDuration.Nanoseconds())))
 
 	if rndm.RoundIndex != index {
 		rndm.RoundIndex = index
-		rndm.RoundTimeStamp = genesisRoundTimeStamp.Add(time.Duration(int64(index) * rndm.RoundTimeDuration.Nanoseconds()))
+		rndm.RoundTimeStamp = genesisRoundTimeStamp.Add(time.Duration(index * rndm.RoundTimeDuration.Nanoseconds()))
 	}
 }
 
-func (rndm *RounderMock) RemainingTime(startTime time.Time, maxTime time.Duration) time.Duration {
+// RemainingTime -
+func (rndm *RoundHandlerMock) RemainingTime(_ time.Time, _ time.Duration) time.Duration {
 	return rndm.RoundTimeDuration
 }
 
+// GetTimeStampForRound -
+func (rndm *RoundHandlerMock) GetTimeStampForRound(_ uint64) uint64 {
+	return 0
+}
+
 // IsInterfaceNil returns true if there is no value under the interface
-func (rndm *RounderMock) IsInterfaceNil() bool {
-	if rndm == nil {
-		return true
-	}
-	return false
+func (rndm *RoundHandlerMock) IsInterfaceNil() bool {
+	return rndm == nil
 }

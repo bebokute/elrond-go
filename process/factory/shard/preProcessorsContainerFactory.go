@@ -1,104 +1,196 @@
 package shard
 
 import (
-	"github.com/ElrondNetwork/elrond-go/data/block"
-	"github.com/ElrondNetwork/elrond-go/data/state"
-	"github.com/ElrondNetwork/elrond-go/dataRetriever"
-	"github.com/ElrondNetwork/elrond-go/hashing"
-	"github.com/ElrondNetwork/elrond-go/marshal"
-	"github.com/ElrondNetwork/elrond-go/process"
-	"github.com/ElrondNetwork/elrond-go/process/block/preprocess"
-	"github.com/ElrondNetwork/elrond-go/process/factory/containers"
-	"github.com/ElrondNetwork/elrond-go/sharding"
+	"fmt"
+
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/core/check"
+	"github.com/multiversx/mx-chain-core-go/data/block"
+	"github.com/multiversx/mx-chain-core-go/hashing"
+	"github.com/multiversx/mx-chain-core-go/marshal"
+	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/config"
+	"github.com/multiversx/mx-chain-go/dataRetriever"
+	"github.com/multiversx/mx-chain-go/process"
+	"github.com/multiversx/mx-chain-go/process/block/preprocess"
+	"github.com/multiversx/mx-chain-go/process/factory/containers"
+	"github.com/multiversx/mx-chain-go/sharding"
+	"github.com/multiversx/mx-chain-go/state"
 )
 
+var _ process.PreProcessorsContainerFactory = (*preProcessorsContainerFactory)(nil)
+
+// ArgsPreProcessorsContainerFactory holds the arguments needed for creating a preProcessorsContainerFactory
+type ArgsPreProcessorsContainerFactory struct {
+	ShardCoordinator             sharding.Coordinator
+	Store                        dataRetriever.StorageService
+	Marshalizer                  marshal.Marshalizer
+	Hasher                       hashing.Hasher
+	DataPool                     dataRetriever.PoolsHolder
+	PubkeyConverter              core.PubkeyConverter
+	Accounts                     state.AccountsAdapter
+	AccountsProposal             state.AccountsAdapter
+	RequestHandler               process.RequestHandler
+	TxProcessor                  process.TransactionProcessor
+	ScProcessor                  process.SmartContractProcessor
+	ScResultProcessor            process.SmartContractResultProcessor
+	RewardsTxProcessor           process.RewardTransactionProcessor
+	EconomicsFee                 process.FeeHandler
+	GasHandler                   process.GasHandler
+	BlockTracker                 preprocess.BlockTracker
+	BlockSizeComputation         preprocess.BlockSizeComputationHandler
+	BalanceComputation           preprocess.BalanceComputationHandler
+	EnableEpochsHandler          common.EnableEpochsHandler
+	EpochNotifier                process.EpochNotifier
+	EnableRoundsHandler          common.EnableRoundsHandler
+	RoundNotifier                process.RoundNotifier
+	TxTypeHandler                process.TxTypeHandler
+	ScheduledTxsExecutionHandler process.ScheduledTxsExecutionHandler
+	ProcessedMiniBlocksTracker   process.ProcessedMiniBlocksTracker
+	TxExecutionOrderHandler      common.TxExecutionOrderHandler
+	TxCacheSelectionConfig       config.TxCacheSelectionConfig
+	TxVersionChecker             process.TxVersionCheckerHandler
+}
+
 type preProcessorsContainerFactory struct {
-	shardCoordinator   sharding.Coordinator
-	store              dataRetriever.StorageService
-	marshalizer        marshal.Marshalizer
-	hasher             hashing.Hasher
-	dataPool           dataRetriever.PoolsHolder
-	addrConverter      state.AddressConverter
-	txProcessor        process.TransactionProcessor
-	scProcessor        process.SmartContractProcessor
-	scResultProcessor  process.SmartContractResultProcessor
-	rewardsTxProcessor process.RewardTransactionProcessor
-	accounts           state.AccountsAdapter
-	requestHandler     process.RequestHandler
-	rewardsProducer    process.InternalTransactionProducer
+	shardCoordinator             sharding.Coordinator
+	store                        dataRetriever.StorageService
+	marshalizer                  marshal.Marshalizer
+	hasher                       hashing.Hasher
+	dataPool                     dataRetriever.PoolsHolder
+	pubkeyConverter              core.PubkeyConverter
+	txProcessor                  process.TransactionProcessor
+	scProcessor                  process.SmartContractProcessor
+	scResultProcessor            process.SmartContractResultProcessor
+	rewardsTxProcessor           process.RewardTransactionProcessor
+	accounts                     state.AccountsAdapter
+	accountsProposal             state.AccountsAdapter
+	requestHandler               process.RequestHandler
+	economicsFee                 process.FeeHandler
+	gasHandler                   process.GasHandler
+	blockTracker                 preprocess.BlockTracker
+	blockSizeComputation         preprocess.BlockSizeComputationHandler
+	balanceComputation           preprocess.BalanceComputationHandler
+	enableEpochsHandler          common.EnableEpochsHandler
+	epochNotifier                process.EpochNotifier
+	enableRoundsHandler          common.EnableRoundsHandler
+	roundNotifier                process.RoundNotifier
+	txTypeHandler                process.TxTypeHandler
+	scheduledTxsExecutionHandler process.ScheduledTxsExecutionHandler
+	processedMiniBlocksTracker   process.ProcessedMiniBlocksTracker
+	txExecutionOrderHandler      common.TxExecutionOrderHandler
+	txCacheSelectionConfig       config.TxCacheSelectionConfig
+	txVersionChecker             process.TxVersionCheckerHandler
 }
 
 // NewPreProcessorsContainerFactory is responsible for creating a new preProcessors factory object
-func NewPreProcessorsContainerFactory(
-	shardCoordinator sharding.Coordinator,
-	store dataRetriever.StorageService,
-	marshalizer marshal.Marshalizer,
-	hasher hashing.Hasher,
-	dataPool dataRetriever.PoolsHolder,
-	addrConverter state.AddressConverter,
-	accounts state.AccountsAdapter,
-	requestHandler process.RequestHandler,
-	txProcessor process.TransactionProcessor,
-	scProcessor process.SmartContractProcessor,
-	scResultProcessor process.SmartContractResultProcessor,
-	rewardsTxProcessor process.RewardTransactionProcessor,
-	rewardsProducer process.InternalTransactionProducer,
-) (*preProcessorsContainerFactory, error) {
+func NewPreProcessorsContainerFactory(args ArgsPreProcessorsContainerFactory) (*preProcessorsContainerFactory, error) {
 
-	if shardCoordinator == nil || shardCoordinator.IsInterfaceNil() {
+	if check.IfNil(args.ShardCoordinator) {
 		return nil, process.ErrNilShardCoordinator
 	}
-	if store == nil || store.IsInterfaceNil() {
+	if check.IfNil(args.Store) {
 		return nil, process.ErrNilStore
 	}
-	if marshalizer == nil || marshalizer.IsInterfaceNil() {
+	if check.IfNil(args.Marshalizer) {
 		return nil, process.ErrNilMarshalizer
 	}
-	if hasher == nil || hasher.IsInterfaceNil() {
+	if check.IfNil(args.Hasher) {
 		return nil, process.ErrNilHasher
 	}
-	if dataPool == nil || dataPool.IsInterfaceNil() {
+	if check.IfNil(args.DataPool) {
 		return nil, process.ErrNilDataPoolHolder
 	}
-	if addrConverter == nil || addrConverter.IsInterfaceNil() {
-		return nil, process.ErrNilAddressConverter
+	if check.IfNil(args.PubkeyConverter) {
+		return nil, process.ErrNilPubkeyConverter
 	}
-	if txProcessor == nil || txProcessor.IsInterfaceNil() {
+	if check.IfNil(args.TxProcessor) {
 		return nil, process.ErrNilTxProcessor
 	}
-	if accounts == nil || accounts.IsInterfaceNil() {
+	if check.IfNil(args.Accounts) {
 		return nil, process.ErrNilAccountsAdapter
 	}
-	if scProcessor == nil || scProcessor.IsInterfaceNil() {
+	if check.IfNil(args.AccountsProposal) {
+		return nil, fmt.Errorf("%w for proposal", process.ErrNilAccountsAdapter)
+	}
+	if check.IfNil(args.ScProcessor) {
 		return nil, process.ErrNilSmartContractProcessor
 	}
-	if scResultProcessor == nil || scResultProcessor.IsInterfaceNil() {
+	if check.IfNil(args.ScResultProcessor) {
 		return nil, process.ErrNilSmartContractResultProcessor
 	}
-	if rewardsTxProcessor == nil || rewardsTxProcessor.IsInterfaceNil() {
+	if check.IfNil(args.RewardsTxProcessor) {
 		return nil, process.ErrNilRewardsTxProcessor
 	}
-	if requestHandler == nil || requestHandler.IsInterfaceNil() {
+	if check.IfNil(args.RequestHandler) {
 		return nil, process.ErrNilRequestHandler
 	}
-	if rewardsProducer == nil || rewardsProducer.IsInterfaceNil() {
-		return nil, process.ErrNilInternalTransactionProducer
+	if check.IfNil(args.EconomicsFee) {
+		return nil, process.ErrNilEconomicsFeeHandler
+	}
+	if check.IfNil(args.GasHandler) {
+		return nil, process.ErrNilGasHandler
+	}
+	if check.IfNil(args.BlockTracker) {
+		return nil, process.ErrNilBlockTracker
+	}
+	if check.IfNil(args.BlockSizeComputation) {
+		return nil, process.ErrNilBlockSizeComputationHandler
+	}
+	if check.IfNil(args.BalanceComputation) {
+		return nil, process.ErrNilBalanceComputationHandler
+	}
+	if check.IfNil(args.EnableEpochsHandler) {
+		return nil, process.ErrNilEnableEpochsHandler
+	}
+	if check.IfNil(args.EnableRoundsHandler) {
+		return nil, process.ErrNilEnableRoundsHandler
+	}
+	if check.IfNil(args.TxTypeHandler) {
+		return nil, process.ErrNilTxTypeHandler
+	}
+	if check.IfNil(args.ScheduledTxsExecutionHandler) {
+		return nil, process.ErrNilScheduledTxsExecutionHandler
+	}
+	if check.IfNil(args.ProcessedMiniBlocksTracker) {
+		return nil, process.ErrNilProcessedMiniBlocksTracker
+	}
+	if check.IfNil(args.TxExecutionOrderHandler) {
+		return nil, process.ErrNilTxExecutionOrderHandler
+	}
+	if check.IfNil(args.TxVersionChecker) {
+		return nil, process.ErrNilTransactionVersionChecker
 	}
 
 	return &preProcessorsContainerFactory{
-		shardCoordinator:   shardCoordinator,
-		store:              store,
-		marshalizer:        marshalizer,
-		hasher:             hasher,
-		dataPool:           dataPool,
-		addrConverter:      addrConverter,
-		txProcessor:        txProcessor,
-		accounts:           accounts,
-		scProcessor:        scProcessor,
-		scResultProcessor:  scResultProcessor,
-		rewardsTxProcessor: rewardsTxProcessor,
-		requestHandler:     requestHandler,
-		rewardsProducer:    rewardsProducer,
+		shardCoordinator:             args.ShardCoordinator,
+		store:                        args.Store,
+		marshalizer:                  args.Marshalizer,
+		hasher:                       args.Hasher,
+		dataPool:                     args.DataPool,
+		pubkeyConverter:              args.PubkeyConverter,
+		txProcessor:                  args.TxProcessor,
+		accounts:                     args.Accounts,
+		accountsProposal:             args.AccountsProposal,
+		scProcessor:                  args.ScProcessor,
+		scResultProcessor:            args.ScResultProcessor,
+		rewardsTxProcessor:           args.RewardsTxProcessor,
+		requestHandler:               args.RequestHandler,
+		economicsFee:                 args.EconomicsFee,
+		gasHandler:                   args.GasHandler,
+		blockTracker:                 args.BlockTracker,
+		blockSizeComputation:         args.BlockSizeComputation,
+		balanceComputation:           args.BalanceComputation,
+		enableEpochsHandler:          args.EnableEpochsHandler,
+		epochNotifier:                args.EpochNotifier,
+		enableRoundsHandler:          args.EnableRoundsHandler,
+		roundNotifier:                args.RoundNotifier,
+		txTypeHandler:                args.TxTypeHandler,
+		scheduledTxsExecutionHandler: args.ScheduledTxsExecutionHandler,
+		processedMiniBlocksTracker:   args.ProcessedMiniBlocksTracker,
+		txExecutionOrderHandler:      args.TxExecutionOrderHandler,
+		txCacheSelectionConfig:       args.TxCacheSelectionConfig,
+		txVersionChecker:             args.TxVersionChecker,
 	}, nil
 }
 
@@ -136,59 +228,142 @@ func (ppcm *preProcessorsContainerFactory) Create() (process.PreProcessorsContai
 		return nil, err
 	}
 
+	preproc, err = ppcm.createValidatorInfoPreProcessor()
+	if err != nil {
+		return nil, err
+	}
+
+	err = container.Add(block.PeerBlock, preproc)
+	if err != nil {
+		return nil, err
+	}
+
 	return container, nil
 }
 
 func (ppcm *preProcessorsContainerFactory) createTxPreProcessor() (process.PreProcessor, error) {
-	txPreprocessor, err := preprocess.NewTransactionPreprocessor(
-		ppcm.dataPool.Transactions(),
-		ppcm.store,
-		ppcm.hasher,
-		ppcm.marshalizer,
-		ppcm.txProcessor,
-		ppcm.shardCoordinator,
-		ppcm.accounts,
-		ppcm.requestHandler.RequestTransaction,
-	)
+	args := preprocess.ArgsTransactionPreProcessor{
+		BasePreProcessorArgs: preprocess.BasePreProcessorArgs{
+			DataPool:                   ppcm.dataPool.Transactions(),
+			Store:                      ppcm.store,
+			Hasher:                     ppcm.hasher,
+			Marshalizer:                ppcm.marshalizer,
+			ShardCoordinator:           ppcm.shardCoordinator,
+			Accounts:                   ppcm.accounts,
+			AccountsProposal:           ppcm.accountsProposal,
+			OnRequestTransaction:       ppcm.requestHandler.RequestTransactions,
+			GasHandler:                 ppcm.gasHandler,
+			PubkeyConverter:            ppcm.pubkeyConverter,
+			BlockSizeComputation:       ppcm.blockSizeComputation,
+			BalanceComputation:         ppcm.balanceComputation,
+			ProcessedMiniBlocksTracker: ppcm.processedMiniBlocksTracker,
+			TxExecutionOrderHandler:    ppcm.txExecutionOrderHandler,
+			EconomicsFee:               ppcm.economicsFee,
+			EnableEpochsHandler:        ppcm.enableEpochsHandler,
+			EpochNotifier:              ppcm.epochNotifier,
+			EnableRoundsHandler:        ppcm.enableRoundsHandler,
+			RoundNotifier:              ppcm.roundNotifier,
+		},
+		TxProcessor:                  ppcm.txProcessor,
+		BlockTracker:                 ppcm.blockTracker,
+		BlockType:                    block.TxBlock,
+		TxTypeHandler:                ppcm.txTypeHandler,
+		ScheduledTxsExecutionHandler: ppcm.scheduledTxsExecutionHandler,
+		TxCacheSelectionConfig:       ppcm.txCacheSelectionConfig,
+		TxVersionCheckerHandler:      ppcm.txVersionChecker,
+	}
 
-	return txPreprocessor, err
+	return preprocess.NewTransactionPreprocessor(args)
 }
 
 func (ppcm *preProcessorsContainerFactory) createSmartContractResultPreProcessor() (process.PreProcessor, error) {
-	scrPreprocessor, err := preprocess.NewSmartContractResultPreprocessor(
-		ppcm.dataPool.UnsignedTransactions(),
-		ppcm.store,
-		ppcm.hasher,
-		ppcm.marshalizer,
-		ppcm.scResultProcessor,
-		ppcm.shardCoordinator,
-		ppcm.accounts,
-		ppcm.requestHandler.RequestUnsignedTransactions,
-	)
-
-	return scrPreprocessor, err
+	args := preprocess.SmartContractResultsArgs{
+		BasePreProcessorArgs: preprocess.BasePreProcessorArgs{
+			DataPool:                   ppcm.dataPool.UnsignedTransactions(),
+			Store:                      ppcm.store,
+			Hasher:                     ppcm.hasher,
+			Marshalizer:                ppcm.marshalizer,
+			ShardCoordinator:           ppcm.shardCoordinator,
+			Accounts:                   ppcm.accounts,
+			AccountsProposal:           ppcm.accountsProposal,
+			OnRequestTransaction:       ppcm.requestHandler.RequestUnsignedTransactions,
+			GasHandler:                 ppcm.gasHandler,
+			PubkeyConverter:            ppcm.pubkeyConverter,
+			BlockSizeComputation:       ppcm.blockSizeComputation,
+			BalanceComputation:         ppcm.balanceComputation,
+			ProcessedMiniBlocksTracker: ppcm.processedMiniBlocksTracker,
+			TxExecutionOrderHandler:    ppcm.txExecutionOrderHandler,
+			EconomicsFee:               ppcm.economicsFee,
+			EnableEpochsHandler:        ppcm.enableEpochsHandler,
+			EpochNotifier:              ppcm.epochNotifier,
+			EnableRoundsHandler:        ppcm.enableRoundsHandler,
+			RoundNotifier:              ppcm.roundNotifier,
+		},
+		ScrProcessor: ppcm.scResultProcessor,
+	}
+	return preprocess.NewSmartContractResultPreprocessor(args)
 }
 
 func (ppcm *preProcessorsContainerFactory) createRewardsTransactionPreProcessor() (process.PreProcessor, error) {
-	rewardTxPreprocessor, err := preprocess.NewRewardTxPreprocessor(
-		ppcm.dataPool.RewardTransactions(),
-		ppcm.store,
-		ppcm.hasher,
-		ppcm.marshalizer,
-		ppcm.rewardsTxProcessor,
-		ppcm.rewardsProducer,
-		ppcm.shardCoordinator,
-		ppcm.accounts,
-		ppcm.requestHandler.RequestRewardTransactions,
-	)
 
-	return rewardTxPreprocessor, err
+	args := preprocess.RewardsPreProcessorArgs{
+		BasePreProcessorArgs: preprocess.BasePreProcessorArgs{
+			DataPool:                   ppcm.dataPool.RewardTransactions(),
+			Store:                      ppcm.store,
+			Hasher:                     ppcm.hasher,
+			Marshalizer:                ppcm.marshalizer,
+			ShardCoordinator:           ppcm.shardCoordinator,
+			Accounts:                   ppcm.accounts,
+			AccountsProposal:           ppcm.accountsProposal,
+			OnRequestTransaction:       ppcm.requestHandler.RequestRewardTransactions,
+			GasHandler:                 ppcm.gasHandler,
+			PubkeyConverter:            ppcm.pubkeyConverter,
+			BlockSizeComputation:       ppcm.blockSizeComputation,
+			BalanceComputation:         ppcm.balanceComputation,
+			ProcessedMiniBlocksTracker: ppcm.processedMiniBlocksTracker,
+			TxExecutionOrderHandler:    ppcm.txExecutionOrderHandler,
+			EconomicsFee:               ppcm.economicsFee,
+			EnableEpochsHandler:        ppcm.enableEpochsHandler,
+			EpochNotifier:              ppcm.epochNotifier,
+			EnableRoundsHandler:        ppcm.enableRoundsHandler,
+			RoundNotifier:              ppcm.roundNotifier,
+		},
+		RewardProcessor: ppcm.rewardsTxProcessor,
+	}
+	return preprocess.NewRewardTxPreprocessor(args)
+}
+
+func (ppcm *preProcessorsContainerFactory) createValidatorInfoPreProcessor() (process.PreProcessor, error) {
+	args := preprocess.ValidatorInfoPreProcessorArgs{
+		BasePreProcessorArgs: preprocess.BasePreProcessorArgs{
+			DataPool:         ppcm.dataPool.ValidatorsInfo(),
+			Store:            ppcm.store,
+			Hasher:           ppcm.hasher,
+			Marshalizer:      ppcm.marshalizer,
+			ShardCoordinator: ppcm.shardCoordinator,
+			Accounts:         ppcm.accounts,
+			AccountsProposal: ppcm.accountsProposal,
+			OnRequestTransaction: func(_ uint32, peerChangeHashes [][]byte) {
+				ppcm.requestHandler.RequestValidatorsInfo(peerChangeHashes)
+			},
+			GasHandler:                 ppcm.gasHandler,
+			PubkeyConverter:            ppcm.pubkeyConverter,
+			BlockSizeComputation:       ppcm.blockSizeComputation,
+			BalanceComputation:         ppcm.balanceComputation,
+			ProcessedMiniBlocksTracker: ppcm.processedMiniBlocksTracker,
+			TxExecutionOrderHandler:    ppcm.txExecutionOrderHandler,
+			EconomicsFee:               ppcm.economicsFee,
+			EnableEpochsHandler:        ppcm.enableEpochsHandler,
+			EpochNotifier:              ppcm.epochNotifier,
+			EnableRoundsHandler:        ppcm.enableRoundsHandler,
+			RoundNotifier:              ppcm.roundNotifier,
+		},
+	}
+
+	return preprocess.NewValidatorInfoPreprocessor(args)
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (ppcm *preProcessorsContainerFactory) IsInterfaceNil() bool {
-	if ppcm == nil {
-		return true
-	}
-	return false
+	return ppcm == nil
 }

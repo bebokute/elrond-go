@@ -1,0 +1,316 @@
+package pruning
+
+import (
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"math"
+
+	"github.com/multiversx/mx-chain-core-go/data"
+	"github.com/multiversx/mx-chain-go/storage"
+	"github.com/multiversx/mx-chain-go/storage/cache"
+)
+
+// FullHistoryPruningStorer represents a storer for full history nodes
+// which creates a new persister for each epoch and removes older activePersisters
+type FullHistoryPruningStorer struct {
+	*PruningStorer
+	args                           StorerArgs
+	shardId                        string
+	oldEpochsActivePersistersCache storage.Cacher
+}
+
+// NewFullHistoryPruningStorer will return a new instance of PruningStorer without sharded directories' naming scheme
+func NewFullHistoryPruningStorer(args FullHistoryStorerArgs) (*FullHistoryPruningStorer, error) {
+	return initFullHistoryPruningStorer(args, "")
+}
+
+// NewShardedFullHistoryPruningStorer will return a new instance of PruningStorer with sharded directories' naming scheme
+func NewShardedFullHistoryPruningStorer(
+	args FullHistoryStorerArgs,
+	shardID uint32,
+) (*FullHistoryPruningStorer, error) {
+	shardStr := fmt.Sprintf("%d", shardID)
+	return initFullHistoryPruningStorer(args, shardStr)
+}
+
+func initFullHistoryPruningStorer(args FullHistoryStorerArgs, shardId string) (*FullHistoryPruningStorer, error) {
+	err := checkArgs(args.StorerArgs)
+	if err != nil {
+		return nil, err
+	}
+
+	activePersisters, persistersMapByEpoch, err := initPersistersInEpoch(args.StorerArgs, shardId)
+	if err != nil {
+		return nil, err
+	}
+
+	ps, err := initPruningStorer(args.StorerArgs, shardId, activePersisters, persistersMapByEpoch)
+	if err != nil {
+		return nil, err
+	}
+
+	ps.registerHandler(args.Notifier)
+
+	if args.NumOfOldActivePersisters < 1 || args.NumOfOldActivePersisters > math.MaxInt32 {
+		return nil, storage.ErrInvalidNumberOfOldPersisters
+	}
+
+	fhps := &FullHistoryPruningStorer{
+		PruningStorer: ps,
+		args:          args.StorerArgs,
+		shardId:       shardId,
+	}
+	fhps.oldEpochsActivePersistersCache, err = cache.NewLRUCacheWithEviction(int(args.NumOfOldActivePersisters), fhps.onEvicted)
+	if err != nil {
+		return nil, err
+	}
+
+	return fhps, nil
+}
+
+// GetFromEpoch will search a key only in the persister for the given epoch
+func (fhps *FullHistoryPruningStorer) GetFromEpoch(key []byte, epoch uint32) ([]byte, error) {
+	value, err := fhps.searchInEpoch(key, epoch)
+	if err == nil && value != nil {
+		return value, nil
+	}
+
+	fallbackValue, fallbackErr := fhps.searchInEpoch(key, epoch+1)
+	if fallbackErr == nil && fallbackValue != nil {
+		return fallbackValue, nil
+	}
+	if err != nil && !storage.IsNotFoundInStorageErr(err) {
+		return nil, err
+	}
+
+	return fallbackValue, fallbackErr
+}
+
+// GetBulkFromEpoch will search a bulk of keys in the persister for the given epoch
+// doesn't return an error if a key or any isn't found
+func (fhps *FullHistoryPruningStorer) GetBulkFromEpoch(keys [][]byte, epoch uint32) ([]data.KeyValuePair, error) {
+	res, err := fhps.searchBulkInEpoch(keys, epoch)
+	if err == nil && len(res) > 0 {
+		return res, nil
+	}
+	fallbackRes, fallbackErr := fhps.searchBulkInEpoch(keys, epoch+1)
+	if fallbackErr == nil && len(fallbackRes) > 0 {
+		return fallbackRes, nil
+	}
+	if err != nil && !storage.IsNotFoundInStorageErr(err) {
+		return nil, err
+	}
+
+	return fallbackRes, fallbackErr
+}
+
+func (fhps *FullHistoryPruningStorer) searchBulkInEpoch(keys [][]byte, epoch uint32) ([]data.KeyValuePair, error) {
+	persister, err := fhps.getPersisterForRead(epoch)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]data.KeyValuePair, 0, len(keys))
+	for _, key := range keys {
+		dataInCache, found := fhps.cacher.Get(key)
+		if found {
+			keyValue := data.KeyValuePair{Key: key, Value: dataInCache.([]byte)}
+			results = append(results, keyValue)
+			continue
+		}
+		value, errGet := persister.Get(key)
+		if errGet == nil && value != nil {
+			keyValue := data.KeyValuePair{Key: key, Value: value}
+			results = append(results, keyValue)
+		}
+	}
+
+	return results, nil
+}
+
+// PutInEpoch will set the key-value pair in the given epoch
+func (fhps *FullHistoryPruningStorer) PutInEpoch(key []byte, data []byte, epoch uint32) error {
+	fhps.cacher.Put(key, data, len(data))
+
+	persister, err := fhps.getOrOpenPersister(epoch)
+	if err != nil {
+		return err
+	}
+
+	return fhps.doPutInPersister(key, data, persister, epoch)
+}
+
+func (fhps *FullHistoryPruningStorer) searchInEpoch(key []byte, epoch uint32) ([]byte, error) {
+	if fhps.isEpochActive(epoch) {
+		return fhps.PruningStorer.SearchFirst(key)
+	}
+
+	value, err := fhps.getFromOldEpoch(key, epoch)
+	if err != nil {
+		return nil, err
+	}
+
+	return value, nil
+}
+
+func (fhps *FullHistoryPruningStorer) isEpochActive(epoch uint32) bool {
+	fhps.lock.RLock()
+	oldestEpochInCurrentSetting := fhps.activePersisters[len(fhps.activePersisters)-1].epoch
+	newestEpochInCurrentSetting := fhps.activePersisters[0].epoch
+	fhps.lock.RUnlock()
+
+	return epoch >= oldestEpochInCurrentSetting && epoch <= newestEpochInCurrentSetting
+}
+
+func (fhps *FullHistoryPruningStorer) getFromOldEpoch(key []byte, epoch uint32) ([]byte, error) {
+	persister, err := fhps.getPersisterForRead(epoch)
+	if err != nil {
+		return nil, err
+	}
+
+	res, err := persister.Get(key)
+	if err == nil {
+		return res, nil
+	}
+
+	log.Trace("FullHistoryPruningStorer.getFromOldEpoch",
+		"id", fhps.identifier,
+		"epoch", epoch,
+		"key", key,
+		"error", err.Error())
+
+	return nil, fmt.Errorf("key %s not found in %s",
+		hex.EncodeToString(key), fhps.identifier)
+}
+
+// getOrOpenPersister returns the persister for the provided epoch, creating it if it does not exist.
+// It must only be called on write paths (PutInEpoch), where the epoch is decided by the node itself.
+func (fhps *FullHistoryPruningStorer) getOrOpenPersister(epoch uint32) (storage.Persister, error) {
+	return fhps.getPersister(epoch, true)
+}
+
+// getPersisterForRead opens existing databases only; reads must not create missing databases.
+func (fhps *FullHistoryPruningStorer) getPersisterForRead(epoch uint32) (storage.Persister, error) {
+	persister, err := fhps.getPersister(epoch, false)
+	if err != nil && !errors.Is(err, storage.ErrPersisterNotFoundForEpoch) {
+		return nil, fmt.Errorf("%w: epoch %d, id %s: %w", storage.ErrPersisterAccess, epoch, fhps.identifier, err)
+	}
+
+	return persister, err
+}
+
+func (fhps *FullHistoryPruningStorer) getPersister(epoch uint32, createIfMissing bool) (storage.Persister, error) {
+	epochString := fmt.Sprintf("%d", epoch)
+
+	fhps.lock.RLock()
+	pdata, exists := fhps.getPersisterData(epochString, epoch)
+	fhps.lock.RUnlock()
+
+	if exists {
+		isClosed := pdata.getIsClosed()
+		if !isClosed {
+			return pdata.getPersister(), nil
+		}
+	}
+
+	if !exists && !createIfMissing {
+		// check before acquiring the exclusive lock, so that unknown epochs can not be used
+		// to create contention on the lock the block processing path needs
+		fhps.lock.RLock()
+		err := fhps.checkPersisterExistsForEpochUnprotected(epoch)
+		fhps.lock.RUnlock()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	fhps.lock.Lock()
+	defer fhps.lock.Unlock()
+
+	pdata, exists = fhps.getPersisterData(epochString, epoch)
+	if !exists {
+		if !createIfMissing {
+			err := fhps.checkPersisterExistsForEpochUnprotected(epoch)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		filePath := createPersisterPathForEpoch(fhps.args, epoch, fhps.shardId)
+		newPdata, errPersisterData := createPersisterDataForEpoch(fhps.args.PersisterFactory, filePath, epoch)
+		if errPersisterData != nil {
+			return nil, errPersisterData
+		}
+
+		fhps.oldEpochsActivePersistersCache.Put([]byte(epochString), newPdata, 0)
+		log.Trace("full history pruning storer - init new storer", "epoch", epoch)
+		fhps.persistersMapByEpoch[epoch] = newPdata
+
+		return newPdata.getPersister(), nil
+	}
+	persister, _, err := fhps.createAndInitPersisterIfClosedUnprotected(pdata)
+	if err != nil {
+		return nil, err
+	}
+
+	_, ok := fhps.oldEpochsActivePersistersCache.Get([]byte(epochString))
+	if !ok {
+		log.Debug("fhps - getOrOpenPersister - put in cache", "epoch", epochString)
+		fhps.oldEpochsActivePersistersCache.Put([]byte(epochString), pdata, 0)
+	}
+	return persister, nil
+}
+
+// checkPersisterExistsForEpochUnprotected returns nil only if the node can hold data for the provided
+// epoch: the epoch is not in the future and a database was already created for it on the persister's path.
+// It must be called while holding fhps.lock (either for read or for write).
+func (fhps *FullHistoryPruningStorer) checkPersisterExistsForEpochUnprotected(epoch uint32) error {
+	if len(fhps.activePersisters) > 0 {
+		newestEpoch := fhps.activePersisters[0].epoch
+		// the persister of the next epoch is created in advance, so it is a valid target as well
+		isFutureEpoch := epoch > newestEpoch && epoch-newestEpoch > 1
+		if isFutureEpoch {
+			return fmt.Errorf("%w: epoch %d is newer than the last known epoch %d, id %s",
+				storage.ErrPersisterNotFoundForEpoch, epoch, newestEpoch, fhps.identifier)
+		}
+	}
+
+	filePath := createPersisterPathForEpoch(fhps.args, epoch, fhps.shardId)
+	exists, err := fhps.args.PersisterFactory.PersisterExists(filePath)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("%w: epoch %d, id %s", storage.ErrPersisterNotFoundForEpoch, epoch, fhps.identifier)
+	}
+
+	return nil
+}
+
+func (fhps *FullHistoryPruningStorer) getPersisterData(epochString string, epoch uint32) (*persisterData, bool) {
+	pdata, exists := fhps.oldEpochsActivePersistersCache.Get([]byte(epochString))
+	if exists {
+		return pdata.(*persisterData), true
+	}
+
+	var pDataObj *persisterData
+	pDataObj, exists = fhps.persistersMapByEpoch[epoch]
+	if exists {
+		return pDataObj, true
+	}
+
+	return nil, false
+}
+
+// Close will try to close all opened persisters, including the ones in the LRU cache
+func (fhps *FullHistoryPruningStorer) Close() error {
+	fhps.oldEpochsActivePersistersCache.Clear()
+
+	return fhps.PruningStorer.Close()
+}
+
+// IsInterfaceNil returns true if there is no value under the interface
+func (fhps *FullHistoryPruningStorer) IsInterfaceNil() bool {
+	return fhps == nil
+}

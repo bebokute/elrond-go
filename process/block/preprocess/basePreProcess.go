@@ -1,64 +1,269 @@
 package preprocess
 
 import (
-	"sync"
+	"bytes"
+	"fmt"
+	"math/big"
+	"time"
 
-	"github.com/ElrondNetwork/elrond-go/core"
-	"github.com/ElrondNetwork/elrond-go/data"
-	"github.com/ElrondNetwork/elrond-go/data/block"
-	"github.com/ElrondNetwork/elrond-go/dataRetriever"
-	"github.com/ElrondNetwork/elrond-go/hashing"
-	"github.com/ElrondNetwork/elrond-go/marshal"
-	"github.com/ElrondNetwork/elrond-go/process"
-	"github.com/ElrondNetwork/elrond-go/sharding"
-	"github.com/ElrondNetwork/elrond-go/storage"
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/core/check"
+	"github.com/multiversx/mx-chain-core-go/data"
+	"github.com/multiversx/mx-chain-core-go/data/block"
+	"github.com/multiversx/mx-chain-core-go/hashing"
+	"github.com/multiversx/mx-chain-core-go/marshal"
+
+	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/dataRetriever"
+	"github.com/multiversx/mx-chain-go/process"
+	"github.com/multiversx/mx-chain-go/sharding"
+	"github.com/multiversx/mx-chain-go/state"
+	"github.com/multiversx/mx-chain-go/storage"
 )
 
-// TODO: increase code coverage with unit tests
+const maxGasLimitPercentUsedForDestMeTxs = 50
 
-type txShardInfo struct {
-	senderShardID   uint32
-	receiverShardID uint32
+type gasConsumedInfo struct {
+	prevGasConsumedInReceiverShard        uint64
+	gasConsumedByMiniBlocksInSenderShard  uint64
+	gasConsumedByMiniBlockInReceiverShard uint64
+	totalGasConsumedInSelfShard           uint64
 }
 
-type txInfo struct {
-	tx data.TransactionHandler
-	*txShardInfo
+type txAndMbInfo struct {
+	numNewTxs                      int
+	numNewMiniBlocks               int
+	isReceiverSmartContractAddress bool
+	isCrossShardScCallOrSpecialTx  bool
 }
 
-type txsHashesInfo struct {
-	txHashes        [][]byte
-	receiverShardID uint32
+type scheduledTxAndMbInfo struct {
+	numNewTxs            int
+	numNewMiniBlocks     int
+	isCrossShardScCallTx bool
 }
 
-type txsForBlock struct {
-	missingTxs     int
-	mutTxsForBlock sync.RWMutex
-	txHashAndInfo  map[string]*txInfo
+type processedTxsInfo struct {
+	numTxsAdded                        int
+	numBadTxs                          int
+	numTxsSkipped                      int
+	numTxsFailed                       int
+	numTxsWithInitialBalanceConsumed   int
+	numCrossShardScCallsOrSpecialTxs   int
+	numCrossShardTxsWithTooMuchGas     int
+	totalTimeUsedForProcess            time.Duration
+	totalTimeUsedForComputeGasProvided time.Duration
 }
 
+type createAndProcessMiniBlocksInfo struct {
+	mapSCTxs                                 map[string]struct{}
+	mapTxsForShard                           map[uint32]int
+	mapScsForShard                           map[uint32]int
+	mapCrossShardScCallsOrSpecialTxs         map[uint32]int
+	mapGasConsumedByMiniBlockInReceiverShard map[uint32]uint64
+	mapMiniBlocks                            map[uint32]*block.MiniBlock
+	senderAddressToSkip                      []byte
+	maxCrossShardScCallsOrSpecialTxsPerShard int
+	firstInvalidTxFound                      bool
+	firstCrossShardScCallOrSpecialTxFound    bool
+	processingInfo                           processedTxsInfo
+	gasInfo                                  gasConsumedInfo
+}
+
+type scheduledTxsInfo struct {
+	numScheduledTxsAdded                        int
+	numScheduledBadTxs                          int
+	numScheduledTxsSkipped                      int
+	numScheduledTxsWithInitialBalanceConsumed   int
+	numScheduledCrossShardScCalls               int
+	numCrossShardTxsWithTooMuchGas              int
+	totalTimeUsedForScheduledVerify             time.Duration
+	totalTimeUsedForScheduledComputeGasProvided time.Duration
+}
+
+type createScheduledMiniBlocksInfo struct {
+	mapMiniBlocks                            map[uint32]*block.MiniBlock
+	mapCrossShardScCallTxs                   map[uint32]int
+	maxCrossShardScCallTxsPerShard           int
+	schedulingInfo                           scheduledTxsInfo
+	firstCrossShardScCallTxFound             bool
+	mapGasConsumedByMiniBlockInReceiverShard map[uint32]uint64
+	gasInfo                                  gasConsumedInfo
+	senderAddressToSkip                      []byte
+}
+
+type processedIndexes struct {
+	indexOfLastTxProcessed           int32
+	indexOfLastTxProcessedByProposer int32
+}
+
+// BasePreProcessorArgs holds the arguments for creating a base pre-processor
+type BasePreProcessorArgs struct {
+	DataPool                   dataRetriever.ShardedDataCacherNotifier
+	Store                      dataRetriever.StorageService
+	Hasher                     hashing.Hasher
+	Marshalizer                marshal.Marshalizer
+	ShardCoordinator           sharding.Coordinator
+	Accounts                   state.AccountsAdapter
+	AccountsProposal           state.AccountsAdapter
+	OnRequestTransaction       func(shardID uint32, txHashes [][]byte)
+	GasHandler                 process.GasHandler
+	PubkeyConverter            core.PubkeyConverter
+	BlockSizeComputation       BlockSizeComputationHandler
+	BalanceComputation         BalanceComputationHandler
+	ProcessedMiniBlocksTracker process.ProcessedMiniBlocksTracker
+	TxExecutionOrderHandler    common.TxExecutionOrderHandler
+	EconomicsFee               process.FeeHandler
+	EnableEpochsHandler        common.EnableEpochsHandler
+	EpochNotifier              process.EpochNotifier
+	EnableRoundsHandler        common.EnableRoundsHandler
+	RoundNotifier              process.RoundNotifier
+}
+
+// basePreProcess is the base struct for all pre-processors
 type basePreProcess struct {
-	hasher           hashing.Hasher
-	marshalizer      marshal.Marshalizer
-	shardCoordinator sharding.Coordinator
+	gasTracker
+	hasher                     hashing.Hasher
+	marshalizer                marshal.Marshalizer
+	blockSizeComputation       BlockSizeComputationHandler
+	balanceComputation         BalanceComputationHandler
+	accounts                   state.AccountsAdapter
+	accountsProposal           state.AccountsAdapter
+	pubkeyConverter            core.PubkeyConverter
+	processedMiniBlocksTracker process.ProcessedMiniBlocksTracker
+	enableEpochsHandler        common.EnableEpochsHandler
+	txExecutionOrderHandler    common.TxExecutionOrderHandler
+	enableRoundsHandler        common.EnableRoundsHandler
+	feeHandler                 process.FeeHandler
 }
 
-func (bpp *basePreProcess) removeDataFromPools(body block.Body, miniBlockPool storage.Cacher, txPool dataRetriever.ShardedDataCacherNotifier, mbType block.Type) error {
-	if miniBlockPool == nil || miniBlockPool.IsInterfaceNil() {
-		return process.ErrNilMiniBlockPool
+func checkBasePreProcessArgs(args BasePreProcessorArgs) error {
+	if check.IfNil(args.Hasher) {
+		return process.ErrNilHasher
 	}
-	if txPool == nil || txPool.IsInterfaceNil() {
+	if check.IfNil(args.Marshalizer) {
+		return process.ErrNilMarshalizer
+	}
+	if check.IfNil(args.DataPool) {
+		return process.ErrNilTransactionPool
+	}
+	if check.IfNil(args.Store) {
+		return process.ErrNilStorage
+	}
+	if check.IfNil(args.ShardCoordinator) {
+		return process.ErrNilShardCoordinator
+	}
+	if check.IfNil(args.Accounts) {
+		return process.ErrNilAccountsAdapter
+	}
+	if check.IfNil(args.AccountsProposal) {
+		return fmt.Errorf("%w for proposal", process.ErrNilAccountsAdapter)
+	}
+	if args.OnRequestTransaction == nil {
+		return process.ErrNilRequestHandler
+	}
+	if check.IfNil(args.GasHandler) {
+		return process.ErrNilGasHandler
+	}
+	if check.IfNil(args.PubkeyConverter) {
+		return process.ErrNilPubkeyConverter
+	}
+	if check.IfNil(args.BlockSizeComputation) {
+		return process.ErrNilBlockSizeComputationHandler
+	}
+	if check.IfNil(args.BalanceComputation) {
+		return process.ErrNilBalanceComputationHandler
+	}
+	if check.IfNil(args.ProcessedMiniBlocksTracker) {
+		return process.ErrNilProcessedMiniBlocksTracker
+	}
+	if check.IfNil(args.TxExecutionOrderHandler) {
+		return process.ErrNilTxExecutionOrderHandler
+	}
+	if check.IfNil(args.EconomicsFee) {
+		return process.ErrNilEconomicsFeeHandler
+	}
+	if check.IfNil(args.EnableEpochsHandler) {
+		return process.ErrNilEnableEpochsHandler
+	}
+	if check.IfNil(args.EpochNotifier) {
+		return process.ErrNilEpochNotifier
+	}
+	if check.IfNil(args.EnableRoundsHandler) {
+		return process.ErrNilEnableRoundsHandler
+	}
+	if check.IfNil(args.RoundNotifier) {
+		return process.ErrNilRoundNotifier
+	}
+
+	return nil
+}
+
+func (bpp *basePreProcess) removeBlockDataFromPools(
+	body *block.Body,
+	miniBlockPool storage.Cacher,
+	txPool dataRetriever.ShardedDataCacherNotifier,
+	isMiniBlockCorrect func(block.Type) bool,
+) error {
+	err := bpp.removeTxsFromPools(body, txPool, isMiniBlockCorrect)
+	if err != nil {
+		return err
+	}
+
+	err = bpp.removeMiniBlocksFromPools(body, miniBlockPool, isMiniBlockCorrect)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (bpp *basePreProcess) removeTxsFromPools(
+	body *block.Body,
+	txPool dataRetriever.ShardedDataCacherNotifier,
+	isMiniBlockCorrect func(block.Type) bool,
+) error {
+	if check.IfNil(body) {
+		return process.ErrNilTxBlockBody
+	}
+	if check.IfNil(txPool) {
 		return process.ErrNilTransactionPool
 	}
 
-	for i := 0; i < len(body); i++ {
-		currentMiniBlock := body[i]
-		if currentMiniBlock.Type != mbType {
+	for i := 0; i < len(body.MiniBlocks); i++ {
+		currentMiniBlock := body.MiniBlocks[i]
+		if !isMiniBlockCorrect(currentMiniBlock.Type) {
+			log.Trace("removeTxsFromPools.isMiniBlockCorrect: false",
+				"miniblock type", currentMiniBlock.Type)
 			continue
 		}
 
 		strCache := process.ShardCacherIdentifier(currentMiniBlock.SenderShardID, currentMiniBlock.ReceiverShardID)
 		txPool.RemoveSetOfDataFromPool(currentMiniBlock.TxHashes, strCache)
+	}
+
+	return nil
+}
+
+func (bpp *basePreProcess) removeMiniBlocksFromPools(
+	body *block.Body,
+	miniBlockPool storage.Cacher,
+	isMiniBlockCorrect func(block.Type) bool,
+) error {
+	if check.IfNil(body) {
+		return process.ErrNilTxBlockBody
+	}
+	if check.IfNil(miniBlockPool) {
+		return process.ErrNilMiniBlockPool
+	}
+
+	for i := 0; i < len(body.MiniBlocks); i++ {
+		currentMiniBlock := body.MiniBlocks[i]
+		if !isMiniBlockCorrect(currentMiniBlock.Type) {
+			log.Trace("removeMiniBlocksFromPools.isMiniBlockCorrect: false",
+				"miniblock type", currentMiniBlock.Type)
+			continue
+		}
 
 		miniBlockHash, err := core.CalculateHash(bpp.marshalizer, bpp.hasher, currentMiniBlock)
 		if err != nil {
@@ -71,156 +276,325 @@ func (bpp *basePreProcess) removeDataFromPools(body block.Body, miniBlockPool st
 	return nil
 }
 
-func (bpp *basePreProcess) restoreMiniBlock(
-	miniBlock *block.MiniBlock,
-	miniBlockHash []byte,
-	miniBlockPool storage.Cacher,
-) []byte {
-
-	miniBlockPool.Put(miniBlockHash, miniBlock)
-	//TODO: Analyze what is the scope of this check and return besides tests. Refactor this method
-	if miniBlock.SenderShardID != bpp.shardCoordinator.SelfId() {
-		return miniBlockHash
+func (bpp *basePreProcess) createMarshalledData(txHashes [][]byte, forBlock TxsForBlockHandler) ([][]byte, error) {
+	if check.IfNil(forBlock) {
+		return nil, process.ErrNilTxsForBlockHandler
 	}
 
-	return nil
-}
-
-func (bpp *basePreProcess) createMarshalizedData(txHashes [][]byte, forBlock *txsForBlock) ([][]byte, error) {
-	mrsTxs := make([][]byte, 0)
+	mrsTxs := make([][]byte, 0, len(txHashes))
 	for _, txHash := range txHashes {
-		forBlock.mutTxsForBlock.RLock()
-		txInfo := forBlock.txHashAndInfo[string(txHash)]
-		forBlock.mutTxsForBlock.RUnlock()
-
-		if txInfo == nil || txInfo.tx == nil {
+		txInfoFromMap, _ := forBlock.GetTxInfoByHash(txHash)
+		if txInfoFromMap == nil || check.IfNil(txInfoFromMap.Tx) {
+			log.Warn("basePreProcess.createMarshalledData: tx not found", "hash", txHash)
 			continue
 		}
 
-		txMrs, err := bpp.marshalizer.Marshal(txInfo.tx)
+		txMrs, err := bpp.marshalizer.Marshal(txInfoFromMap.Tx)
 		if err != nil {
 			return nil, process.ErrMarshalWithoutSuccess
 		}
 		mrsTxs = append(mrsTxs, txMrs)
 	}
 
+	log.Trace("basePreProcess.createMarshalledData",
+		"num txs", len(mrsTxs),
+	)
+
 	return mrsTxs, nil
 }
 
 func (bpp *basePreProcess) saveTxsToStorage(
 	txHashes [][]byte,
-	forBlock *txsForBlock,
+	forBlock TxsForBlockHandler,
 	store dataRetriever.StorageService,
 	dataUnit dataRetriever.UnitType,
-) error {
+) {
+	if check.IfNil(forBlock) {
+		log.Error("basePreProcess.saveTxsToStorage: nil TxsForBlockHandler")
+		return
+	}
 
 	for i := 0; i < len(txHashes); i++ {
 		txHash := txHashes[i]
+		bpp.saveTransactionToStorage(txHash, forBlock, store, dataUnit)
+	}
+}
 
-		forBlock.mutTxsForBlock.RLock()
-		txInfo := forBlock.txHashAndInfo[string(txHash)]
-		forBlock.mutTxsForBlock.RUnlock()
-
-		if txInfo == nil || txInfo.tx == nil {
-			return process.ErrMissingTransaction
-		}
-
-		buff, err := bpp.marshalizer.Marshal(txInfo.tx)
-		if err != nil {
-			return err
-		}
-
-		errNotCritical := store.Put(dataUnit, txHash, buff)
-		if errNotCritical != nil {
-			log.LogIfError(errNotCritical)
-		}
+func (bpp *basePreProcess) saveTransactionToStorage(
+	txHash []byte,
+	forBlock TxsForBlockHandler,
+	store dataRetriever.StorageService,
+	dataUnit dataRetriever.UnitType,
+) {
+	if check.IfNil(forBlock) {
+		log.Error("basePreProcess.saveTransactionToStorage: nil TxsForBlockHandler")
+		return
 	}
 
-	return nil
+	txInfoFromMap, _ := forBlock.GetTxInfoByHash(txHash)
+	if txInfoFromMap == nil || txInfoFromMap.Tx == nil {
+		log.Warn("basePreProcess.saveTransactionToStorage", "txHash", txHash, "dataUnit", dataUnit, "error", process.ErrMissingTransaction)
+		return
+	}
+
+	buff, err := bpp.marshalizer.Marshal(txInfoFromMap.Tx)
+	if err != nil {
+		log.Warn("basePreProcess.saveTransactionToStorage: Marshal", "txHash", txHash, "error", err)
+		return
+	}
+
+	errNotCritical := store.Put(dataUnit, txHash, buff)
+	if errNotCritical != nil {
+		log.Debug("basePreProcess.saveTransactionToStorage: Put",
+			"txHash", txHash,
+			"dataUnit", dataUnit,
+			"error", errNotCritical,
+		)
+	}
 }
 
 func (bpp *basePreProcess) baseReceivedTransaction(
 	txHash []byte,
-	forBlock *txsForBlock,
-	txPool dataRetriever.ShardedDataCacherNotifier,
-) bool {
-	forBlock.mutTxsForBlock.Lock()
-
-	if forBlock.missingTxs > 0 {
-		txInfoForHash := forBlock.txHashAndInfo[string(txHash)]
-		if txInfoForHash != nil && txInfoForHash.txShardInfo != nil &&
-			(txInfoForHash.tx == nil || txInfoForHash.tx.IsInterfaceNil()) {
-			tx, _ := process.GetTransactionHandlerFromPool(
-				txInfoForHash.senderShardID,
-				txInfoForHash.receiverShardID,
-				txHash,
-				txPool)
-
-			if tx != nil {
-				forBlock.txHashAndInfo[string(txHash)].tx = tx
-				forBlock.missingTxs--
-			}
-		}
-		missingTxs := forBlock.missingTxs
-		forBlock.mutTxsForBlock.Unlock()
-
-		return missingTxs == 0
-	}
-	forBlock.mutTxsForBlock.Unlock()
-
-	return false
-}
-
-func (bpp *basePreProcess) computeExistingAndMissing(
-	body block.Body,
-	forBlock *txsForBlock,
-	chRcvAllTxs chan bool,
-	currType block.Type,
-	txPool dataRetriever.ShardedDataCacherNotifier,
-) map[uint32][]*txsHashesInfo {
-	missingTxsForShard := make(map[uint32][]*txsHashesInfo, 0)
-	forBlock.mutTxsForBlock.Lock()
-
-	for i := 0; i < len(body); i++ {
-		miniBlock := body[i]
-		if miniBlock.Type != currType {
-			continue
-		}
-
-		txShardInfo := &txShardInfo{senderShardID: miniBlock.SenderShardID, receiverShardID: miniBlock.ReceiverShardID}
-		txHashes := make([][]byte, 0)
-
-		for j := 0; j < len(miniBlock.TxHashes); j++ {
-			txHash := miniBlock.TxHashes[j]
-			tx, _ := process.GetTransactionHandlerFromPool(
-				miniBlock.SenderShardID,
-				miniBlock.ReceiverShardID,
-				txHash,
-				txPool)
-
-			if tx == nil || tx.IsInterfaceNil() {
-				txHashes = append(txHashes, txHash)
-				forBlock.missingTxs++
-			} else {
-				forBlock.txHashAndInfo[string(txHash)] = &txInfo{tx: tx, txShardInfo: txShardInfo}
-			}
-		}
-
-		if len(txHashes) > 0 {
-			missingTxsForShard[miniBlock.SenderShardID] = append(missingTxsForShard[miniBlock.SenderShardID],
-				&txsHashesInfo{txHashes: txHashes, receiverShardID: miniBlock.ReceiverShardID})
-		}
+	tx data.TransactionHandler,
+	forBlock TxsForBlockHandler,
+) {
+	if check.IfNil(forBlock) {
+		log.Error("basePreProcess.baseReceivedTransaction: nil TxsForBlockHandler")
+		return
 	}
 
-	forBlock.mutTxsForBlock.Unlock()
-
-	return missingTxsForShard
+	if forBlock.HasMissingTransactions() {
+		forBlock.ReceivedTransaction(txHash, tx)
+	}
 }
 
-func (bpp *basePreProcess) isTxAlreadyProcessed(txHash []byte, forBlock *txsForBlock) bool {
-	forBlock.mutTxsForBlock.RLock()
-	_, txAlreadyProcessed := forBlock.txHashAndInfo[string(txHash)]
-	forBlock.mutTxsForBlock.RUnlock()
+func (bpp *basePreProcess) computeExistingAndRequestMissing(
+	body *block.Body,
+	forBlock TxsForBlockHandler,
+	isMiniBlockCorrect func(block.Type) bool,
+	txPool dataRetriever.ShardedDataCacherNotifier,
+	onRequestTxs func(shardID uint32, txHashes [][]byte),
+) int {
+	if check.IfNil(forBlock) {
+		log.Error("basePreProcess.computeExistingAndRequestMissing: nil TxsForBlockHandler")
+		return 0
+	}
 
-	return txAlreadyProcessed
+	return forBlock.ComputeExistingAndRequestMissing(body, isMiniBlockCorrect, txPool, onRequestTxs)
+}
+
+func (bpp *basePreProcess) saveAccountBalanceForAddress(address []byte) error {
+	if bpp.balanceComputation.IsAddressSet(address) {
+		return nil
+	}
+
+	balance, err := bpp.getBalanceForAddress(address)
+	if err != nil {
+		if core.IsGetNodeFromDBError(err) {
+			return err
+		}
+		balance = big.NewInt(0)
+	}
+
+	bpp.balanceComputation.SetBalanceToAddress(address, balance)
+	return nil
+}
+
+func (bpp *basePreProcess) getBalanceForAddress(address []byte) (*big.Int, error) {
+	accountHandler, err := bpp.accounts.GetExistingAccount(address)
+	if err != nil {
+		return nil, err
+	}
+
+	account, ok := accountHandler.(state.UserAccountHandler)
+	if !ok {
+		return nil, process.ErrWrongTypeAssertion
+	}
+
+	return account.GetBalance(), nil
+}
+
+func (bpp *basePreProcess) getTxMaxTotalCost(txHandler data.TransactionHandler) *big.Int {
+	cost := bpp.getTxFee(txHandler)
+
+	if txHandler.GetValue() != nil {
+		cost.Add(cost, txHandler.GetValue())
+	}
+
+	return cost
+}
+
+func (bpp *basePreProcess) getTxFee(txHandler data.TransactionHandler) *big.Int {
+	isAsyncExecEnabled := common.IsAsyncExecutionEnabled(bpp.enableEpochsHandler, bpp.enableRoundsHandler)
+	if !isAsyncExecEnabled {
+		return big.NewInt(0).Mul(big.NewInt(0).SetUint64(txHandler.GetGasPrice()), big.NewInt(0).SetUint64(txHandler.GetGasLimit()))
+	}
+
+	return bpp.feeHandler.ComputeTxFee(txHandler)
+}
+
+func (bpp *basePreProcess) getTotalGasConsumed() uint64 {
+	if !bpp.enableEpochsHandler.IsFlagEnabled(common.OptimizeGasUsedInCrossMiniBlocksFlag) {
+		return bpp.gasHandler.TotalGasProvided()
+	}
+
+	totalGasToBeSubtracted := bpp.gasHandler.TotalGasRefunded() + bpp.gasHandler.TotalGasPenalized()
+	totalGasProvided := bpp.gasHandler.TotalGasProvided()
+	if totalGasToBeSubtracted > totalGasProvided {
+		log.Warn("basePreProcess.getTotalGasConsumed: too much gas to be subtracted",
+			"totalGasRefunded", bpp.gasHandler.TotalGasRefunded(),
+			"totalGasPenalized", bpp.gasHandler.TotalGasPenalized(),
+			"totalGasToBeSubtracted", totalGasToBeSubtracted,
+			"totalGasProvided", totalGasProvided,
+		)
+		return totalGasProvided
+	}
+
+	return totalGasProvided - totalGasToBeSubtracted
+}
+
+func (bpp *basePreProcess) getMaxGasLimitUsedForDestMeTxs(
+	totalGasConsumed uint64,
+	gasProcessingPolicy process.GasProcessingPolicy,
+) uint64 {
+	if gasProcessingPolicy.HasMaxGasLimitPerBlock() {
+		return gasProcessingPolicy.MaxGasLimitPerBlock()
+	}
+
+	maxGasLimitPerBlock := bpp.economicsFee.MaxGasLimitPerBlock(bpp.shardCoordinator.SelfId())
+	if totalGasConsumed == 0 {
+		return maxGasLimitPerBlock
+	}
+
+	return maxGasLimitPerBlock * maxGasLimitPercentUsedForDestMeTxs / 100
+}
+
+func (bpp *basePreProcess) updateGasConsumedWithGasRefundedAndGasPenalized(
+	txHash []byte,
+	gasInfo *gasConsumedInfo,
+) {
+	if !bpp.enableEpochsHandler.IsFlagEnabled(common.OptimizeGasUsedInCrossMiniBlocksFlag) {
+		return
+	}
+
+	gasRefunded := bpp.gasHandler.GasRefunded(txHash)
+	gasPenalized := bpp.gasHandler.GasPenalized(txHash)
+	gasToBeSubtracted := gasRefunded + gasPenalized
+	couldUpdateGasConsumedWithGasSubtracted := gasToBeSubtracted <= gasInfo.gasConsumedByMiniBlockInReceiverShard &&
+		gasToBeSubtracted <= gasInfo.totalGasConsumedInSelfShard
+	if !couldUpdateGasConsumedWithGasSubtracted {
+		log.Warn("basePreProcess.updateGasConsumedWithGasRefundedAndGasPenalized: too much gas to be subtracted",
+			"gasRefunded", gasRefunded,
+			"gasPenalized", gasPenalized,
+			"gasToBeSubtracted", gasToBeSubtracted,
+			"gasConsumedByMiniBlockInReceiverShard", gasInfo.gasConsumedByMiniBlockInReceiverShard,
+			"totalGasConsumedInSelfShard", gasInfo.totalGasConsumedInSelfShard,
+		)
+		return
+	}
+
+	gasInfo.gasConsumedByMiniBlockInReceiverShard -= gasToBeSubtracted
+	gasInfo.totalGasConsumedInSelfShard -= gasToBeSubtracted
+}
+
+func (bpp *basePreProcess) handleProcessTransactionInit(preProcessorExecutionInfoHandler process.PreProcessorExecutionInfoHandler, txHash []byte, mbHash []byte) int {
+	snapshot := bpp.accounts.JournalLen()
+	preProcessorExecutionInfoHandler.InitProcessedTxsResults(txHash, mbHash)
+	return snapshot
+}
+
+func (bpp *basePreProcess) handleProcessTransactionError(preProcessorExecutionInfoHandler process.PreProcessorExecutionInfoHandler, snapshot int, txHash []byte) {
+	bpp.gasHandler.RestoreGasSinceLastReset(txHash)
+
+	errRevert := bpp.accounts.RevertToSnapshot(snapshot)
+	if errRevert != nil {
+		log.Debug("basePreProcess.handleProcessError: RevertToSnapshot", "error", errRevert.Error())
+	}
+
+	preProcessorExecutionInfoHandler.RevertProcessedTxsResults([][]byte{txHash}, txHash)
+	bpp.txExecutionOrderHandler.Remove(txHash)
+}
+
+func getMiniBlockHeaderOfMiniBlock(headerHandler data.HeaderHandler, miniBlockHash []byte) (data.MiniBlockHeaderHandler, error) {
+	for _, miniBlockHeader := range headerHandler.GetMiniBlockHeaderHandlers() {
+		if bytes.Equal(miniBlockHeader.GetHash(), miniBlockHash) {
+			return miniBlockHeader, nil
+		}
+	}
+
+	return nil, process.ErrMissingMiniBlockHeader
+}
+
+func (bpp *basePreProcess) getIndexesOfLastTxProcessedOnExecution(
+	miniBlock *block.MiniBlock,
+	headerHandler data.HeaderHandler,
+) (*processedIndexes, error) {
+	if !headerHandler.IsHeaderV3() {
+		return bpp.getIndexesOfLastTxProcessed(miniBlock, headerHandler)
+	}
+
+	// for header v3, mini blocks need to be processed in their entirety, there are no longer partially processed mini blocks
+	pi := &processedIndexes{
+		indexOfLastTxProcessed:           -1,
+		indexOfLastTxProcessedByProposer: int32(len(miniBlock.GetTxHashes())) - 1,
+	}
+
+	return pi, nil
+}
+
+func (bpp *basePreProcess) getIndexesOfLastTxProcessed(
+	miniBlock *block.MiniBlock,
+	headerHandler data.HeaderHandler,
+) (*processedIndexes, error) {
+
+	miniBlockHash, err := core.CalculateHash(bpp.marshalizer, bpp.hasher, miniBlock)
+	if err != nil {
+		return nil, err
+	}
+
+	pi := &processedIndexes{}
+
+	processedMiniBlockInfo, _ := bpp.processedMiniBlocksTracker.GetProcessedMiniBlockInfo(miniBlockHash)
+	pi.indexOfLastTxProcessed = processedMiniBlockInfo.IndexOfLastTxProcessed
+
+	miniBlockHeader, err := getMiniBlockHeaderOfMiniBlock(headerHandler, miniBlockHash)
+	if err != nil {
+		return nil, err
+	}
+
+	pi.indexOfLastTxProcessedByProposer = miniBlockHeader.GetIndexOfLastTxProcessed()
+
+	return pi, nil
+}
+
+func (bpp *basePreProcess) addNumTxs(numTxs int) {
+	if common.IsAsyncExecutionEnabled(bpp.enableEpochsHandler, bpp.enableRoundsHandler) {
+		return
+	}
+
+	bpp.blockSizeComputation.AddNumTxs(numTxs)
+}
+
+func (bpp *basePreProcess) addNumMiniBlocks(numMiniBlocks int) {
+	if common.IsAsyncExecutionEnabled(bpp.enableEpochsHandler, bpp.enableRoundsHandler) {
+		return
+	}
+
+	bpp.blockSizeComputation.AddNumMiniBlocks(numMiniBlocks)
+}
+
+func (bpp *basePreProcess) isMaxBlockSizeReached(numNewMiniBlocks int, numNewTxs int) bool {
+	if common.IsAsyncExecutionEnabled(bpp.enableEpochsHandler, bpp.enableRoundsHandler) {
+		return false
+	}
+
+	return bpp.blockSizeComputation.IsMaxBlockSizeReached(numNewMiniBlocks, numNewTxs)
+}
+
+func (bpp *basePreProcess) isMaxBlockSizeWithoutThrottleReached(numNewMiniBlocks int, numNewTxs int) bool {
+	if common.IsAsyncExecutionEnabled(bpp.enableEpochsHandler, bpp.enableRoundsHandler) {
+		return false
+	}
+
+	return bpp.blockSizeComputation.IsMaxBlockSizeWithoutThrottleReached(numNewMiniBlocks, numNewTxs)
 }

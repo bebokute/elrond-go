@@ -1,67 +1,274 @@
 package shard
 
 import (
-	"github.com/ElrondNetwork/elrond-go/process"
-	"github.com/ElrondNetwork/elrond-go/process/factory"
-	"github.com/ElrondNetwork/elrond-go/process/mock"
-	"github.com/stretchr/testify/assert"
+	"runtime"
+	"sync"
 	"testing"
+
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/data"
+	"github.com/multiversx/mx-chain-go/common/forking"
+	"github.com/multiversx/mx-chain-go/config"
+	"github.com/multiversx/mx-chain-go/process"
+	"github.com/multiversx/mx-chain-go/process/factory"
+	"github.com/multiversx/mx-chain-go/process/mock"
+	"github.com/multiversx/mx-chain-go/testscommon"
+	"github.com/multiversx/mx-chain-go/testscommon/enableEpochsHandlerMock"
+	"github.com/multiversx/mx-chain-go/testscommon/epochNotifier"
+	"github.com/multiversx/mx-chain-go/testscommon/hashingMocks"
+	vmcommonBuiltInFunctions "github.com/multiversx/mx-chain-vm-common-go/builtInFunctions"
+	"github.com/multiversx/mx-chain-vm-common-go/parsers"
+	wasmConfig "github.com/multiversx/mx-chain-vm-go/config"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestNewVMContainerFactory_NilAccounts(t *testing.T) {
-	t.Parallel()
-
-	vmf, err := NewVMContainerFactory(
-		nil,
-		&mock.AddressConverterMock{},
-	)
-
-	assert.Nil(t, vmf)
-	assert.Equal(t, process.ErrNilAccountsAdapter, err)
+func makeVMConfig() config.VirtualMachineConfig {
+	return config.VirtualMachineConfig{
+		WasmVMVersions: []config.WasmVMVersionByEpoch{
+			{StartEpoch: 0, Version: "v1.2"},
+			{StartEpoch: 10, Version: "v1.2"},
+			{StartEpoch: 12, Version: "v1.3"},
+			{StartEpoch: 14, Version: "v1.4"},
+		},
+		TransferAndExecuteByUserAddresses: []string{"erd1qqqqqqqqqqqqqpgqr46jrxr6r2unaqh75ugd308dwx5vgnhwh47qtvepe3"},
+	}
 }
 
-func TestNewVMContainerFactory_NilAddressConverter(t *testing.T) {
+func createMockVMAccountsArguments() ArgVMContainerFactory {
+	esdtTransferParser, _ := parsers.NewESDTTransferParser(&mock.MarshalizerMock{})
+	return ArgVMContainerFactory{
+		Config:              makeVMConfig(),
+		BlockGasLimit:       10000,
+		GasSchedule:         testscommon.NewGasScheduleNotifierMock(wasmConfig.MakeGasMapForTests()),
+		EpochNotifier:       &epochNotifier.EpochNotifierStub{},
+		EnableEpochsHandler: &enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+		WasmVMChangeLocker:  &sync.RWMutex{},
+		ESDTTransferParser:  esdtTransferParser,
+		BuiltInFunctions:    vmcommonBuiltInFunctions.NewBuiltInFunctionContainer(),
+		BlockChainHook:      &testscommon.BlockChainHookStub{},
+		Hasher:              &hashingMocks.HasherMock{},
+		PubKeyConverter:     testscommon.RealWorldBech32PubkeyConverter,
+	}
+}
+
+func TestNewVMContainerFactory_NilGasScheduleShouldErr(t *testing.T) {
 	t.Parallel()
 
-	vmf, err := NewVMContainerFactory(
-		&mock.AccountsStub{},
-		nil,
-	)
+	args := createMockVMAccountsArguments()
+	args.GasSchedule = nil
+	vmf, err := NewVMContainerFactory(args)
 
 	assert.Nil(t, vmf)
-	assert.Equal(t, process.ErrNilAddressConverter, err)
+	assert.Equal(t, process.ErrNilGasSchedule, err)
+}
+
+func TestNewVMContainerFactory_NilESDTTransferParserShouldErr(t *testing.T) {
+	t.Parallel()
+
+	args := createMockVMAccountsArguments()
+	args.ESDTTransferParser = nil
+	vmf, err := NewVMContainerFactory(args)
+
+	assert.Nil(t, vmf)
+	assert.Equal(t, process.ErrNilESDTTransferParser, err)
+}
+
+func TestNewVMContainerFactory_NilLockerShouldErr(t *testing.T) {
+	t.Parallel()
+
+	args := createMockVMAccountsArguments()
+	args.WasmVMChangeLocker = nil
+	vmf, err := NewVMContainerFactory(args)
+
+	assert.Nil(t, vmf)
+	assert.Equal(t, process.ErrNilLocker, err)
+}
+
+func TestNewVMContainerFactory_NilEpochNotifierShouldErr(t *testing.T) {
+	t.Parallel()
+
+	args := createMockVMAccountsArguments()
+	args.EpochNotifier = nil
+	vmf, err := NewVMContainerFactory(args)
+
+	assert.Nil(t, vmf)
+	assert.Equal(t, process.ErrNilEpochNotifier, err)
+}
+
+func TestNewVMContainerFactory_NilEnableEpochsHandlerShouldErr(t *testing.T) {
+	t.Parallel()
+
+	args := createMockVMAccountsArguments()
+	args.EnableEpochsHandler = nil
+	vmf, err := NewVMContainerFactory(args)
+
+	assert.Nil(t, vmf)
+	assert.Equal(t, process.ErrNilEnableEpochsHandler, err)
+}
+
+func TestNewVMContainerFactory_NilBuiltinFunctionsShouldErr(t *testing.T) {
+	t.Parallel()
+
+	args := createMockVMAccountsArguments()
+	args.BuiltInFunctions = nil
+	vmf, err := NewVMContainerFactory(args)
+
+	assert.Nil(t, vmf)
+	assert.Equal(t, process.ErrNilBuiltInFunction, err)
+}
+
+func TestNewVMContainerFactory_NilBlockChainHookShouldErr(t *testing.T) {
+	t.Parallel()
+
+	args := createMockVMAccountsArguments()
+	args.BlockChainHook = nil
+	vmf, err := NewVMContainerFactory(args)
+
+	assert.Nil(t, vmf)
+	assert.Equal(t, process.ErrNilBlockChainHook, err)
+}
+
+func TestNewVMContainerFactory_NilHasherShouldErr(t *testing.T) {
+	args := createMockVMAccountsArguments()
+	args.Hasher = nil
+	vmf, err := NewVMContainerFactory(args)
+
+	assert.Nil(t, vmf)
+	assert.Equal(t, process.ErrNilHasher, err)
+}
+
+func TestNewVMContainerFactory_NilPubKeyConverterShouldErr(t *testing.T) {
+	args := createMockVMAccountsArguments()
+	args.PubKeyConverter = nil
+	vmf, err := NewVMContainerFactory(args)
+
+	assert.Nil(t, vmf)
+	assert.Equal(t, process.ErrNilPubkeyConverter, err)
+}
+
+func TestNewVMContainerFactory_EmptyOpcodeAddressListErr(t *testing.T) {
+	args := createMockVMAccountsArguments()
+	args.Config.TransferAndExecuteByUserAddresses = nil
+	vmf, err := NewVMContainerFactory(args)
+
+	assert.Nil(t, vmf)
+	assert.Equal(t, process.ErrTransferAndExecuteByUserAddressesAreNil, err)
+}
+
+func TestNewVMContainerFactory_WrongAddressErr(t *testing.T) {
+	args := createMockVMAccountsArguments()
+	args.Config.TransferAndExecuteByUserAddresses = []string{"just"}
+	vmf, err := NewVMContainerFactory(args)
+
+	assert.Nil(t, vmf)
+	assert.Equal(t, err.Error(), "invalid bech32 string length 4")
 }
 
 func TestNewVMContainerFactory_OkValues(t *testing.T) {
-	t.Parallel()
+	if runtime.GOARCH == "arm64" {
+		t.Skip("skipping test on arm64")
+	}
 
-	vmf, err := NewVMContainerFactory(
-		&mock.AccountsStub{},
-		&mock.AddressConverterMock{},
-	)
+	args := createMockVMAccountsArguments()
+	vmf, err := NewVMContainerFactory(args)
 
 	assert.NotNil(t, vmf)
 	assert.Nil(t, err)
+	assert.False(t, vmf.IsInterfaceNil())
 }
 
 func TestVmContainerFactory_Create(t *testing.T) {
-	t.Parallel()
+	if runtime.GOARCH == "arm64" {
+		t.Skip("skipping test on arm64")
+	}
 
-	vmf, err := NewVMContainerFactory(
-		&mock.AccountsStub{},
-		&mock.AddressConverterMock{},
-	)
-	assert.NotNil(t, vmf)
-	assert.Nil(t, err)
+	args := createMockVMAccountsArguments()
+	vmf, _ := NewVMContainerFactory(args)
+	require.NotNil(t, vmf)
 
 	container, err := vmf.Create()
+	require.Nil(t, err)
+	require.NotNil(t, container)
+	defer func() {
+		_ = container.Close()
+	}()
+
 	assert.Nil(t, err)
 	assert.NotNil(t, container)
 
-	vm, err := container.Get([]byte(factory.IELEVirtualMachine))
+	vm, err := container.Get(factory.WasmVirtualMachine)
 	assert.Nil(t, err)
 	assert.NotNil(t, vm)
 
-	acc := vmf.VMAccountsDB()
+	acc := vmf.BlockChainHookImpl()
 	assert.NotNil(t, acc)
+
+	assert.Equal(t, len(vmf.mapOpcodeAddressIsAllowed), 1)
+	assert.Equal(t, len(vmf.mapOpcodeAddressIsAllowed[managedMultiTransferESDTNFTExecuteByUser]), 1)
+}
+
+func TestVmContainerFactory_ResolveWasmVMVersion(t *testing.T) {
+	if runtime.GOARCH == "arm64" {
+		t.Skip("skipping test on arm64")
+	}
+
+	epochNotifierInstance := forking.NewGenericEpochNotifier()
+
+	numCalled := 0
+	gasScheduleNotifier := testscommon.NewGasScheduleNotifierMock(wasmConfig.MakeGasMapForTests())
+	gasScheduleNotifier.RegisterNotifyHandlerCalled = func(handler core.GasScheduleSubscribeHandler) {
+		numCalled++
+		handler.GasScheduleChange(gasScheduleNotifier.GasSchedule)
+	}
+	args := createMockVMAccountsArguments()
+	args.GasSchedule = gasScheduleNotifier
+	args.EpochNotifier = epochNotifierInstance
+	vmf, _ := NewVMContainerFactory(args)
+	require.NotNil(t, vmf)
+
+	container, err := vmf.Create()
+	require.Nil(t, err)
+	require.NotNil(t, container)
+	defer func() {
+		_ = container.Close()
+	}()
+	require.Equal(t, "v1.2", getWasmVMVersion(t, container))
+
+	epochNotifierInstance.CheckEpoch(makeHeaderHandlerStub(1))
+	require.Equal(t, "v1.2", getWasmVMVersion(t, container))
+
+	epochNotifierInstance.CheckEpoch(makeHeaderHandlerStub(6))
+	require.Equal(t, "v1.2", getWasmVMVersion(t, container))
+
+	epochNotifierInstance.CheckEpoch(makeHeaderHandlerStub(10))
+	require.Equal(t, "v1.2", getWasmVMVersion(t, container))
+
+	epochNotifierInstance.CheckEpoch(makeHeaderHandlerStub(11))
+	require.Equal(t, "v1.2", getWasmVMVersion(t, container))
+
+	epochNotifierInstance.CheckEpoch(makeHeaderHandlerStub(12))
+	require.Equal(t, "v1.3", getWasmVMVersion(t, container))
+
+	epochNotifierInstance.CheckEpoch(makeHeaderHandlerStub(13))
+	require.Equal(t, "v1.3", getWasmVMVersion(t, container))
+
+	epochNotifierInstance.CheckEpoch(makeHeaderHandlerStub(20))
+	require.Equal(t, "v1.4", getWasmVMVersion(t, container))
+
+	require.Equal(t, numCalled, 1)
+}
+
+func makeHeaderHandlerStub(epoch uint32) data.HeaderHandler {
+	return &testscommon.HeaderHandlerStub{
+		EpochField: epoch,
+	}
+}
+
+func getWasmVMVersion(t testing.TB, container process.VirtualMachinesContainer) string {
+	vm, err := container.Get(factory.WasmVirtualMachine)
+	require.Nil(t, err)
+	require.NotNil(t, vm)
+
+	return vm.GetVersion()
 }

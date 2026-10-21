@@ -4,30 +4,56 @@ import (
 	"time"
 )
 
+// RoundStub -
 type RoundStub struct {
-	IndexCalled         func() int32
-	TimeDurationCalled  func() time.Duration
-	TimeStampCalled     func() time.Time
-	UpdateRoundCalled   func(time.Time, time.Time)
-	RemainingTimeCalled func(time.Time, time.Duration) time.Duration
+	IndexCalled                func() int64
+	TimeDurationCalled         func() time.Duration
+	TimeDurationForRoundCalled func(uint64) time.Duration
+	TimeStampCalled            func() time.Time
+	UpdateRoundCalled          func(time.Time, time.Time)
+	RemainingTimeCalled        func(time.Time, time.Duration) time.Duration
 }
 
-func (rnds *RoundStub) Index() int32 {
+// Index -
+func (rnds *RoundStub) Index() int64 {
 	return rnds.IndexCalled()
 }
 
+// IndexForCurrentTime -
+func (rnds *RoundStub) IndexForCurrentTime() int64 {
+	return rnds.Index()
+}
+
+// TimeDuration -
 func (rnds *RoundStub) TimeDuration() time.Duration {
 	return rnds.TimeDurationCalled()
 }
 
+// TimeDurationForRound -
+func (rnds *RoundStub) TimeDurationForRound(round uint64) time.Duration {
+	if rnds.TimeDurationForRoundCalled != nil {
+		return rnds.TimeDurationForRoundCalled(round)
+	}
+
+	return rnds.TimeDuration()
+}
+
+// TimeStamp -
 func (rnds *RoundStub) TimeStamp() time.Time {
 	return rnds.TimeStampCalled()
 }
 
+// UpdateRound -
 func (rnds *RoundStub) UpdateRound(genesisRoundTimeStamp time.Time, timeStamp time.Time) {
 	rnds.UpdateRoundCalled(genesisRoundTimeStamp, timeStamp)
 }
 
+// RemainingTime -
 func (rnds *RoundStub) RemainingTime(startTime time.Time, maxTime time.Duration) time.Duration {
 	return rnds.RemainingTimeCalled(startTime, maxTime)
+}
+
+// IsInterfaceNil --
+func (rnds *RoundStub) IsInterfaceNil() bool {
+	return rnds == nil
 }

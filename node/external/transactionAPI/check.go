@@ -1,0 +1,74 @@
+package transactionAPI
+
+import (
+	"fmt"
+
+	"github.com/multiversx/mx-chain-core-go/core/check"
+
+	"github.com/multiversx/mx-chain-go/process"
+)
+
+func checkNilArgs(arg *ArgAPITransactionProcessor) error {
+	if arg == nil {
+		return ErrNilAPITransactionProcessorArg
+	}
+	if check.IfNil(arg.Marshalizer) {
+		return process.ErrNilMarshalizer
+	}
+	if check.IfNil(arg.DataPool) {
+		return process.ErrNilDataPoolHolder
+	}
+	if check.IfNil(arg.HistoryRepository) {
+		return process.ErrNilHistoryRepository
+	}
+	if check.IfNil(arg.ShardCoordinator) {
+		return process.ErrNilShardCoordinator
+	}
+	if check.IfNil(arg.AddressPubKeyConverter) {
+		return process.ErrNilPubkeyConverter
+	}
+	if check.IfNil(arg.StorageService) {
+		return process.ErrNilStorage
+	}
+	if check.IfNil(arg.Uint64ByteSliceConverter) {
+		return process.ErrNilUint64Converter
+	}
+	if check.IfNil(arg.FeeComputer) {
+		return ErrNilFeeComputer
+	}
+	if check.IfNil(arg.TxTypeHandler) {
+		return process.ErrNilTxTypeHandler
+	}
+	if check.IfNil(arg.RoundHandler) {
+		return process.ErrNilRoundHandler
+	}
+	if check.IfNil(arg.LogsFacade) {
+		return ErrNilLogsFacade
+	}
+	if check.IfNilReflect(arg.DataFieldParser) {
+		return ErrNilDataFieldParser
+	}
+	if check.IfNil(arg.TxMarshaller) {
+		return fmt.Errorf("%w for tx marshaller", process.ErrNilMarshalizer)
+	}
+	if check.IfNil(arg.EnableEpochsHandler) {
+		return process.ErrNilEnableEpochsHandler
+	}
+	if check.IfNil(arg.EnableRoundsHandler) {
+		return process.ErrNilEnableRoundsHandler
+	}
+	if check.IfNil(arg.TxVersionChecker) {
+		return process.ErrNilTransactionVersionChecker
+	}
+	if check.IfNil(arg.ChainHandler) {
+		return process.ErrNilBlockChain
+	}
+	if check.IfNil(arg.TxProcessor) {
+		return process.ErrNilTxProcessor
+	}
+	if check.IfNil(arg.RoundExclusionHandler) {
+		return ErrNilRoundExclusionHandler
+	}
+
+	return nil
+}

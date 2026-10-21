@@ -1,0 +1,82 @@
+package track
+
+import (
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/data"
+)
+
+type blockNotarizerHandler interface {
+	AddNotarizedHeader(shardID uint32, notarizedHeader data.HeaderHandler, notarizedHeaderHash []byte)
+	CleanupNotarizedHeadersBehindNonce(shardID uint32, nonce uint64)
+	DisplayNotarizedHeaders(shardID uint32, message string)
+	GetLastNotarizedHeader(shardID uint32) (data.HeaderHandler, []byte, error)
+	GetFirstNotarizedHeader(shardID uint32) (data.HeaderHandler, []byte, error)
+	GetLastNotarizedHeaderNonce(shardID uint32) uint64
+	GetNotarizedHeader(shardID uint32, offset uint64) (data.HeaderHandler, []byte, error)
+	InitNotarizedHeaders(startHeaders map[uint32]data.HeaderHandler) error
+	RemoveLastNotarizedHeader()
+	RestoreNotarizedHeadersToGenesis()
+	IsInterfaceNil() bool
+}
+
+type blockNotifierHandler interface {
+	CallHandlers(shardID uint32, headers []data.HeaderHandler, headersHashes [][]byte)
+	RegisterHandler(handler func(shardID uint32, headers []data.HeaderHandler, headersHashes [][]byte))
+	GetNumRegisteredHandlers() int
+	IsInterfaceNil() bool
+}
+
+type blockProcessorHandler interface {
+	ComputeLongestChain(shardID uint32, header data.HeaderHandler) ([]data.HeaderHandler, [][]byte)
+	ProcessReceivedHeader(header data.HeaderHandler)
+	IsInterfaceNil() bool
+}
+
+type blockTrackerHandler interface {
+	GetSelfHeaders(headerHandler data.HeaderHandler) []*HeaderInfo
+	ComputeCrossInfo(headers []data.HeaderHandler)
+	ComputeLongestSelfChain() (data.HeaderHandler, []byte, []data.HeaderHandler, [][]byte)
+	SortHeadersFromNonce(shardID uint32, nonce uint64) ([]data.HeaderHandler, [][]byte)
+	AddHeaderFromPool(shardID uint32, nonce uint64)
+	IsSettledCrossHeader(header data.HeaderHandler, headerHash []byte) bool
+	IsInterfaceNil() bool
+}
+
+type sourceAwareSelfHeadersProvider interface {
+	getSelfHeadersWithSource(headerHandler data.HeaderHandler, headerHash []byte) []*selfHeaderInfo
+}
+
+type sourceAwareSelfHeadersPublisher interface {
+	publishSelfNotarizedFromCrossHeaders(shardID uint32, headersInfo []*selfHeaderInfo)
+}
+
+type selfHeaderInfo struct {
+	Hash   []byte
+	Header data.HeaderHandler
+
+	sourceMetaHeader data.MetaHeaderHandler
+	sourceMetaHash   []byte
+	sourceView       uint64
+}
+
+type blockBalancerHandler interface {
+	GetNumPendingMiniBlocks(shardID uint32) uint32
+	SetNumPendingMiniBlocks(shardID uint32, numPendingMiniBlocks uint32)
+	GetLastShardProcessedMetaNonce(shardID uint32) uint64
+	SetLastShardProcessedMetaNonce(shardID uint32, nonce uint64)
+	IsInterfaceNil() bool
+}
+
+// KeysHandler defines the operations implemented by a component that will manage all keys,
+// including the single signer keys or the set of multi-keys
+type KeysHandler interface {
+	ResetRoundsWithoutReceivedMessages(pkBytes []byte, pid core.PeerID)
+	IsInterfaceNil() bool
+}
+
+// OwnShardTrackerHandler defines the operations implemented by a component that will track the own shard
+type OwnShardTrackerHandler interface {
+	ComputeOwnShardStuck(lastExecutionResultsInfo data.BaseExecutionResultHandler, currentNonce uint64)
+	ResetOwnShardStuck()
+	IsOwnShardStuck() bool
+}

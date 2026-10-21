@@ -10,12 +10,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ElrondNetwork/elrond-go/core"
-	"github.com/ElrondNetwork/elrond-go/data/transaction"
-	"github.com/ElrondNetwork/elrond-go/storage"
-	"github.com/ElrondNetwork/elrond-go/storage/leveldb"
-	"github.com/ElrondNetwork/elrond-go/storage/lrucache"
-	"github.com/ElrondNetwork/elrond-go/storage/storageUnit"
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/data/transaction"
+	"github.com/multiversx/mx-chain-go/storage"
+	"github.com/multiversx/mx-chain-go/storage/cache"
+	"github.com/multiversx/mx-chain-go/storage/database"
+	"github.com/multiversx/mx-chain-go/storage/storageunit"
 )
 
 const batchDelaySeconds = 10
@@ -28,12 +28,12 @@ type TestStorage struct {
 	sndAddr        []byte
 	sig            []byte
 	nbTxs          int
-	mapRemovedKeys sync.Map
+	mapRemovedKeys *sync.Map
 	maxWritten     *uint64
 }
 
 // NewTestStorage return an object of type TestStorage
-func NewTestStorage() TestStorage {
+func NewTestStorage() *TestStorage {
 	testStorage := new(TestStorage)
 
 	testStorage.rcvAddr = make([]byte, 32)
@@ -44,11 +44,11 @@ func NewTestStorage() TestStorage {
 	_, _ = rand.Reader.Read(testStorage.sndAddr)
 	_, _ = rand.Reader.Read(testStorage.sig)
 
-	return *testStorage
+	return testStorage
 }
 
 // InitAdditionalFieldsForStorageOperations init additional structure fields to can do storage operations
-func (ts *TestStorage) InitAdditionalFieldsForStorageOperations(nbTxsWrite int, mapRemovedKeys sync.Map, maxWritten *uint64) {
+func (ts *TestStorage) InitAdditionalFieldsForStorageOperations(nbTxsWrite int, mapRemovedKeys *sync.Map, maxWritten *uint64) {
 	if ts == nil {
 		return
 	}
@@ -77,9 +77,9 @@ func (ts *TestStorage) CreateStoredData(nonce uint64) ([]byte, []byte) {
 
 // CreateStorageLevelDB creates a storage levelDB
 func (ts *TestStorage) CreateStorageLevelDB() storage.Storer {
-	db, _ := leveldb.NewDB("Transactions", batchDelaySeconds, maxBatchSize, maxOpenFiles)
-	cacher, _ := lrucache.NewCache(50000)
-	store, _ := storageUnit.NewStorageUnit(
+	db, _ := database.NewLevelDB("Transactions", batchDelaySeconds, maxBatchSize, maxOpenFiles, 0)
+	cacher, _ := cache.NewLRUCache(50000)
+	store, _ := storageunit.NewStorageUnit(
 		cacher,
 		db,
 	)
@@ -89,9 +89,9 @@ func (ts *TestStorage) CreateStorageLevelDB() storage.Storer {
 
 // CreateStorageLevelDBSerial creates a storage levelDB serial
 func (ts *TestStorage) CreateStorageLevelDBSerial() storage.Storer {
-	db, _ := leveldb.NewSerialDB("Transactions", batchDelaySeconds, maxBatchSize, maxOpenFiles)
-	cacher, _ := lrucache.NewCache(50000)
-	store, _ := storageUnit.NewStorageUnit(
+	db, _ := database.NewSerialDB("Transactions", batchDelaySeconds, maxBatchSize, maxOpenFiles, 0)
+	cacher, _ := cache.NewLRUCache(50000)
+	store, _ := storageunit.NewStorageUnit(
 		cacher,
 		db,
 	)
@@ -143,7 +143,7 @@ func (ts *TestStorage) WriteMultipleWithNotif(
 		key, val := ts.CreateStoredData(uint64(counter))
 		errPut := store.Put(key, val)
 		if errPut != nil {
-			fmt.Print(errPut.Error())
+			fmt.Println(errPut.Error())
 			atomic.AddInt32(errors, 1)
 			return
 		}

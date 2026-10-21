@@ -1,0 +1,93 @@
+package mock
+
+import (
+	"math"
+	"sync"
+	"time"
+)
+
+// RoundHandlerMock -
+type RoundHandlerMock struct {
+	RoundIndex        int64
+	RoundTimeStamp    time.Time
+	RoundTimeDuration time.Duration
+	mutRoundHandler   sync.RWMutex
+}
+
+// BeforeGenesis -
+func (rndm *RoundHandlerMock) BeforeGenesis() bool {
+	return false
+}
+
+// RevertOneRound -
+func (rndm *RoundHandlerMock) RevertOneRound() {
+	rndm.mutRoundHandler.Lock()
+	rndm.RoundIndex--
+	rndm.RoundTimeStamp = rndm.RoundTimeStamp.Add(-rndm.RoundTimeDuration)
+	rndm.mutRoundHandler.Unlock()
+}
+
+// Index -
+func (rndm *RoundHandlerMock) Index() int64 {
+	rndm.mutRoundHandler.RLock()
+	defer rndm.mutRoundHandler.RUnlock()
+	return rndm.RoundIndex
+}
+
+// IndexForCurrentTime -
+func (rndm *RoundHandlerMock) IndexForCurrentTime() int64 {
+	return rndm.Index()
+}
+
+// TimeDuration -
+func (rndm *RoundHandlerMock) TimeDuration() time.Duration {
+	rndm.mutRoundHandler.RLock()
+	defer rndm.mutRoundHandler.RUnlock()
+
+	return rndm.RoundTimeDuration
+}
+
+// TimeDurationForRound -
+func (rndm *RoundHandlerMock) TimeDurationForRound(_ uint64) time.Duration {
+	return rndm.TimeDuration()
+}
+
+// TimeStamp -
+func (rndm *RoundHandlerMock) TimeStamp() time.Time {
+	rndm.mutRoundHandler.RLock()
+	defer rndm.mutRoundHandler.RUnlock()
+
+	return rndm.RoundTimeStamp
+}
+
+// UpdateRound -
+func (rndm *RoundHandlerMock) UpdateRound(genesisRoundTimeStamp time.Time, timeStamp time.Time) {
+	rndm.mutRoundHandler.Lock()
+	defer rndm.mutRoundHandler.Lock()
+
+	delta := timeStamp.Sub(genesisRoundTimeStamp).Nanoseconds()
+	index := int64(math.Floor(float64(delta) / float64(rndm.RoundTimeDuration.Nanoseconds())))
+
+	if rndm.RoundIndex != index {
+		rndm.RoundIndex = index
+		rndm.RoundTimeStamp = genesisRoundTimeStamp.Add(time.Duration(index * rndm.RoundTimeDuration.Nanoseconds()))
+	}
+}
+
+// RemainingTime -
+func (rndm *RoundHandlerMock) RemainingTime(_ time.Time, _ time.Duration) time.Duration {
+	rndm.mutRoundHandler.RLock()
+	defer rndm.mutRoundHandler.RUnlock()
+
+	return rndm.RoundTimeDuration
+}
+
+// GetTimeStampForRound returns 0
+func (rndm *RoundHandlerMock) GetTimeStampForRound(_ uint64) uint64 {
+	return 0
+}
+
+// IsInterfaceNil returns true if there is no value under the interface
+func (rndm *RoundHandlerMock) IsInterfaceNil() bool {
+	return rndm == nil
+}

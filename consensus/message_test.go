@@ -3,7 +3,7 @@ package consensus_test
 import (
 	"testing"
 
-	"github.com/ElrondNetwork/elrond-go/consensus"
+	"github.com/multiversx/mx-chain-go/consensus"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -15,9 +15,17 @@ func TestConsensusMessage_NewConsensusMessageShouldWork(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
+		nil,
 		-1,
 		0,
-		0)
+		[]byte("chain ID"),
+		nil,
+		nil,
+		nil,
+		"pid",
+		nil,
+	)
 
 	assert.NotNil(t, cnsMsg)
 }

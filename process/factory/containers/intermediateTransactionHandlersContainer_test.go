@@ -1,12 +1,13 @@
 package containers_test
 
 import (
-	"github.com/ElrondNetwork/elrond-go/data/block"
+	"errors"
 	"testing"
 
-	"github.com/ElrondNetwork/elrond-go/process"
-	"github.com/ElrondNetwork/elrond-go/process/factory/containers"
-	"github.com/ElrondNetwork/elrond-go/process/mock"
+	"github.com/multiversx/mx-chain-core-go/data/block"
+	"github.com/multiversx/mx-chain-go/process"
+	"github.com/multiversx/mx-chain-go/process/factory/containers"
+	"github.com/multiversx/mx-chain-go/process/mock"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -16,6 +17,7 @@ func TestNewIntermediateTransactionHandlersContainer_ShouldWork(t *testing.T) {
 	c := containers.NewIntermediateTransactionHandlersContainer()
 
 	assert.NotNil(t, c)
+	assert.False(t, c.IsInterfaceNil())
 }
 
 //------- Add
@@ -109,7 +111,7 @@ func TestIntermediateTransactionHandlersContainer_GetNotFoundShouldErr(t *testin
 	valRecovered, err := c.Get(keyNotFound)
 
 	assert.Nil(t, valRecovered)
-	assert.Equal(t, process.ErrInvalidContainerKey, err)
+	assert.True(t, errors.Is(err, process.ErrInvalidContainerKey))
 }
 
 func TestIntermediateTransactionHandlersContainer_GetWrongTypeShouldErr(t *testing.T) {
@@ -194,7 +196,7 @@ func TestIntermediateTransactionHandlersContainer_RemoveShouldWork(t *testing.T)
 	valRecovered, err := c.Get(key)
 
 	assert.Nil(t, valRecovered)
-	assert.Equal(t, process.ErrInvalidContainerKey, err)
+	assert.True(t, errors.Is(err, process.ErrInvalidContainerKey))
 }
 
 //------- Len

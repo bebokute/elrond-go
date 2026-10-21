@@ -1,43 +1,112 @@
 package process
 
 import (
-	"github.com/ElrondNetwork/elrond-go/data"
-	"github.com/ElrondNetwork/elrond-go/data/block"
-	"github.com/ElrondNetwork/elrond-go/data/transaction"
-	"github.com/ElrondNetwork/elrond-go/data/typeConverters"
-	"github.com/ElrondNetwork/elrond-go/dataRetriever"
-	"github.com/ElrondNetwork/elrond-go/marshal"
-	"github.com/ElrondNetwork/elrond-go/sharding"
-	"github.com/ElrondNetwork/elrond-go/storage"
+	"bytes"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"math"
+	"math/big"
+	"sort"
+	"time"
+
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/core/check"
+	"github.com/multiversx/mx-chain-core-go/data"
+	"github.com/multiversx/mx-chain-core-go/data/block"
+	"github.com/multiversx/mx-chain-core-go/data/scheduled"
+	"github.com/multiversx/mx-chain-core-go/data/transaction"
+	"github.com/multiversx/mx-chain-core-go/data/typeConverters"
+	"github.com/multiversx/mx-chain-core-go/hashing"
+	"github.com/multiversx/mx-chain-core-go/marshal"
+	logger "github.com/multiversx/mx-chain-logger-go"
+	vmcommon "github.com/multiversx/mx-chain-vm-common-go"
+
+	"github.com/multiversx/mx-chain-go/storage"
+
+	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/dataRetriever"
+	"github.com/multiversx/mx-chain-go/sharding"
+	"github.com/multiversx/mx-chain-go/state"
 )
 
-// EmptyChannel empties the given channel
-func EmptyChannel(ch chan bool) int {
-	readsCnt := 0
-	for {
-		select {
-		case <-ch:
-			readsCnt++
-		default:
-			return readsCnt
-		}
+var log = logger.GetOrCreate("process")
+
+const maxSelfNotarizedLookback = 50
+const VMStoragePrefix = "VM@"
+const maxLenMiniBlockReservedField = 10
+
+// CheckIncomingMiniBlockHeaderAtMetachain verifies the execution contract for
+// an incoming miniblock in a legacy metachain block.
+func CheckIncomingMiniBlockHeaderAtMetachain(mbh data.MiniBlockHeaderHandler) error {
+	if mbh == nil {
+		return ErrNilMiniBlockHeader
+	}
+
+	isIncomingAtMetachain := mbh.GetReceiverShardID() == core.MetachainShardId &&
+		mbh.GetSenderShardID() != core.MetachainShardId
+	if !isIncomingAtMetachain {
+		return nil
+	}
+
+	processingType := mbh.GetProcessingType()
+	if processingType != int32(block.Normal) {
+		return fmt.Errorf("%w: incoming miniblock at metachain must have Normal processing type, got %d",
+			ErrInvalidMiniBlockProcessingType, processingType)
+	}
+
+	constructionState := mbh.GetConstructionState()
+	if constructionState != int32(block.Final) {
+		return fmt.Errorf("%w: incoming miniblock at metachain must have Final construction state, got %d",
+			ErrInvalidConstructionState, constructionState)
+	}
+
+	return nil
+}
+
+// ShardedCacheSearchMethod defines the algorithm for searching through a sharded cache
+type ShardedCacheSearchMethod byte
+
+const (
+	// SearchMethodJustPeek will make the algorithm invoke just Peek method
+	SearchMethodJustPeek ShardedCacheSearchMethod = iota
+
+	// SearchMethodSearchFirst will make the algorithm invoke just SearchFirst method
+	SearchMethodSearchFirst
+
+	// SearchMethodPeekWithFallbackSearchFirst will first try a Peek method. If the data is not found will fall back
+	// to SearchFirst method
+	SearchMethodPeekWithFallbackSearchFirst
+)
+
+// ToString converts the ShardedCacheSearchMethod to its string representation
+func (method ShardedCacheSearchMethod) ToString() string {
+	switch method {
+	case SearchMethodJustPeek:
+		return "just peek"
+	case SearchMethodSearchFirst:
+		return "search first"
+	case SearchMethodPeekWithFallbackSearchFirst:
+		return "peek with fallback to search first"
+	default:
+		return fmt.Sprintf("unknown method %d", method)
 	}
 }
 
 // GetShardHeader gets the header, which is associated with the given hash, from pool or storage
 func GetShardHeader(
 	hash []byte,
-	cacher storage.Cacher,
+	headersCacher dataRetriever.HeadersPool,
 	marshalizer marshal.Marshalizer,
 	storageService dataRetriever.StorageService,
-) (*block.Header, error) {
+) (data.ShardHeaderHandler, error) {
 
-	err := checkGetHeaderParamsForNil(cacher, marshalizer, storageService)
+	err := checkGetHeaderParamsForNil(headersCacher, marshalizer, storageService)
 	if err != nil {
 		return nil, err
 	}
 
-	hdr, err := GetShardHeaderFromPool(hash, cacher)
+	hdr, err := GetShardHeaderFromPool(hash, headersCacher)
 	if err != nil {
 		hdr, err = GetShardHeaderFromStorage(hash, marshalizer, storageService)
 		if err != nil {
@@ -51,17 +120,17 @@ func GetShardHeader(
 // GetMetaHeader gets the header, which is associated with the given hash, from pool or storage
 func GetMetaHeader(
 	hash []byte,
-	cacher storage.Cacher,
+	headersCacher dataRetriever.HeadersPool,
 	marshalizer marshal.Marshalizer,
 	storageService dataRetriever.StorageService,
-) (*block.MetaBlock, error) {
+) (data.MetaHeaderHandler, error) {
 
-	err := checkGetHeaderParamsForNil(cacher, marshalizer, storageService)
+	err := checkGetHeaderParamsForNil(headersCacher, marshalizer, storageService)
 	if err != nil {
 		return nil, err
 	}
 
-	hdr, err := GetMetaHeaderFromPool(hash, cacher)
+	hdr, err := GetMetaHeaderFromPool(hash, headersCacher)
 	if err != nil {
 		hdr, err = GetMetaHeaderFromStorage(hash, marshalizer, storageService)
 		if err != nil {
@@ -75,15 +144,15 @@ func GetMetaHeader(
 // GetShardHeaderFromPool gets the header, which is associated with the given hash, from pool
 func GetShardHeaderFromPool(
 	hash []byte,
-	cacher storage.Cacher,
-) (*block.Header, error) {
+	headersCacher dataRetriever.HeadersPool,
+) (data.ShardHeaderHandler, error) {
 
-	obj, err := getHeaderFromPool(hash, cacher)
+	obj, err := getHeaderFromPool(hash, headersCacher)
 	if err != nil {
 		return nil, err
 	}
 
-	hdr, ok := obj.(*block.Header)
+	hdr, ok := obj.(data.ShardHeaderHandler)
 	if !ok {
 		return nil, ErrWrongTypeAssertion
 	}
@@ -94,15 +163,15 @@ func GetShardHeaderFromPool(
 // GetMetaHeaderFromPool gets the header, which is associated with the given hash, from pool
 func GetMetaHeaderFromPool(
 	hash []byte,
-	cacher storage.Cacher,
-) (*block.MetaBlock, error) {
+	headersCacher dataRetriever.HeadersPool,
+) (data.MetaHeaderHandler, error) {
 
-	obj, err := getHeaderFromPool(hash, cacher)
+	obj, err := getHeaderFromPool(hash, headersCacher)
 	if err != nil {
 		return nil, err
 	}
 
-	hdr, ok := obj.(*block.MetaBlock)
+	hdr, ok := obj.(data.MetaHeaderHandler)
 	if !ok {
 		return nil, ErrWrongTypeAssertion
 	}
@@ -110,20 +179,32 @@ func GetMetaHeaderFromPool(
 	return hdr, nil
 }
 
+// GetHeaderFromStorage method returns a block header from storage
+func GetHeaderFromStorage(
+	shardId uint32,
+	hash []byte,
+	marshalizer marshal.Marshalizer,
+	storageService dataRetriever.StorageService,
+) (data.HeaderHandler, error) {
+	if shardId == core.MetachainShardId {
+		return GetMetaHeaderFromStorage(hash, marshalizer, storageService)
+	}
+	return GetShardHeaderFromStorage(hash, marshalizer, storageService)
+}
+
 // GetShardHeaderFromStorage gets the header, which is associated with the given hash, from storage
 func GetShardHeaderFromStorage(
 	hash []byte,
 	marshalizer marshal.Marshalizer,
 	storageService dataRetriever.StorageService,
-) (*block.Header, error) {
+) (data.ShardHeaderHandler, error) {
 
 	buffHdr, err := GetMarshalizedHeaderFromStorage(dataRetriever.BlockHeaderUnit, hash, marshalizer, storageService)
 	if err != nil {
 		return nil, err
 	}
 
-	hdr := &block.Header{}
-	err = marshalizer.Unmarshal(hdr, buffHdr)
+	hdr, err := UnmarshalShardHeader(marshalizer, buffHdr)
 	if err != nil {
 		return nil, ErrUnmarshalWithoutSuccess
 	}
@@ -136,15 +217,13 @@ func GetMetaHeaderFromStorage(
 	hash []byte,
 	marshalizer marshal.Marshalizer,
 	storageService dataRetriever.StorageService,
-) (*block.MetaBlock, error) {
-
+) (data.MetaHeaderHandler, error) {
 	buffHdr, err := GetMarshalizedHeaderFromStorage(dataRetriever.MetaBlockUnit, hash, marshalizer, storageService)
 	if err != nil {
 		return nil, err
 	}
 
-	hdr := &block.MetaBlock{}
-	err = marshalizer.Unmarshal(hdr, buffHdr)
+	hdr, err := UnmarshalMetaHeader(marshalizer, buffHdr)
 	if err != nil {
 		return nil, ErrUnmarshalWithoutSuccess
 	}
@@ -160,21 +239,22 @@ func GetMarshalizedHeaderFromStorage(
 	storageService dataRetriever.StorageService,
 ) ([]byte, error) {
 
-	if marshalizer == nil || marshalizer.IsInterfaceNil() {
+	if check.IfNil(marshalizer) {
 		return nil, ErrNilMarshalizer
 	}
-	if storageService == nil || storageService.IsInterfaceNil() {
+	if check.IfNil(storageService) {
 		return nil, ErrNilStorage
 	}
 
-	hdrStore := storageService.GetStorer(blockUnit)
-	if hdrStore == nil || hdrStore.IsInterfaceNil() {
-		return nil, ErrNilHeadersStorage
+	hdrStore, err := storageService.GetStorer(blockUnit)
+	if err != nil {
+		return nil, err
 	}
 
 	buffHdr, err := hdrStore.Get(hash)
 	if err != nil {
-		return nil, ErrMissingHeader
+		return nil, fmt.Errorf("%w : GetMarshalizedHeaderFromStorage hash = %s",
+			ErrMissingHeader, logger.DisplayByteSlice(hash))
 	}
 
 	return buffHdr, nil
@@ -184,19 +264,18 @@ func GetMarshalizedHeaderFromStorage(
 func GetShardHeaderWithNonce(
 	nonce uint64,
 	shardId uint32,
-	cacher storage.Cacher,
-	uint64SyncMapCacher dataRetriever.Uint64SyncMapCacher,
+	headersCacher dataRetriever.HeadersPool,
 	marshalizer marshal.Marshalizer,
 	storageService dataRetriever.StorageService,
 	uint64Converter typeConverters.Uint64ByteSliceConverter,
-) (*block.Header, []byte, error) {
+) (data.HeaderHandler, []byte, error) {
 
-	err := checkGetHeaderWithNonceParamsForNil(cacher, uint64SyncMapCacher, marshalizer, storageService, uint64Converter)
+	err := checkGetHeaderWithNonceParamsForNil(headersCacher, marshalizer, storageService, uint64Converter)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	hdr, hash, err := GetShardHeaderFromPoolWithNonce(nonce, shardId, cacher, uint64SyncMapCacher)
+	hdr, hash, err := GetShardHeaderFromPoolWithNonce(nonce, shardId, headersCacher)
 	if err != nil {
 		hdr, hash, err = GetShardHeaderFromStorageWithNonce(nonce, shardId, storageService, uint64Converter, marshalizer)
 		if err != nil {
@@ -210,19 +289,18 @@ func GetShardHeaderWithNonce(
 // GetMetaHeaderWithNonce method returns a meta block header with a given nonce
 func GetMetaHeaderWithNonce(
 	nonce uint64,
-	cacher storage.Cacher,
-	uint64SyncMapCacher dataRetriever.Uint64SyncMapCacher,
+	headersCacher dataRetriever.HeadersPool,
 	marshalizer marshal.Marshalizer,
 	storageService dataRetriever.StorageService,
 	uint64Converter typeConverters.Uint64ByteSliceConverter,
-) (*block.MetaBlock, []byte, error) {
+) (data.MetaHeaderHandler, []byte, error) {
 
-	err := checkGetHeaderWithNonceParamsForNil(cacher, uint64SyncMapCacher, marshalizer, storageService, uint64Converter)
+	err := checkGetHeaderWithNonceParamsForNil(headersCacher, marshalizer, storageService, uint64Converter)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	hdr, hash, err := GetMetaHeaderFromPoolWithNonce(nonce, cacher, uint64SyncMapCacher)
+	hdr, hash, err := GetMetaHeaderFromPoolWithNonce(nonce, headersCacher)
 	if err != nil {
 		hdr, hash, err = GetMetaHeaderFromStorageWithNonce(nonce, storageService, uint64Converter, marshalizer)
 		if err != nil {
@@ -237,16 +315,15 @@ func GetMetaHeaderWithNonce(
 func GetShardHeaderFromPoolWithNonce(
 	nonce uint64,
 	shardId uint32,
-	cacher storage.Cacher,
-	uint64SyncMapCacher dataRetriever.Uint64SyncMapCacher,
-) (*block.Header, []byte, error) {
+	headersCacher dataRetriever.HeadersPool,
+) (data.HeaderHandler, []byte, error) {
 
-	obj, hash, err := getHeaderFromPoolWithNonce(nonce, shardId, cacher, uint64SyncMapCacher)
+	obj, hash, err := getHeaderFromPoolWithNonce(nonce, shardId, headersCacher)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	hdr, ok := obj.(*block.Header)
+	hdr, ok := obj.(data.ShardHeaderHandler)
 	if !ok {
 		return nil, nil, ErrWrongTypeAssertion
 	}
@@ -257,21 +334,35 @@ func GetShardHeaderFromPoolWithNonce(
 // GetMetaHeaderFromPoolWithNonce method returns a meta block header from pool with a given nonce
 func GetMetaHeaderFromPoolWithNonce(
 	nonce uint64,
-	cacher storage.Cacher,
-	uint64SyncMapCacher dataRetriever.Uint64SyncMapCacher,
-) (*block.MetaBlock, []byte, error) {
+	headersCacher dataRetriever.HeadersPool,
+) (data.MetaHeaderHandler, []byte, error) {
 
-	obj, hash, err := getHeaderFromPoolWithNonce(nonce, sharding.MetachainShardId, cacher, uint64SyncMapCacher)
+	obj, hash, err := getHeaderFromPoolWithNonce(nonce, core.MetachainShardId, headersCacher)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	hdr, ok := obj.(*block.MetaBlock)
+	hdr, ok := obj.(data.MetaHeaderHandler)
 	if !ok {
 		return nil, nil, ErrWrongTypeAssertion
 	}
 
 	return hdr, hash, nil
+}
+
+// GetHeaderFromStorageWithNonce method returns a block header from storage with a given nonce and shardId
+func GetHeaderFromStorageWithNonce(
+	nonce uint64,
+	shardId uint32,
+	storageService dataRetriever.StorageService,
+	uint64Converter typeConverters.Uint64ByteSliceConverter,
+	marshalizer marshal.Marshalizer,
+) (data.HeaderHandler, []byte, error) {
+
+	if shardId == core.MetachainShardId {
+		return GetMetaHeaderFromStorageWithNonce(nonce, storageService, uint64Converter, marshalizer)
+	}
+	return GetShardHeaderFromStorageWithNonce(nonce, shardId, storageService, uint64Converter, marshalizer)
 }
 
 // GetShardHeaderFromStorageWithNonce method returns a shard block header from storage with a given nonce and shardId
@@ -281,14 +372,14 @@ func GetShardHeaderFromStorageWithNonce(
 	storageService dataRetriever.StorageService,
 	uint64Converter typeConverters.Uint64ByteSliceConverter,
 	marshalizer marshal.Marshalizer,
-) (*block.Header, []byte, error) {
+) (data.HeaderHandler, []byte, error) {
 
-	hash, err := getHeaderHashFromStorageWithNonce(
+	hash, err := GetHeaderHashFromStorageWithNonce(
 		nonce,
 		storageService,
 		uint64Converter,
 		marshalizer,
-		dataRetriever.ShardHdrNonceHashDataUnit+dataRetriever.UnitType(shardId))
+		dataRetriever.GetHdrNonceHashDataUnit(shardId))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -307,9 +398,8 @@ func GetMetaHeaderFromStorageWithNonce(
 	storageService dataRetriever.StorageService,
 	uint64Converter typeConverters.Uint64ByteSliceConverter,
 	marshalizer marshal.Marshalizer,
-) (*block.MetaBlock, []byte, error) {
-
-	hash, err := getHeaderHashFromStorageWithNonce(
+) (data.MetaHeaderHandler, []byte, error) {
+	hash, err := GetHeaderHashFromStorageWithNonce(
 		nonce,
 		storageService,
 		uint64Converter,
@@ -335,6 +425,7 @@ func GetTransactionHandler(
 	shardedDataCacherNotifier dataRetriever.ShardedDataCacherNotifier,
 	storageService dataRetriever.StorageService,
 	marshalizer marshal.Marshalizer,
+	method ShardedCacheSearchMethod,
 ) (data.TransactionHandler, error) {
 
 	err := checkGetTransactionParamsForNil(shardedDataCacherNotifier, storageService, marshalizer)
@@ -342,7 +433,7 @@ func GetTransactionHandler(
 		return nil, err
 	}
 
-	tx, err := GetTransactionHandlerFromPool(senderShardID, destShardID, txHash, shardedDataCacherNotifier)
+	tx, err := GetTransactionHandlerFromPool(senderShardID, destShardID, txHash, shardedDataCacherNotifier, method)
 	if err != nil {
 		tx, err = GetTransactionHandlerFromStorage(txHash, storageService, marshalizer)
 		if err != nil {
@@ -359,10 +450,30 @@ func GetTransactionHandlerFromPool(
 	destShardID uint32,
 	txHash []byte,
 	shardedDataCacherNotifier dataRetriever.ShardedDataCacherNotifier,
+	method ShardedCacheSearchMethod,
 ) (data.TransactionHandler, error) {
 
-	if shardedDataCacherNotifier == nil {
+	if check.IfNil(shardedDataCacherNotifier) {
 		return nil, ErrNilShardedDataCacherNotifier
+	}
+
+	return getTransactionHandlerFromPool(senderShardID, destShardID, txHash, shardedDataCacherNotifier, method)
+}
+
+func getTransactionHandlerFromPool(
+	senderShardID uint32,
+	destShardID uint32,
+	txHash []byte,
+	shardedDataCacherNotifier dataRetriever.ShardedDataCacherNotifier,
+	method ShardedCacheSearchMethod,
+) (data.TransactionHandler, error) {
+	var val interface{}
+	var ok bool
+
+	if method == SearchMethodSearchFirst {
+		val, ok = shardedDataCacherNotifier.SearchFirstData(txHash)
+
+		return castDataFromCacheAsTransactionHandler(val, ok)
 	}
 
 	strCache := ShardCacherIdentifier(senderShardID, destShardID)
@@ -371,7 +482,23 @@ func GetTransactionHandlerFromPool(
 		return nil, ErrNilStorage
 	}
 
-	val, ok := txStore.Peek(txHash)
+	switch method {
+	case SearchMethodJustPeek:
+		val, ok = txStore.Peek(txHash)
+	case SearchMethodPeekWithFallbackSearchFirst:
+		val, ok = txStore.Peek(txHash)
+		if !ok {
+			val, ok = shardedDataCacherNotifier.SearchFirstData(txHash)
+		}
+	default:
+		return nil, fmt.Errorf("%w for provided method: %s in getTransactionHandlerFromPool",
+			ErrInvalidValue, method.ToString())
+	}
+
+	return castDataFromCacheAsTransactionHandler(val, ok)
+}
+
+func castDataFromCacheAsTransactionHandler(val interface{}, ok bool) (data.TransactionHandler, error) {
 	if !ok {
 		return nil, ErrTxNotFound
 	}
@@ -413,7 +540,7 @@ func GetTransactionHandlerFromStorage(
 }
 
 func checkGetHeaderParamsForNil(
-	cacher storage.Cacher,
+	cacher dataRetriever.HeadersPool,
 	marshalizer marshal.Marshalizer,
 	storageService dataRetriever.StorageService,
 ) error {
@@ -432,21 +559,17 @@ func checkGetHeaderParamsForNil(
 }
 
 func checkGetHeaderWithNonceParamsForNil(
-	cacher storage.Cacher,
-	uint64SyncMapCacher dataRetriever.Uint64SyncMapCacher,
+	headersCacher dataRetriever.HeadersPool,
 	marshalizer marshal.Marshalizer,
 	storageService dataRetriever.StorageService,
 	uint64Converter typeConverters.Uint64ByteSliceConverter,
 ) error {
 
-	err := checkGetHeaderParamsForNil(cacher, marshalizer, storageService)
+	err := checkGetHeaderParamsForNil(headersCacher, marshalizer, storageService)
 	if err != nil {
 		return err
 	}
-	if uint64SyncMapCacher == nil || uint64SyncMapCacher.IsInterfaceNil() {
-		return ErrNilUint64SyncMapCacher
-	}
-	if uint64Converter == nil || uint64Converter.IsInterfaceNil() {
+	if check.IfNil(uint64Converter) {
 		return ErrNilUint64Converter
 	}
 
@@ -474,16 +597,17 @@ func checkGetTransactionParamsForNil(
 
 func getHeaderFromPool(
 	hash []byte,
-	cacher storage.Cacher,
-) (interface{}, error) {
+	headersCacher dataRetriever.HeadersPool,
+) (data.HeaderHandler, error) {
 
-	if cacher == nil || cacher.IsInterfaceNil() {
+	if check.IfNil(headersCacher) {
 		return nil, ErrNilCacher
 	}
 
-	obj, ok := cacher.Peek(hash)
-	if !ok {
-		return nil, ErrMissingHeader
+	obj, err := headersCacher.GetHeaderByHash(hash)
+	if err != nil {
+		return nil, fmt.Errorf("%w : getHeaderFromPool hash = %s",
+			ErrMissingHeader, logger.DisplayByteSlice(hash))
 	}
 
 	return obj, nil
@@ -492,36 +616,25 @@ func getHeaderFromPool(
 func getHeaderFromPoolWithNonce(
 	nonce uint64,
 	shardId uint32,
-	cacher storage.Cacher,
-	uint64SyncMapCacher dataRetriever.Uint64SyncMapCacher,
+	headersCacher dataRetriever.HeadersPool,
 ) (interface{}, []byte, error) {
 
-	if cacher == nil || cacher.IsInterfaceNil() {
+	if check.IfNil(headersCacher) {
 		return nil, nil, ErrNilCacher
 	}
-	if uint64SyncMapCacher == nil || uint64SyncMapCacher.IsInterfaceNil() {
-		return nil, nil, ErrNilUint64SyncMapCacher
+
+	headers, hashes, err := headersCacher.GetHeadersByNonceAndShardId(nonce, shardId)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w : getHeaderFromPoolWithNonce shard = %d nonce = %d",
+			ErrMissingHeader, shardId, nonce)
 	}
 
-	syncMap, ok := uint64SyncMapCacher.Get(nonce)
-	if !ok {
-		return nil, nil, ErrMissingHashForHeaderNonce
-	}
-
-	hash, ok := syncMap.Load(shardId)
-	if hash == nil || !ok {
-		return nil, nil, ErrMissingHashForHeaderNonce
-	}
-
-	obj, ok := cacher.Peek(hash)
-	if !ok {
-		return nil, nil, ErrMissingHeader
-	}
-
-	return obj, hash, nil
+	// TODO what should we do when we get from pool more than one header with same nonce and shardId
+	return headers[len(headers)-1], hashes[len(hashes)-1], nil
 }
 
-func getHeaderHashFromStorageWithNonce(
+// GetHeaderHashFromStorageWithNonce gets a header hash, given a nonce
+func GetHeaderHashFromStorageWithNonce(
 	nonce uint64,
 	storageService dataRetriever.StorageService,
 	uint64Converter typeConverters.Uint64ByteSliceConverter,
@@ -539,9 +652,9 @@ func getHeaderHashFromStorageWithNonce(
 		return nil, ErrNilMarshalizer
 	}
 
-	headerStore := storageService.GetStorer(blockUnit)
-	if headerStore == nil {
-		return nil, ErrNilHeadersStorage
+	headerStore, err := storageService.GetStorer(blockUnit)
+	if err != nil {
+		return nil, err
 	}
 
 	nonceToByteSlice := uint64Converter.ToByteSlice(nonce)
@@ -551,4 +664,1177 @@ func getHeaderHashFromStorageWithNonce(
 	}
 
 	return hash, nil
+}
+
+// SortHeadersByNonce will sort a given list of headers by nonce
+func SortHeadersByNonce(headers []data.HeaderHandler) {
+	if len(headers) > 1 {
+		sort.Slice(headers, func(i, j int) bool {
+			return headers[i].GetNonce() < headers[j].GetNonce()
+		})
+	}
+}
+
+// IsInProperRound checks if the given round index satisfies the round modulus trigger
+func IsInProperRound(index int64) bool {
+	return index%RoundModulusTrigger == 0
+}
+
+// AddHeaderToBlackList adds a hash to black list handler. Logs if the operation did not succeed
+func AddHeaderToBlackList(blackListHandler TimeCacher, hash []byte) {
+	blackListHandler.Sweep()
+	err := blackListHandler.Add(string(hash))
+	if err != nil {
+		log.Trace("blackListHandler.Add", "error", err.Error())
+	}
+
+	log.Debug("header has been added to blacklist",
+		"hash", hash)
+}
+
+// ForkInfo hold the data related to a detected fork
+type ForkInfo struct {
+	IsDetected bool
+	Nonce      uint64
+	Round      uint64
+	Hash       []byte
+}
+
+// NewForkInfo creates a new ForkInfo object
+func NewForkInfo() *ForkInfo {
+	return &ForkInfo{IsDetected: false, Nonce: math.MaxUint64, Round: math.MaxUint64, Hash: nil}
+}
+
+// DisplayProcessTxDetails displays information related to the tx which should be executed
+func DisplayProcessTxDetails(
+	message string,
+	accountHandler vmcommon.AccountHandler,
+	txHandler data.TransactionHandler,
+	txHash []byte,
+	addressPubkeyConverter core.PubkeyConverter,
+) {
+	if log.GetLevel() > logger.LogTrace {
+		return
+	}
+
+	if !check.IfNil(accountHandler) {
+		account, ok := accountHandler.(state.UserAccountHandler)
+		if ok {
+			log.Trace(message,
+				"nonce", account.GetNonce(),
+				"balance", account.GetBalance(),
+			)
+		}
+	}
+
+	if check.IfNil(addressPubkeyConverter) {
+		return
+	}
+	if check.IfNil(txHandler) {
+		return
+	}
+
+	receiverAddress, _ := addressPubkeyConverter.Encode(txHandler.GetRcvAddr())
+	senderAddress, _ := addressPubkeyConverter.Encode(txHandler.GetSndAddr())
+
+	log.Trace("executing transaction",
+		"txHash", txHash,
+		"nonce", txHandler.GetNonce(),
+		"value", txHandler.GetValue(),
+		"gas limit", txHandler.GetGasLimit(),
+		"gas price", txHandler.GetGasPrice(),
+		"data", hex.EncodeToString(txHandler.GetData()),
+		"sender", senderAddress,
+		"receiver", receiverAddress)
+}
+
+// IsAllowedToSaveUnderKey returns if saving key-value in data tries under given key is allowed
+func IsAllowedToSaveUnderKey(key []byte) bool {
+	vmStoragePrefix := core.ProtectedKeyPrefix + VMStoragePrefix
+	vmPrefixLen := len(vmStoragePrefix)
+	if len(key) > vmPrefixLen {
+		trimmedKey := key[:len(vmStoragePrefix)]
+		if bytes.Equal(trimmedKey, []byte(vmStoragePrefix)) {
+			return true
+		}
+	}
+
+	prefixLen := len(core.ProtectedKeyPrefix)
+	if len(key) < prefixLen {
+		return true
+	}
+
+	trimmedKey := key[:prefixLen]
+	return !bytes.Equal(trimmedKey, []byte(core.ProtectedKeyPrefix))
+}
+
+// SortVMOutputInsideData returns the output accounts as a sorted list
+func SortVMOutputInsideData(vmOutput *vmcommon.VMOutput) []*vmcommon.OutputAccount {
+	sort.Slice(vmOutput.DeletedAccounts, func(i, j int) bool {
+		return bytes.Compare(vmOutput.DeletedAccounts[i], vmOutput.DeletedAccounts[j]) < 0
+	})
+	sort.Slice(vmOutput.TouchedAccounts, func(i, j int) bool {
+		return bytes.Compare(vmOutput.TouchedAccounts[i], vmOutput.TouchedAccounts[j]) < 0
+	})
+
+	outPutAccounts := make([]*vmcommon.OutputAccount, len(vmOutput.OutputAccounts))
+	i := 0
+	for _, outAcc := range vmOutput.OutputAccounts {
+		outPutAccounts[i] = outAcc
+		i++
+	}
+
+	sort.Slice(outPutAccounts, func(i, j int) bool {
+		return bytes.Compare(outPutAccounts[i].Address, outPutAccounts[j].Address) < 0
+	})
+
+	return outPutAccounts
+}
+
+// VMOutputValidationChecker validates the vmOutput for various input
+func VMOutputValidationChecker(vmOutput *vmcommon.VMOutput) error {
+	for key, acc := range vmOutput.OutputAccounts {
+		if acc == nil || !bytes.Equal([]byte(key), acc.Address) {
+			return ErrAccountAddressMismatch
+		}
+
+		for storeKey, storeUpdate := range acc.StorageUpdates {
+			if storeUpdate == nil || !bytes.Equal([]byte(storeKey), storeUpdate.Offset) {
+				return ErrAccountAddressMismatch
+			}
+		}
+	}
+	return nil
+}
+
+// GetSortedStorageUpdates returns the storage updates as a sorted list
+func GetSortedStorageUpdates(account *vmcommon.OutputAccount) []*vmcommon.StorageUpdate {
+	storageUpdates := make([]*vmcommon.StorageUpdate, len(account.StorageUpdates))
+	i := 0
+	for _, update := range account.StorageUpdates {
+		storageUpdates[i] = update
+		i++
+	}
+
+	sort.Slice(storageUpdates, func(i, j int) bool {
+		return bytes.Compare(storageUpdates[i].Offset, storageUpdates[j].Offset) < 0
+	})
+
+	return storageUpdates
+}
+
+// GetHeader tries to get the header from pool first and if not found, searches for it through storer
+func GetHeader(
+	headerHash []byte,
+	headersPool dataRetriever.HeadersPool,
+	headersStorer dataRetriever.StorageService,
+	marshaller marshal.Marshalizer,
+	shardID uint32,
+) (data.HeaderHandler, error) {
+	if shardID == core.MetachainShardId {
+		return GetMetaHeader(headerHash, headersPool, marshaller, headersStorer)
+	}
+
+	return GetShardHeader(headerHash, headersPool, marshaller, headersStorer)
+}
+
+// UnmarshalExecutionResult unmarshalls an execution result
+func UnmarshalExecutionResult(marshaller marshal.Marshalizer, executionResultsBytes []byte) (data.ExecutionResultHandler, error) {
+	executionResult, err := UnmarshalShardExecutionResult(marshaller, executionResultsBytes)
+	if err == nil {
+		return executionResult, nil
+	}
+
+	return UnmarshallMetaExecutionResult(marshaller, executionResultsBytes)
+}
+
+// UnmarshalShardExecutionResult unmarshalls a shard execution result
+func UnmarshalShardExecutionResult(marshaller marshal.Marshalizer, executionResultsBytes []byte) (data.ExecutionResultHandler, error) {
+	executionResult := &block.ExecutionResult{}
+	err := marshaller.Unmarshal(executionResult, executionResultsBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	return executionResult, nil
+}
+
+// UnmarshallMetaExecutionResult unmarshalls a meta execution result
+func UnmarshallMetaExecutionResult(marshaller marshal.Marshalizer, executionResultsBytes []byte) (data.MetaExecutionResultHandler, error) {
+	executionResult := &block.MetaExecutionResult{}
+	err := marshaller.Unmarshal(executionResult, executionResultsBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	return executionResult, nil
+}
+
+// UnmarshalHeader unmarshalls a block header
+func UnmarshalHeader(shardId uint32, marshaller marshal.Marshalizer, headerBuffer []byte) (data.HeaderHandler, error) {
+	if shardId == core.MetachainShardId {
+		return UnmarshalMetaHeader(marshaller, headerBuffer)
+	} else {
+		return UnmarshalShardHeader(marshaller, headerBuffer)
+	}
+}
+
+// UnmarshalMetaHeader unmarshalls a meta header
+func UnmarshalMetaHeader(marshaller marshal.Marshalizer, headerBuffer []byte) (data.MetaHeaderHandler, error) {
+	hdr, err := UnmarshalMetaHeaderV3(marshaller, headerBuffer)
+	if err == nil {
+		return hdr, nil
+	}
+
+	return UnmarshalMetaHeaderV1(marshaller, headerBuffer)
+}
+
+// UnmarshalMetaHeaderV3 unmarshalls a meta header v3
+func UnmarshalMetaHeaderV3(marshaller marshal.Marshalizer, headerBuffer []byte) (data.MetaHeaderHandler, error) {
+	header := &block.MetaBlockV3{}
+	err := marshaller.Unmarshal(header, headerBuffer)
+	if err != nil {
+		return nil, err
+	}
+
+	// this should not be nil for meta header v3
+	if header.GetLastExecutionResult() == nil {
+		return nil, ErrInvalidHeader
+	}
+
+	return header, nil
+}
+
+// UnmarshalMetaHeaderV1 unmarshalls a meta header v1
+func UnmarshalMetaHeaderV1(marshaller marshal.Marshalizer, headerBuffer []byte) (data.MetaHeaderHandler, error) {
+	header := &block.MetaBlock{}
+	err := marshaller.Unmarshal(header, headerBuffer)
+	if err != nil {
+		return nil, err
+	}
+
+	return header, nil
+}
+
+// UnmarshalShardHeader unmarshalls a shard header
+func UnmarshalShardHeader(marshaller marshal.Marshalizer, hdrBuff []byte) (data.ShardHeaderHandler, error) {
+	hdr, err := UnmarshalShardHeaderV3(marshaller, hdrBuff)
+	if err == nil {
+		return hdr, nil
+	}
+
+	hdr, err = UnmarshalShardHeaderV2(marshaller, hdrBuff)
+	if err == nil {
+		return hdr, nil
+	}
+
+	return UnmarshalShardHeaderV1(marshaller, hdrBuff)
+}
+
+// UnmarshalShardHeaderV3 unmarshalls a header with version 3
+func UnmarshalShardHeaderV3(marshaller marshal.Marshalizer, hdrBuff []byte) (data.ShardHeaderHandler, error) {
+	hdrV3 := &block.HeaderV3{}
+	err := marshaller.Unmarshal(hdrV3, hdrBuff)
+	if err != nil {
+		return nil, err
+	}
+
+	// this should not be nil for shard header v3
+	if hdrV3.GetLastExecutionResult() == nil {
+		return nil, ErrInvalidHeader
+	}
+
+	return hdrV3, nil
+}
+
+// UnmarshalShardHeaderV2 unmarshalls a header with version 2
+func UnmarshalShardHeaderV2(marshalizer marshal.Marshalizer, hdrBuff []byte) (data.ShardHeaderHandler, error) {
+	hdrV2 := &block.HeaderV2{}
+	err := marshalizer.Unmarshal(hdrV2, hdrBuff)
+	if err != nil {
+		return nil, err
+	}
+	if check.IfNil(hdrV2.Header) {
+		return nil, fmt.Errorf("%w while checking inner header", ErrNilHeaderHandler)
+	}
+
+	return hdrV2, nil
+}
+
+// UnmarshalShardHeaderV1 unmarshalls a header with version 1
+func UnmarshalShardHeaderV1(marshalizer marshal.Marshalizer, hdrBuff []byte) (data.ShardHeaderHandler, error) {
+	hdr := &block.Header{}
+	err := marshalizer.Unmarshal(hdr, hdrBuff)
+	if err != nil {
+		return nil, err
+	}
+
+	return hdr, nil
+}
+
+// IsScheduledMode returns true if the first mini block from the given body is marked as a scheduled
+func IsScheduledMode(
+	header data.HeaderHandler,
+	body *block.Body,
+	hasher hashing.Hasher,
+	marshalizer marshal.Marshalizer,
+) (bool, error) {
+	if body == nil || len(body.MiniBlocks) == 0 {
+		return false, nil
+	}
+
+	miniBlockHash, err := core.CalculateHash(marshalizer, hasher, body.MiniBlocks[0])
+	if err != nil {
+		return false, err
+	}
+
+	for _, miniBlockHeader := range header.GetMiniBlockHeaderHandlers() {
+		if bytes.Equal(miniBlockHash, miniBlockHeader.GetHash()) {
+			return miniBlockHeader.GetProcessingType() == int32(block.Scheduled), nil
+		}
+	}
+
+	return false, nil
+}
+
+// additionalTimeForCreatingScheduledMiniBlocks is intended to leave 50ms of the legacy block subround
+// for finalizing and sending a block when scheduled processing starts at the normal 90% creation cutoff.
+const additionalTimeForCreatingScheduledMiniBlocks = 70 * time.Millisecond
+
+// HaveAdditionalTime returns if the additional time allocated for scheduled mini blocks is elapsed
+func HaveAdditionalTime() func() bool {
+	startTime := time.Now()
+	return func() bool {
+		return additionalTimeForCreatingScheduledMiniBlocks > time.Since(startTime)
+	}
+}
+
+// GetZeroGasAndFees returns a zero value structure for the gas and fees
+func GetZeroGasAndFees() scheduled.GasAndFees {
+	return scheduled.GasAndFees{
+		AccumulatedFees: big.NewInt(0),
+		DeveloperFees:   big.NewInt(0),
+		GasProvided:     0,
+		GasPenalized:    0,
+		GasRefunded:     0,
+	}
+}
+
+// ScheduledInfo holds all the info needed for scheduled SC execution
+type ScheduledInfo struct {
+	RootHash        []byte
+	IntermediateTxs map[block.Type][]data.TransactionHandler
+	GasAndFees      scheduled.GasAndFees
+	MiniBlocks      block.MiniBlockSlice
+}
+
+// GetFinalCrossMiniBlockHashes returns all the finalized miniblocks hashes, from the given header and with the given destination
+func GetFinalCrossMiniBlockHashes(header data.HeaderHandler, shardID uint32) map[string]uint32 {
+	crossMiniBlockHashes := header.GetMiniBlockHeadersWithDst(shardID)
+
+	miniBlockHashes := make(map[string]uint32)
+	for crossMiniBlockHash, senderShardID := range crossMiniBlockHashes {
+		miniBlockHeader := GetMiniBlockHeaderWithHash(header, []byte(crossMiniBlockHash))
+		if miniBlockHeader != nil && !miniBlockHeader.IsFinal() {
+			log.Debug("GetFinalCrossMiniBlockHashes: skip mini block which is not final", "mb hash", miniBlockHeader.GetHash())
+			continue
+		}
+
+		miniBlockHashes[crossMiniBlockHash] = senderShardID
+	}
+
+	return miniBlockHashes
+}
+
+// GetMiniBlockHeaderWithHash returns the miniblock header with the given hash
+func GetMiniBlockHeaderWithHash(header data.HeaderHandler, miniBlockHash []byte) data.MiniBlockHeaderHandler {
+	for _, miniBlockHeader := range header.GetMiniBlockHeaderHandlers() {
+		if bytes.Equal(miniBlockHeader.GetHash(), miniBlockHash) {
+			return miniBlockHeader
+		}
+	}
+
+	for _, execResult := range header.GetExecutionResultsHandlers() {
+		mbHeaders, err := common.GetMiniBlocksHeaderHandlersFromExecResult(execResult)
+		if err != nil {
+			log.Warn("GetMiniBlockHeaderWithHash", "error", err.Error())
+			continue
+		}
+
+		for _, mbHeader := range mbHeaders {
+			if bytes.Equal(mbHeader.GetHash(), miniBlockHash) {
+				return mbHeader
+			}
+		}
+	}
+
+	return nil
+}
+
+// IsBuiltinFuncCallWithParam checks if the given transaction data represents a builtin function call with parameters
+func IsBuiltinFuncCallWithParam(txData []byte, function string) bool {
+	expectedTxDataPrefix := []byte(function + "@")
+	return bytes.HasPrefix(txData, expectedTxDataPrefix)
+}
+
+// IsSetGuardianCall checks if the given transaction data represents the set guardian builtin function call
+func IsSetGuardianCall(txData []byte) bool {
+	return IsBuiltinFuncCallWithParam(txData, core.BuiltInFunctionSetGuardian)
+}
+
+// CheckIfIndexesAreOutOfBound checks if the given indexes are out of bound for the given mini block
+func CheckIfIndexesAreOutOfBound(
+	indexOfFirstTxToBeProcessed int32,
+	indexOfLastTxToBeProcessed int32,
+	miniBlock *block.MiniBlock,
+) error {
+	maxIndex := int32(len(miniBlock.TxHashes)) - 1
+
+	isFirstIndexHigherThanLastIndex := indexOfFirstTxToBeProcessed > indexOfLastTxToBeProcessed
+	isFirstIndexOutOfRange := indexOfFirstTxToBeProcessed < 0 || indexOfFirstTxToBeProcessed > maxIndex
+	isLastIndexOutOfRange := indexOfLastTxToBeProcessed < 0 || indexOfLastTxToBeProcessed > maxIndex
+
+	isIndexOutOfBound := isFirstIndexHigherThanLastIndex || isFirstIndexOutOfRange || isLastIndexOutOfRange
+	if isIndexOutOfBound {
+		return fmt.Errorf("%w: indexOfFirstTxToBeProcessed: %d, indexOfLastTxToBeProcessed = %d, maxIndex: %d",
+			ErrIndexIsOutOfBound,
+			indexOfFirstTxToBeProcessed,
+			indexOfLastTxToBeProcessed,
+			maxIndex,
+		)
+	}
+
+	return nil
+}
+
+// CompleteMissingSelfNotarizedHeaders fills self-notarized headers for shards still at
+// nonce 0. Fast path uses FirstPendingMetaBlock on epoch start metablocks; fallback walks
+// back from startHash inspecting ShardInfo. Returns an error if any shard remains
+// unresolved and the walk did not reach genesis (legitimate empty state).
+func CompleteMissingSelfNotarizedHeaders(
+	startHash []byte,
+	numShards uint32,
+	blockTracker BlockTracker,
+	marshalizer marshal.Marshalizer,
+	store dataRetriever.StorageService,
+) error {
+	missingShards := make(map[uint32]bool)
+	for shardID := uint32(0); shardID < numShards; shardID++ {
+		lastSelfNotarized, _, err := blockTracker.GetLastSelfNotarizedHeader(shardID)
+		if err != nil || check.IfNil(lastSelfNotarized) || lastSelfNotarized.GetNonce() == 0 {
+			missingShards[shardID] = true
+		}
+	}
+
+	if len(missingShards) == 0 {
+		return nil
+	}
+
+	log.Debug("CompleteMissingSelfNotarizedHeaders",
+		"numMissing", len(missingShards))
+
+	startMetaBlock, err := GetMetaHeaderFromStorage(startHash, marshalizer, store)
+	if err != nil {
+		return fmt.Errorf("%w: could not load start metablock %s: %s",
+			ErrMissingHeader, hex.EncodeToString(startHash), err.Error())
+	}
+
+	if startMetaBlock.IsStartOfEpochBlock() {
+		deriveSelfNotarizedFromEpochStartData(startMetaBlock, missingShards, blockTracker, marshalizer, store)
+		if len(missingShards) == 0 {
+			return nil
+		}
+	}
+
+	reachedGenesis := false
+	currentHash := startHash
+	for i := 0; i < maxSelfNotarizedLookback && len(missingShards) > 0 && len(currentHash) > 0; i++ {
+		metaBlock, errGet := GetMetaHeaderFromStorage(currentHash, marshalizer, store)
+		if errGet != nil {
+			log.Debug("CompleteMissingSelfNotarizedHeaders: could not load meta block during walk back", "error", errGet.Error())
+			break
+		}
+
+		for shardID := range missingShards {
+			bestNonce, bestHeader, bestHash := findSelfNotarizedMetaHeaderInBlock(metaBlock, shardID, marshalizer, store)
+			if bestHeader != nil {
+				log.Debug("CompleteMissingSelfNotarizedHeaders: derived self-notarized header",
+					"shardID", shardID,
+					"metaNonce", bestNonce,
+					"metaHash", bestHash)
+				blockTracker.AddSelfNotarizedHeader(shardID, bestHeader, bestHash)
+				delete(missingShards, shardID)
+			}
+		}
+
+		if metaBlock.GetNonce() == 0 {
+			reachedGenesis = true
+			break
+		}
+		currentHash = metaBlock.GetPrevHash()
+	}
+
+	if len(missingShards) == 0 {
+		return nil
+	}
+
+	if reachedGenesis {
+		log.Debug("CompleteMissingSelfNotarizedHeaders: reached genesis, nothing to derive",
+			"numStillMissing", len(missingShards))
+		return nil
+	}
+
+	log.Warn("CompleteMissingSelfNotarizedHeaders: could not derive all self-notarized headers",
+		"numStillMissing", len(missingShards))
+	return fmt.Errorf("%w: could not derive self-notarized headers for %d shards",
+		ErrMissingHeader, len(missingShards))
+}
+
+func deriveSelfNotarizedFromEpochStartData(
+	epochStartMetaBlock data.MetaHeaderHandler,
+	missingShards map[uint32]bool,
+	blockTracker BlockTracker,
+	marshalizer marshal.Marshalizer,
+	store dataRetriever.StorageService,
+) {
+	epochStartHandler := epochStartMetaBlock.GetEpochStartHandler()
+	if epochStartHandler == nil {
+		return
+	}
+
+	for _, shardData := range epochStartHandler.GetLastFinalizedHeaderHandlers() {
+		shardID := shardData.GetShardID()
+		if !missingShards[shardID] {
+			continue
+		}
+
+		metaHash := shardData.GetFirstPendingMetaBlock()
+		if len(metaHash) == 0 {
+			continue
+		}
+
+		selfNotarizedMeta, err := GetMetaHeaderFromStorage(metaHash, marshalizer, store)
+		if err != nil {
+			log.Debug("deriveSelfNotarizedFromEpochStartData: could not load meta block",
+				"shardID", shardID,
+				"metaHash", metaHash,
+				"error", err.Error())
+			continue
+		}
+
+		log.Debug("deriveSelfNotarizedFromEpochStartData: derived self-notarized header",
+			"shardID", shardID,
+			"metaNonce", selfNotarizedMeta.GetNonce(),
+			"metaHash", metaHash)
+		blockTracker.AddSelfNotarizedHeader(shardID, selfNotarizedMeta, metaHash)
+		delete(missingShards, shardID)
+	}
+}
+
+func findSelfNotarizedMetaHeaderInBlock(
+	metaBlock data.MetaHeaderHandler,
+	shardID uint32,
+	marshalizer marshal.Marshalizer,
+	store dataRetriever.StorageService,
+) (uint64, data.HeaderHandler, []byte) {
+	var bestNonce uint64
+	var bestHeader data.HeaderHandler
+	var bestHash []byte
+	hadLoadErrors := false
+
+	shardInfoHandlers := metaBlock.GetShardInfoHandlers()
+	for i := range shardInfoHandlers {
+		if shardInfoHandlers[i].GetShardID() != shardID {
+			continue
+		}
+
+		headerHash := shardInfoHandlers[i].GetHeaderHash()
+		shardHeader, err := GetShardHeaderFromStorage(headerHash, marshalizer, store)
+		if err != nil {
+			log.Debug("findSelfNotarizedMetaHeaderInBlock: could not load shard header",
+				"shardID", shardID,
+				"headerHash", headerHash,
+				"error", err.Error())
+			hadLoadErrors = true
+			continue
+		}
+
+		for _, metaHash := range shardHeader.GetMetaBlockHashes() {
+			metaHeader, errGet := GetMetaHeaderFromStorage(metaHash, marshalizer, store)
+			if errGet != nil {
+				continue
+			}
+
+			if metaHeader.GetNonce() > bestNonce {
+				bestNonce = metaHeader.GetNonce()
+				bestHeader = metaHeader
+				bestHash = metaHash
+			}
+		}
+	}
+
+	if hadLoadErrors {
+		return 0, nil, nil
+	}
+
+	return bestNonce, bestHeader, bestHash
+}
+
+// CheckMiniBlock will check miniblock validity
+func CheckMiniBlock(
+	miniBlock *block.MiniBlock,
+	shardCoordinator sharding.Coordinator,
+) error {
+	senderShard := miniBlock.GetSenderShardID()
+	receiverShard := miniBlock.GetReceiverShardID()
+
+	// shard id checks
+	receiverShardInvalid := receiverShard >= shardCoordinator.NumberOfShards() &&
+		(receiverShard != core.MetachainShardId && receiverShard != core.AllShardId)
+	if receiverShardInvalid {
+		return fmt.Errorf("%w - receiver not for current shard: block type: %s, sender shard id: %d, receiver shard id: %d",
+			ErrInvalidShardId,
+			miniBlock.Type,
+			senderShard,
+			receiverShard)
+	}
+
+	senderShardInvalid := senderShard >= shardCoordinator.NumberOfShards() &&
+		senderShard != core.MetachainShardId
+	if senderShardInvalid {
+		return fmt.Errorf("%w - sender not for current shard: block type: %s, sender shard id: %d, receiver shard id: %d",
+			ErrInvalidShardId,
+			miniBlock.Type,
+			senderShard,
+			receiverShard)
+	}
+
+	if senderShard != shardCoordinator.SelfId() && receiverShard != shardCoordinator.SelfId() && receiverShard != core.AllShardId {
+		return fmt.Errorf("%w - not valid shard ids: block type: %s, sender shard id: %d, receiver shard id: %d",
+			ErrInvalidShardId,
+			miniBlock.Type,
+			senderShard,
+			receiverShard)
+	}
+
+	err := checkMiniBlockByType(miniBlock, shardCoordinator)
+	if err != nil {
+		return err
+	}
+
+	for _, txHash := range miniBlock.TxHashes {
+		if txHash == nil {
+			return ErrNilTxHash
+		}
+	}
+
+	if len(miniBlock.GetReserved()) > maxLenMiniBlockReservedField {
+		return ErrReservedFieldInvalid
+	}
+
+	return nil
+}
+
+func checkMiniBlockByType(
+	miniBlock *block.MiniBlock,
+	shardCoordinator sharding.Coordinator,
+) error {
+	selfId := shardCoordinator.SelfId()
+	sender := miniBlock.GetSenderShardID()
+	receiver := miniBlock.GetReceiverShardID()
+	mbType := miniBlock.GetType()
+
+	switch mbType {
+	case block.TxBlock:
+		if sender == core.MetachainShardId || receiver == core.AllShardId {
+			return fmt.Errorf("%w - TxBlock must be from shard to specific shard id: block type: %s, sender shard id: %d, receiver shard id: %d",
+				ErrInvalidShardId,
+				mbType,
+				sender,
+				receiver,
+			)
+		}
+
+	case block.SmartContractResultBlock:
+		if receiver == core.AllShardId {
+			return fmt.Errorf("%w - SCResultBlock cannot target AllShardId: block type: %s, sender shard id: %d, receiver shard id: %d",
+				ErrInvalidShardId,
+				mbType,
+				sender,
+				receiver,
+			)
+		}
+
+	case block.InvalidBlock, block.ReceiptBlock:
+		if sender != selfId || receiver != selfId {
+			return fmt.Errorf("%w - must be intra-shard: block type: %s, sender shard id: %d, receiver shard id: %d",
+				ErrInvalidShardId,
+				mbType,
+				sender,
+				receiver,
+			)
+		}
+
+	case block.PeerBlock:
+		if sender != core.MetachainShardId || receiver != core.AllShardId {
+			return fmt.Errorf("%w - PeerBlock must be from metachain to all shards: block type: %s, sender shard id: %d, receiver shard id: %d",
+				ErrInvalidShardId,
+				mbType,
+				sender,
+				receiver,
+			)
+		}
+
+	case block.RewardsBlock:
+		if sender != core.MetachainShardId || receiver == core.AllShardId {
+			return fmt.Errorf("%w - RewardsBlock must be from metachain to specific shard: block type: %s, sender shard id: %d, receiver shard id: %d",
+				ErrInvalidShardId,
+				mbType,
+				sender,
+				receiver,
+			)
+		}
+
+	default:
+		return fmt.Errorf("%w - unknown miniblock type %d", ErrInvalidShardId, int32(mbType))
+	}
+
+	return nil
+}
+
+// SetBaseExecutionResult sets the last notarized base execution result in the execution results tracker
+func SetBaseExecutionResult(executionManager ExecutionManager, blockChain data.ChainHandler) error {
+	if check.IfNil(blockChain) {
+		return ErrNilBlockChain
+	}
+	if check.IfNil(executionManager) {
+		return ErrNilExecutionManager
+	}
+
+	currentBlock := blockChain.GetCurrentBlockHeader()
+	if currentBlock == nil || !currentBlock.IsHeaderV3() {
+		return nil
+	}
+
+	lastNotarizedResult := currentBlock.GetLastExecutionResultHandler()
+	if check.IfNil(lastNotarizedResult) {
+		return ErrNilLastExecutionResultHandler
+	}
+
+	var lastBaseExecutionResult data.BaseExecutionResultHandler
+	switch lastNotarizedBaseResult := lastNotarizedResult.(type) {
+	case data.LastShardExecutionResultHandler:
+		lastBaseExecutionResult = lastNotarizedBaseResult.GetExecutionResultHandler()
+	case data.LastMetaExecutionResultHandler:
+		lastBaseExecutionResult = lastNotarizedBaseResult.GetExecutionResultHandler()
+	default:
+		return ErrWrongTypeAssertion
+	}
+
+	if check.IfNil(lastBaseExecutionResult) {
+		return ErrNilBaseExecutionResult
+	}
+
+	return executionManager.SetLastNotarizedResult(lastBaseExecutionResult)
+}
+
+// SeparateBodyByType creates a map of bodies according to type
+func SeparateBodyByType(body *block.Body) map[block.Type]*block.Body {
+	separatedBodies := make(map[block.Type]*block.Body)
+	for i := 0; i < len(body.MiniBlocks); i++ {
+		mb := body.MiniBlocks[i]
+
+		separatedMbType := mb.Type
+		if mb.Type == block.InvalidBlock {
+			separatedMbType = block.TxBlock
+		}
+
+		if _, ok := separatedBodies[separatedMbType]; !ok {
+			separatedBodies[separatedMbType] = &block.Body{}
+		}
+
+		separatedBodies[separatedMbType].MiniBlocks = append(separatedBodies[separatedMbType].MiniBlocks, mb)
+	}
+
+	return separatedBodies
+}
+
+// GetPrevBlockLastExecutionResult gets the last execution result from the previous block
+func GetPrevBlockLastExecutionResult(blockChain data.ChainHandler) (data.LastExecutionResultHandler, error) {
+	if check.IfNil(blockChain) {
+		return nil, ErrNilBlockChain
+	}
+
+	prevHeader := blockChain.GetCurrentBlockHeader()
+	prevHeaderHash := blockChain.GetCurrentBlockHeaderHash()
+	if check.IfNil(prevHeader) || len(prevHeaderHash) == 0 {
+		prevHeader = blockChain.GetGenesisHeader()
+		prevHeaderHash = blockChain.GetGenesisHeaderHash()
+
+		if check.IfNil(prevHeader) || len(prevHeaderHash) == 0 {
+			return nil, ErrNilHeaderHandler
+		}
+	}
+
+	if prevHeader.IsHeaderV3() {
+		return prevHeader.GetLastExecutionResultHandler(), nil
+	}
+
+	return common.CreateLastExecutionResultFromPrevHeader(prevHeader, prevHeaderHash)
+}
+
+// CreateLastExecutionResultInfoFromExecutionResult creates a LastExecutionResultInfo object from the given execution result
+func CreateLastExecutionResultInfoFromExecutionResult(notarizedInRound uint64, lastExecResult data.BaseExecutionResultHandler, shardID uint32) (data.LastExecutionResultHandler, error) {
+	if check.IfNil(lastExecResult) {
+		return nil, ErrNilExecutionResultHandler
+	}
+
+	if shardID != core.MetachainShardId {
+		if _, ok := lastExecResult.(*block.ExecutionResult); !ok {
+			return nil, ErrWrongTypeAssertion
+		}
+
+		return &block.ExecutionResultInfo{
+			NotarizedInRound: notarizedInRound,
+			ExecutionResult: &block.BaseExecutionResult{
+				HeaderHash:  lastExecResult.GetHeaderHash(),
+				HeaderNonce: lastExecResult.GetHeaderNonce(),
+				HeaderRound: lastExecResult.GetHeaderRound(),
+				HeaderEpoch: lastExecResult.GetHeaderEpoch(),
+				RootHash:    lastExecResult.GetRootHash(),
+				GasUsed:     lastExecResult.GetGasUsed(),
+			},
+		}, nil
+	}
+
+	lastMetaExecResult, ok := lastExecResult.(*block.MetaExecutionResult)
+	if !ok {
+		return nil, ErrWrongTypeAssertion
+	}
+
+	return &block.MetaExecutionResultInfo{
+		NotarizedInRound: notarizedInRound,
+		ExecutionResult: &block.BaseMetaExecutionResult{
+			BaseExecutionResult: &block.BaseExecutionResult{
+				HeaderHash:  lastMetaExecResult.GetHeaderHash(),
+				HeaderNonce: lastMetaExecResult.GetHeaderNonce(),
+				HeaderRound: lastMetaExecResult.GetHeaderRound(),
+				HeaderEpoch: lastMetaExecResult.GetHeaderEpoch(),
+				RootHash:    lastMetaExecResult.GetRootHash(),
+				GasUsed:     lastMetaExecResult.GetGasUsed(),
+			},
+			ValidatorStatsRootHash: lastMetaExecResult.GetValidatorStatsRootHash(),
+			AccumulatedFeesInEpoch: lastMetaExecResult.GetAccumulatedFeesInEpoch(),
+			DevFeesInEpoch:         lastMetaExecResult.GetDevFeesInEpoch(),
+		},
+	}, nil
+}
+
+// CreateDataForInclusionEstimation creates the metadata needed for inclusion time estimation
+func CreateDataForInclusionEstimation(
+	handler data.LastExecutionResultHandler,
+) (*common.LastExecutionResultForInclusion, error) {
+	if check.IfNil(handler) {
+		return nil, ErrNilLastExecutionResultHandler
+	}
+
+	var proposedInRound uint64
+	var notarizedInRound uint64
+	switch lastExecutionResult := handler.(type) {
+	case *block.ExecutionResultInfo:
+		if check.IfNil(lastExecutionResult.GetExecutionResult()) {
+			return nil, ErrNilBaseExecutionResult
+		}
+		notarizedInRound = lastExecutionResult.GetNotarizedInRound()
+		proposedInRound = lastExecutionResult.GetExecutionResult().HeaderRound
+	case *block.MetaExecutionResultInfo:
+		if check.IfNil(lastExecutionResult.GetExecutionResult()) {
+			return nil, ErrNilBaseExecutionResult
+		}
+		notarizedInRound = lastExecutionResult.GetNotarizedInRound()
+		proposedInRound = lastExecutionResult.GetExecutionResult().GetHeaderRound()
+	default:
+		return nil, ErrWrongTypeAssertion
+	}
+
+	return &common.LastExecutionResultForInclusion{
+		NotarizedInRound: notarizedInRound,
+		ProposedInRound:  proposedInRound,
+	}, nil
+}
+
+// IsNotExecutableTransactionError checks if the given error is related to a transaction which cannot be executed
+// TODO: needs to be called for Supernova processing
+func IsNotExecutableTransactionError(err error) bool {
+	return errors.Is(err, ErrLowerNonceInTransaction) ||
+		errors.Is(err, ErrHigherNonceInTransaction) ||
+		errors.Is(err, ErrInsufficientFee) ||
+		errors.Is(err, ErrTransactionNotExecutable)
+}
+
+// GetMarshaledSliceSize will return marshalled slice size for any slice
+func GetMarshaledSliceSize[T any](items []T, marshaller marshal.Marshalizer) (int, error) {
+	size := 0
+
+	for i := range items {
+		d, err := marshaller.Marshal(items[i])
+		if err != nil {
+			return 0, err
+		}
+
+		size += len(d)
+	}
+
+	return size, nil
+}
+
+// GetDataPoolByBlockType returns data pool by type
+func GetDataPoolByBlockType(
+	blockType block.Type,
+	dataPool dataRetriever.PoolsHolder,
+) (dataRetriever.ShardedDataCacherNotifier, error) {
+	switch blockType {
+	case block.TxBlock, block.InvalidBlock:
+		return dataPool.Transactions(), nil
+	case block.SmartContractResultBlock:
+		return dataPool.UnsignedTransactions(), nil
+	case block.RewardsBlock:
+		return dataPool.RewardTransactions(), nil
+	case block.PeerBlock:
+		return dataPool.ValidatorsInfo(), nil
+	default:
+		return nil, fmt.Errorf("unsupported block type for dataPool: %d", blockType)
+	}
+}
+
+// GetStorageUnitByBlockType returns storage by type
+func GetStorageUnitByBlockType(blockType block.Type) (dataRetriever.UnitType, error) {
+	switch blockType {
+	case block.TxBlock, block.InvalidBlock:
+		return dataRetriever.TransactionUnit, nil
+	case block.SmartContractResultBlock:
+		return dataRetriever.UnsignedTransactionUnit, nil
+	case block.ReceiptBlock:
+		return dataRetriever.ReceiptsUnit, nil
+	case block.RewardsBlock:
+		return dataRetriever.RewardTransactionUnit, nil
+	case block.PeerBlock:
+		return dataRetriever.UnsignedTransactionUnit, nil
+	}
+	return 0, ErrInvalidBlockType
+}
+
+// IsReplacementBlockForExecution returns true if the provided header is a replacement for the last execution result
+func IsReplacementBlockForExecution(header data.HeaderHandler, headerHash []byte, lastExecutionResult data.BaseExecutionResultHandler) bool {
+	if check.IfNil(header) || check.IfNil(lastExecutionResult) {
+		return false
+	}
+
+	sameNonce := header.GetNonce() == lastExecutionResult.GetHeaderNonce()
+	differentHash := !bytes.Equal(headerHash, lastExecutionResult.GetHeaderHash())
+	return sameNonce && differentHash
+}
+
+// UpdateContextForReplacedHeader updates the blockchain context when a header should be replaced
+func UpdateContextForReplacedHeader(
+	header data.HeaderHandler,
+	executionManager ExecutionManager,
+	blockChain data.ChainHandler,
+	headersPool dataRetriever.HeadersPool,
+	postProcessTransactions storage.Cacher,
+	executedMiniBlocks storage.Cacher,
+	storageService dataRetriever.StorageService,
+	marshaller marshal.Marshalizer,
+	shardID uint32,
+) error {
+	err := checkForNils(header, executionManager, blockChain, headersPool, storageService, marshaller)
+	if err != nil {
+		return err
+	}
+
+	pendingExecutionResults, err := executionManager.GetPendingExecutionResults()
+	if err != nil {
+		return err
+	}
+
+	lastExecutionResult, err := executionManager.GetLastNotarizedExecutionResult()
+	if err != nil {
+		return err
+	}
+
+	executionResultToSet, err := getExecutionResultToSetOnReplacedHeader(
+		header,
+		pendingExecutionResults,
+		lastExecutionResult,
+	)
+	if err != nil {
+		return err
+	}
+
+	// TODO: optimize to add into pool at bootstrap
+	headerToSet, err := GetHeader(executionResultToSet.GetHeaderHash(), headersPool, storageService, marshaller, shardID)
+	if err != nil {
+		return err
+	}
+
+	currentExecResult := blockChain.GetLastExecutionResult()
+	if !check.IfNil(currentExecResult) {
+		if bytes.Equal(currentExecResult.GetHeaderHash(), executionResultToSet.GetHeaderHash()) {
+			// already at the desired state
+			return nil
+		}
+
+		err = CleanCachesForExecutionResult(currentExecResult, postProcessTransactions, executedMiniBlocks)
+		if err != nil {
+			return err
+		}
+	}
+
+	log.Debug("UpdateContextForReplacedHeader last executed header",
+		"round", headerToSet.GetRound(),
+		"nonce", headerToSet.GetNonce(),
+		"hash", executionResultToSet.GetHeaderHash())
+
+	blockChain.SetLastExecutionInfo(headerToSet, executionResultToSet)
+
+	// need to remove all execution results after the one set
+	err = executionManager.RemovePendingExecutionResultsFromNonce(executionResultToSet.GetHeaderNonce() + 1)
+	if err != nil {
+		return err
+	}
+
+	log.Debug("UpdateContextForReplacedHeader finished",
+		"nonce", header.GetNonce(),
+		"old round", header.GetRound(),
+		"new round", headerToSet.GetRound(),
+		"new hash", executionResultToSet.GetHeaderHash(),
+	)
+
+	return nil
+}
+
+// CleanCachesForExecutionResult cleans post-process transactions and executed mini blocks caches
+func CleanCachesForExecutionResult(
+	execResult data.BaseExecutionResultHandler,
+	postProcessTxsCache storage.Cacher,
+	executedMbs storage.Cacher,
+) error {
+	if check.IfNil(execResult) {
+		return ErrNilExecutionResultHandler
+	}
+	if check.IfNil(postProcessTxsCache) {
+		return ErrNilPostProcessTransactionsCache
+	}
+	if check.IfNil(executedMbs) {
+		return ErrNilExecutedMiniBlocksCache
+	}
+
+	headerHash := execResult.GetHeaderHash()
+	// all transactions moved, cleaning the cache
+	postProcessTxsCache.Remove(headerHash)
+	// remove execution order data
+	postProcessTxsCache.Remove(common.PrepareOrderedTxHashesKey(headerHash))
+	// remove cached log events
+	postProcessTxsCache.Remove(common.PrepareLogEventsKey(headerHash))
+	// remove header gas data
+	postProcessTxsCache.Remove(common.PrepareHeaderGasDataKey(headerHash))
+
+	// remove headerHash from executed mini blocks
+	executedMbs.Remove(headerHash)
+
+	// remove mini block headers from executed mini blocks
+	mbHeaders, err := common.GetMiniBlocksHeaderHandlersFromExecResult(execResult)
+	if err != nil {
+		return err
+	}
+	for _, mbHeader := range mbHeaders {
+		executedMbs.Remove(mbHeader.GetHash())
+	}
+
+	return nil
+}
+
+func checkForNils(
+	header data.HeaderHandler,
+	executionManager ExecutionManager,
+	blockChain data.ChainHandler,
+	headersPool common.HeadersPool,
+	storage dataRetriever.StorageService,
+	marshaller marshal.Marshalizer,
+) error {
+	if check.IfNil(header) {
+		return ErrNilHeaderHandler
+	}
+	if check.IfNil(executionManager) {
+		return ErrNilExecutionManager
+	}
+	if check.IfNil(blockChain) {
+		return ErrNilBlockChain
+	}
+	if check.IfNil(headersPool) {
+		return ErrNilHeadersDataPool
+	}
+	if check.IfNil(storage) {
+		return ErrNilStorageService
+	}
+	if check.IfNil(marshaller) {
+		return ErrNilMarshalizer
+	}
+	return nil
+}
+
+// ShardInfoHandler exposes the shard header identity common to both meta shard info flavors
+type ShardInfoHandler interface {
+	GetHeaderHash() []byte
+	GetShardID() uint32
+	GetNonce() uint64
+	GetEpoch() uint32
+}
+
+// GetShardHeadersReferencedByMeta returns the shard headers the meta block references, reading the
+// proposal shard info for V3 headers and the classic shard info otherwise
+func GetShardHeadersReferencedByMeta(header data.MetaHeaderHandler) []ShardInfoHandler {
+	var shardInfoHandlers []ShardInfoHandler
+
+	if header.IsHeaderV3() {
+		for _, shardInfo := range header.GetShardInfoProposalHandlers() {
+			shardInfoHandlers = append(shardInfoHandlers, shardInfo)
+		}
+
+		return shardInfoHandlers
+	}
+
+	for _, shardInfo := range header.GetShardInfoHandlers() {
+		shardInfoHandlers = append(shardInfoHandlers, shardInfo)
+	}
+
+	return shardInfoHandlers
+}
+
+func getExecutionResultToSetOnReplacedHeader(
+	header data.HeaderHandler,
+	pendingExecutionResults []data.BaseExecutionResultHandler,
+	lastNotarizedResult data.BaseExecutionResultHandler,
+) (data.BaseExecutionResultHandler, error) {
+	prevNonce := header.GetNonce() - 1
+	prevHash := header.GetPrevHash()
+
+	headerHashToSet := lastNotarizedResult.GetHeaderHash()
+	executionResultToSet := lastNotarizedResult
+	if bytes.Equal(prevHash, headerHashToSet) {
+		return executionResultToSet, nil
+	}
+
+	for i := len(pendingExecutionResults) - 1; i >= 0; i-- {
+		if pendingExecutionResults[i].GetHeaderNonce() <= prevNonce {
+			headerHashToSet = pendingExecutionResults[i].GetHeaderHash()
+			executionResultToSet = pendingExecutionResults[i]
+			break
+		}
+	}
+	if !bytes.Equal(prevHash, headerHashToSet) {
+		return nil, ErrExecutionResultNotFound
+	}
+
+	return executionResultToSet, nil
 }

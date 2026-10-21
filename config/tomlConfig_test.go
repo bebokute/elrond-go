@@ -1,11 +1,15 @@
 package config
 
 import (
+	"fmt"
 	"strconv"
 	"testing"
 
 	"github.com/pelletier/go-toml"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	p2pConfig "github.com/multiversx/mx-chain-go/p2p/config"
 )
 
 func TestTomlParser(t *testing.T) {
@@ -15,54 +19,107 @@ func TestTomlParser(t *testing.T) {
 	txBlockBodyStorageFile := "path1/file1"
 	txBlockBodyStorageTypeDB := "type2"
 
+	receiptsStorageSize := 171
+	receiptsStorageType := "type3"
+	receiptsStorageFile := "path1/file2"
+	receiptsStorageTypeDB := "type4"
+
+	scheduledSCRsStorageSize := 174
+	scheduledSCRsStorageType := "type7"
+	scheduledSCRsStorageFile := "path1/file4"
+	scheduledSCRsStorageTypeDB := "type8"
+
 	logsPath := "pathLogger"
 	logsStackDepth := 1010
 
-	accountsStorageSize := 171
-	accountsStorageType := "type3"
-	accountsStorageFile := "path2/file2"
-	accountsStorageTypeDB := "type4"
-	accountsStorageBlomSize := 172
-	accountsStorageBlomHash1 := "hashFunc1"
-	accountsStorageBlomHash2 := "hashFunc2"
-	accountsStorageBlomHash3 := "hashFunc3"
+	accountsStorageSize := 172
+	accountsStorageType := "type5"
+	accountsStorageFile := "path1/file3"
+	accountsStorageTypeDB := "type6"
 
 	hasherType := "hashFunc4"
 	multiSigHasherType := "hashFunc5"
 
-	consensusType := "bn"
+	consensusType := "bls"
 
-	communityAddress := "community"
-	burnAddress := "burnAddress"
+	wasmVMVersions := []WasmVMVersionByEpoch{
+		{StartEpoch: 12, Version: "v0.3"},
+		{StartEpoch: 88, Version: "v1.2"},
+	}
 
 	cfgExpected := Config{
+		GeneralSettings: GeneralSettingsConfig{
+			ChainParametersByEpoch: []ChainParametersByEpochConfig{
+				{
+					EnableEpoch:                 0,
+					RoundDuration:               4000,
+					ShardMinNumNodes:            4,
+					ShardConsensusGroupSize:     3,
+					MetachainMinNumNodes:        6,
+					MetachainConsensusGroupSize: 5,
+					Hysteresis:                  0.0,
+					Adaptivity:                  false,
+					Offset:                      2,
+				},
+			},
+			ProcessConfigsByRound: []ProcessConfigByRound{
+				{
+					EnableRound:                            1,
+					MaxRoundsWithoutNewBlockReceived:       2,
+					MaxRoundsWithoutCommittedBlock:         3,
+					RoundModulusTriggerWhenSyncIsStuck:     4,
+					MaxSyncWithErrorsAllowed:               5,
+					MaxRoundsToKeepUnprocessedMiniBlocks:   6,
+					MaxRoundsToKeepUnprocessedTransactions: 7,
+					MaxConsecutiveRoundsOfRatingDecrease:   11,
+					MaxRoundsOfInactivityAccepted:          12,
+					MaxBlockProcessingTimeMs:               13,
+					NumHeadersToRequestInAdvance:           14,
+					ExtraDelayForBroadcastBlockInfoMs:      15,
+					ExtraDelayBetweenBroadcastMbsAndTxsMs:  16,
+					ExtraDelayForRequestBlockInfoMs:        17,
+				},
+			},
+		},
 		MiniBlocksStorage: StorageConfig{
 			Cache: CacheConfig{
-				Size:   uint32(txBlockBodyStorageSize),
-				Type:   txBlockBodyStorageType,
-				Shards: uint32(txBlockBodyStorageShards),
+				Capacity: uint32(txBlockBodyStorageSize),
+				Type:     txBlockBodyStorageType,
+				Shards:   uint32(txBlockBodyStorageShards),
 			},
 			DB: DBConfig{
 				FilePath: txBlockBodyStorageFile,
 				Type:     txBlockBodyStorageTypeDB,
 			},
 		},
-		Logger: LoggerConfig{
-			Path:            logsPath,
-			StackTraceDepth: logsStackDepth,
+		ReceiptsStorage: StorageConfig{
+			Cache: CacheConfig{
+				Capacity: uint32(receiptsStorageSize),
+				Type:     receiptsStorageType,
+			},
+			DB: DBConfig{
+				FilePath: receiptsStorageFile,
+				Type:     receiptsStorageTypeDB,
+			},
+		},
+		ScheduledSCRsStorage: StorageConfig{
+			Cache: CacheConfig{
+				Capacity: uint32(scheduledSCRsStorageSize),
+				Type:     scheduledSCRsStorageType,
+			},
+			DB: DBConfig{
+				FilePath: scheduledSCRsStorageFile,
+				Type:     scheduledSCRsStorageTypeDB,
+			},
 		},
 		AccountsTrieStorage: StorageConfig{
 			Cache: CacheConfig{
-				Size: uint32(accountsStorageSize),
-				Type: accountsStorageType,
+				Capacity: uint32(accountsStorageSize),
+				Type:     accountsStorageType,
 			},
 			DB: DBConfig{
 				FilePath: accountsStorageFile,
 				Type:     accountsStorageTypeDB,
-			},
-			Bloom: BloomFilterConfig{
-				Size:     172,
-				HashFunc: []string{accountsStorageBlomHash1, accountsStorageBlomHash2, accountsStorageBlomHash3},
 			},
 		},
 		Hasher: TypeConfig{
@@ -71,24 +128,297 @@ func TestTomlParser(t *testing.T) {
 		MultisigHasher: TypeConfig{
 			Type: multiSigHasherType,
 		},
-		Consensus: TypeConfig{
+		Consensus: ConsensusConfig{
 			Type: consensusType,
 		},
-		EconomicsConfig: EconomicsConfig{
-			CommunityAddress: communityAddress,
-			BurnAddress:      burnAddress,
+		VirtualMachine: VirtualMachineServicesConfig{
+			Execution: VirtualMachineConfig{
+				WasmVMVersions:                      wasmVMVersions,
+				TimeOutForSCExecutionInMilliseconds: 10000,
+				WasmerSIGSEGVPassthrough:            true,
+				TransferAndExecuteByUserAddresses: []string{
+					"erd1qqqqqqqqqqqqqpgqr46jrxr6r2unaqh75ugd308dwx5vgnhwh47qtvepe0",
+					"erd1qqqqqqqqqqqqqpgqr46jrxr6r2unaqh75ugd308dwx5vgnhwh47qtvepe1",
+					"erd1qqqqqqqqqqqqqpgqr46jrxr6r2unaqh75ugd308dwx5vgnhwh47qtvepe2"},
+			},
+			Querying: QueryVirtualMachineConfig{
+				NumConcurrentVMs:     16,
+				VirtualMachineConfig: VirtualMachineConfig{WasmVMVersions: wasmVMVersions},
+			},
+			GasConfig: VirtualMachineGasConfig{
+				ShardMaxGasPerVmQuery: 1_500_000_000,
+				MetaMaxGasPerVmQuery:  0,
+			},
+		},
+		Debug: DebugConfig{
+			InterceptorResolver: InterceptorResolverDebugConfig{
+				Enabled:                    true,
+				EnablePrint:                true,
+				CacheSize:                  10000,
+				IntervalAutoPrintInSeconds: 20,
+				NumRequestsThreshold:       9,
+				NumResolveFailureThreshold: 3,
+				DebugLineExpiration:        10,
+			},
+			Antiflood: AntifloodDebugConfig{
+				Enabled:                    true,
+				CacheSize:                  10000,
+				IntervalAutoPrintInSeconds: 20,
+			},
+			ShuffleOut: ShuffleOutDebugConfig{
+				CallGCWhenShuffleOut:    true,
+				ExtraPrintsOnShuffleOut: true,
+				DoProfileOnShuffleOut:   true,
+			},
+		},
+		StateTriesConfig: StateTriesConfig{
+			SnapshotsEnabled:            true,
+			AccountsStatePruningEnabled: true,
+			PeerStatePruningEnabled:     true,
+			MaxStateTrieLevelInMemory:   38,
+			MaxPeerTrieLevelInMemory:    39,
+		},
+		TxCacheBounds: TxCacheBoundsConfig{
+			MaxNumBytesPerSenderUpperBound: 33_554_432,
+			MaxTrackedBlocks:               100,
+			PropagationGracePeriodMs:       200,
+			MaxTxNonceDeltaAllowed:         100,
+		},
+		TxCacheSelection: TxCacheSelectionConfig{
+			SelectionGasBandwidthIncreasePercent:          400,
+			SelectionGasBandwidthIncreaseScheduledPercent: 260,
+			SelectionGasRequested:                         10_000_000_000,
+			SelectionMaxNumTxs:                            30000,
+			SelectionLoopDurationCheckInterval:            10,
+		},
+		Antiflood: AntifloodConfig{
+			Enabled: true,
+			ConfigsByRound: []AntifloodConfigByRound{
+				{
+					Round:                               0,
+					NumConcurrentResolverJobs:           50,
+					NumConcurrentResolvingTrieNodesJobs: 3,
+					FastReacting: FloodPreventerConfig{
+						IntervalInSeconds: 1,
+						ReservedPercent:   20.0,
+						PeerMaxInput: AntifloodLimitsConfig{
+							BaseMessagesPerInterval: 280,
+							TotalSizePerInterval:    4194304,
+							IncreaseFactor: IncreaseFactorConfig{
+								Threshold: 10,
+								Factor:    1.0,
+							},
+						},
+						BlackList: BlackListConfig{
+							ThresholdNumMessagesPerInterval: 1000,
+							ThresholdSizePerInterval:        8388608,
+							NumFloodingRounds:               10,
+							PeerBanDurationInSeconds:        300,
+						},
+					},
+					SlowReacting: FloodPreventerConfig{
+						IntervalInSeconds: 30,
+						ReservedPercent:   20.0,
+						PeerMaxInput: AntifloodLimitsConfig{
+							BaseMessagesPerInterval: 6000,
+							TotalSizePerInterval:    18874368,
+							IncreaseFactor: IncreaseFactorConfig{
+								Threshold: 10,
+								Factor:    0.0,
+							},
+						},
+						BlackList: BlackListConfig{
+							ThresholdNumMessagesPerInterval: 10000,
+							ThresholdSizePerInterval:        37748736,
+							NumFloodingRounds:               2,
+							PeerBanDurationInSeconds:        3600,
+						},
+					},
+					OutOfSpecs: FloodPreventerConfig{
+						IntervalInSeconds: 1,
+						ReservedPercent:   0.0,
+						PeerMaxInput: AntifloodLimitsConfig{
+							BaseMessagesPerInterval: 2000,
+							TotalSizePerInterval:    10485760,
+							IncreaseFactor: IncreaseFactorConfig{
+								Threshold: 0,
+								Factor:    0.0,
+							},
+						},
+						BlackList: BlackListConfig{
+							ThresholdNumMessagesPerInterval: 3600,
+							ThresholdSizePerInterval:        12582912,
+							NumFloodingRounds:               2,
+							PeerBanDurationInSeconds:        3600,
+						},
+					},
+					PeerMaxOutput: FloodPreventerConfig{
+						PeerMaxInput: AntifloodLimitsConfig{
+							BaseMessagesPerInterval: 150,
+							TotalSizePerInterval:    2097152,
+						},
+					},
+					Cache: CacheConfig{
+						Name:     "Antiflood",
+						Capacity: 7000,
+						Type:     "LRU",
+					},
+					Topic: TopicAntifloodConfig{
+						DefaultMaxMessagesPerSec: 15000,
+						MaxMessages: []TopicMaxMessagesConfig{
+							{
+								Topic:             "shardBlocks*",
+								NumMessagesPerSec: 30,
+							},
+							{
+								Topic:             "metachainBlocks",
+								NumMessagesPerSec: 30,
+							},
+						},
+					},
+					TxAccumulator: TxAccumulatorConfig{
+						MaxAllowedTimeInMilliseconds:   250,
+						MaxDeviationTimeInMilliseconds: 25,
+					},
+				},
+				{
+					Round:                               440,
+					NumConcurrentResolverJobs:           50,
+					NumConcurrentResolvingTrieNodesJobs: 3,
+					FastReacting: FloodPreventerConfig{
+						IntervalInSeconds: 1,
+						ReservedPercent:   20.0,
+						PeerMaxInput: AntifloodLimitsConfig{
+							BaseMessagesPerInterval: 280,
+							TotalSizePerInterval:    4194304,
+							IncreaseFactor: IncreaseFactorConfig{
+								Threshold: 10,
+								Factor:    1.0,
+							},
+						},
+						BlackList: BlackListConfig{
+							ThresholdNumMessagesPerInterval: 10000,
+							ThresholdSizePerInterval:        12388608,
+							NumFloodingRounds:               100,
+							PeerBanDurationInSeconds:        300,
+						},
+					},
+					SlowReacting: FloodPreventerConfig{
+						IntervalInSeconds: 30,
+						ReservedPercent:   20.0,
+						PeerMaxInput: AntifloodLimitsConfig{
+							BaseMessagesPerInterval: 6000,
+							TotalSizePerInterval:    18874368,
+							IncreaseFactor: IncreaseFactorConfig{
+								Threshold: 10,
+								Factor:    0.0,
+							},
+						},
+						BlackList: BlackListConfig{
+							ThresholdNumMessagesPerInterval: 100000,
+							ThresholdSizePerInterval:        60748736,
+							NumFloodingRounds:               20,
+							PeerBanDurationInSeconds:        3600,
+						},
+					},
+					OutOfSpecs: FloodPreventerConfig{
+						IntervalInSeconds: 1,
+						ReservedPercent:   0.0,
+						PeerMaxInput: AntifloodLimitsConfig{
+							BaseMessagesPerInterval: 20000,
+							TotalSizePerInterval:    104857600,
+							IncreaseFactor: IncreaseFactorConfig{
+								Threshold: 0,
+								Factor:    0.0,
+							},
+						},
+						BlackList: BlackListConfig{
+							ThresholdNumMessagesPerInterval: 36000,
+							ThresholdSizePerInterval:        18582912,
+							NumFloodingRounds:               20,
+							PeerBanDurationInSeconds:        3600,
+						},
+					},
+					PeerMaxOutput: FloodPreventerConfig{
+						PeerMaxInput: AntifloodLimitsConfig{
+							BaseMessagesPerInterval: 150,
+							TotalSizePerInterval:    2097152,
+						},
+					},
+					Cache: CacheConfig{
+						Name:     "Antiflood",
+						Capacity: 7000,
+						Type:     "LRU",
+					},
+					Topic: TopicAntifloodConfig{
+						DefaultMaxMessagesPerSec: 15000,
+						MaxMessages: []TopicMaxMessagesConfig{
+							{
+								Topic:             "shardBlocks*",
+								NumMessagesPerSec: 30,
+							},
+							{
+								Topic:             "metachainBlocks",
+								NumMessagesPerSec: 30,
+							},
+						},
+					},
+					TxAccumulator: TxAccumulatorConfig{
+						MaxAllowedTimeInMilliseconds:   80,
+						MaxDeviationTimeInMilliseconds: 25,
+					},
+				},
+			},
 		},
 	}
-
 	testString := `
+[GeneralSettings]
+	ChainParametersByEpoch = [
+        { EnableEpoch = 0, RoundDuration = 4000, ShardConsensusGroupSize = 3, ShardMinNumNodes = 4, MetachainConsensusGroupSize = 5, MetachainMinNumNodes = 6, Hysteresis = 0.0, Adaptivity = false, Offset = 2 }
+    ]
+    ProcessConfigsByRound = [
+        {
+        EnableRound = 1,
+        MaxRoundsWithoutNewBlockReceived = 2,
+        MaxRoundsWithoutCommittedBlock = 3,
+        RoundModulusTriggerWhenSyncIsStuck = 4,
+        MaxSyncWithErrorsAllowed = 5,
+        MaxRoundsToKeepUnprocessedMiniBlocks = 6,
+        MaxRoundsToKeepUnprocessedTransactions = 7,
+        MaxConsecutiveRoundsOfRatingDecrease = 11,
+        MaxRoundsOfInactivityAccepted = 12,
+		MaxBlockProcessingTimeMs = 13,
+        NumHeadersToRequestInAdvance = 14,
+        ExtraDelayForBroadcastBlockInfoMs = 15,
+        ExtraDelayBetweenBroadcastMbsAndTxsMs = 16,
+        ExtraDelayForRequestBlockInfoMs = 17
+        }
+    ]
+
 [MiniBlocksStorage]
     [MiniBlocksStorage.Cache]
-        Size = ` + strconv.Itoa(txBlockBodyStorageSize) + `
+        Capacity = ` + strconv.Itoa(txBlockBodyStorageSize) + `
         Type = "` + txBlockBodyStorageType + `"
-		Shards = ` + strconv.Itoa(txBlockBodyStorageShards) + `
+        Shards = ` + strconv.Itoa(txBlockBodyStorageShards) + `
     [MiniBlocksStorage.DB]
         FilePath = "` + txBlockBodyStorageFile + `"
         Type = "` + txBlockBodyStorageTypeDB + `"
+
+[ReceiptsStorage]
+    [ReceiptsStorage.Cache]
+        Capacity = ` + strconv.Itoa(receiptsStorageSize) + `
+        Type = "` + receiptsStorageType + `"
+    [ReceiptsStorage.DB]
+        FilePath = "` + receiptsStorageFile + `"
+        Type = "` + receiptsStorageTypeDB + `"
+
+[ScheduledSCRsStorage]
+    [ScheduledSCRsStorage.Cache]
+        Capacity = ` + strconv.Itoa(scheduledSCRsStorageSize) + `
+        Type = "` + scheduledSCRsStorageType + `"
+    [ScheduledSCRsStorage.DB]
+        FilePath = "` + scheduledSCRsStorageFile + `"
+        Type = "` + scheduledSCRsStorageTypeDB + `"
 
 [Logger]
     Path = "` + logsPath + `"
@@ -96,33 +426,1126 @@ func TestTomlParser(t *testing.T) {
 
 [AccountsTrieStorage]
     [AccountsTrieStorage.Cache]
-        Size = ` + strconv.Itoa(accountsStorageSize) + `
+        Capacity = ` + strconv.Itoa(accountsStorageSize) + `
         Type = "` + accountsStorageType + `"
     [AccountsTrieStorage.DB]
         FilePath = "` + accountsStorageFile + `"
         Type = "` + accountsStorageTypeDB + `"
-    [AccountsTrieStorage.Bloom]
-        Size = ` + strconv.Itoa(accountsStorageBlomSize) + `
-		HashFunc = ["` + accountsStorageBlomHash1 + `", "` + accountsStorageBlomHash2 + `", "` +
-		accountsStorageBlomHash3 + `"]
 
 [Hasher]
-	Type = "` + hasherType + `"
+    Type = "` + hasherType + `"
 
 [MultisigHasher]
-	Type = "` + multiSigHasherType + `"
+    Type = "` + multiSigHasherType + `"
 
 [Consensus]
-	Type = "` + consensusType + `"
+    Type = "` + consensusType + `"
 
-[EconomicsConfig]
-    CommunityAddress = "` + communityAddress + `"
-    BurnAddress = "` + burnAddress + `"
+[TxCacheBounds]
+	MaxNumBytesPerSenderUpperBound = 33_554_432
+	MaxTrackedBlocks = 100
+	PropagationGracePeriodMs = 200
+	MaxTxNonceDeltaAllowed = 100
+
+[TxCacheSelection]
+	SelectionMaxNumTxs = 30000
+	SelectionGasRequested = 10_000_000_000
+	SelectionGasBandwidthIncreasePercent = 400
+	SelectionGasBandwidthIncreaseScheduledPercent = 260
+	SelectionLoopDurationCheckInterval = 10
+
+[Antiflood]
+    Enabled = true
+
+    [[Antiflood.ConfigsByRound]]
+        Round = 0
+        NumConcurrentResolverJobs = 50
+        NumConcurrentResolvingTrieNodesJobs = 3
+
+        [Antiflood.ConfigsByRound.FastReacting]
+            IntervalInSeconds = 1
+            ReservedPercent   = 20.0
+            [Antiflood.ConfigsByRound.FastReacting.PeerMaxInput]
+                BaseMessagesPerInterval  = 280
+                TotalSizePerInterval = 4194304
+                [Antiflood.ConfigsByRound.FastReacting.PeerMaxInput.IncreaseFactor]
+                    Threshold = 10
+                    Factor = 1.0
+            [Antiflood.ConfigsByRound.FastReacting.BlackList]
+                ThresholdNumMessagesPerInterval = 1000
+                ThresholdSizePerInterval = 8388608
+                NumFloodingRounds = 10
+                PeerBanDurationInSeconds = 300
+
+        [Antiflood.ConfigsByRound.SlowReacting]
+            IntervalInSeconds = 30
+            ReservedPercent   = 20.0
+            [Antiflood.ConfigsByRound.SlowReacting.PeerMaxInput]
+                BaseMessagesPerInterval = 6000
+                TotalSizePerInterval = 18874368
+                [Antiflood.ConfigsByRound.SlowReacting.PeerMaxInput.IncreaseFactor]
+                    Threshold = 10
+                    Factor = 0.0
+            [Antiflood.ConfigsByRound.SlowReacting.BlackList]
+                ThresholdNumMessagesPerInterval = 10000
+                ThresholdSizePerInterval = 37748736
+                NumFloodingRounds = 2
+                PeerBanDurationInSeconds = 3600
+
+        [Antiflood.ConfigsByRound.OutOfSpecs]
+            IntervalInSeconds = 1
+            ReservedPercent   = 0.0
+            [Antiflood.ConfigsByRound.OutOfSpecs.PeerMaxInput]
+                BaseMessagesPerInterval = 2000
+                TotalSizePerInterval = 10485760
+                [Antiflood.ConfigsByRound.OutOfSpecs.PeerMaxInput.IncreaseFactor]
+                    Threshold = 0
+                    Factor = 0.0
+            [Antiflood.ConfigsByRound.OutOfSpecs.BlackList]
+                ThresholdNumMessagesPerInterval = 3600
+                ThresholdSizePerInterval = 12582912
+                NumFloodingRounds = 2
+                PeerBanDurationInSeconds = 3600
+
+        [Antiflood.ConfigsByRound.PeerMaxOutput]
+            [Antiflood.ConfigsByRound.PeerMaxOutput.PeerMaxInput]
+				BaseMessagesPerInterval  = 150
+				TotalSizePerInterval     = 2097152 #2MB/s
+
+        [Antiflood.ConfigsByRound.Cache]
+            Name = "Antiflood"
+            Capacity = 7000
+            Type = "LRU"
+        [Antiflood.ConfigsByRound.Topic]
+            DefaultMaxMessagesPerSec = 15000
+            MaxMessages = [{ Topic = "shardBlocks*", NumMessagesPerSec = 30 },
+                           { Topic = "metachainBlocks", NumMessagesPerSec = 30 }]
+
+        [Antiflood.ConfigsByRound.TxAccumulator]
+            MaxAllowedTimeInMilliseconds = 250
+            MaxDeviationTimeInMilliseconds = 25
+
+    [[Antiflood.ConfigsByRound]]
+        Round = 440
+        NumConcurrentResolverJobs = 50
+        NumConcurrentResolvingTrieNodesJobs = 3
+
+        [Antiflood.ConfigsByRound.FastReacting]
+            IntervalInSeconds = 1
+            ReservedPercent   = 20.0
+            [Antiflood.ConfigsByRound.FastReacting.PeerMaxInput]
+                BaseMessagesPerInterval  = 280
+                TotalSizePerInterval = 4194304
+                [Antiflood.ConfigsByRound.FastReacting.PeerMaxInput.IncreaseFactor]
+                    Threshold = 10
+                    Factor = 1.0
+            [Antiflood.ConfigsByRound.FastReacting.BlackList]
+                ThresholdNumMessagesPerInterval = 10000
+                ThresholdSizePerInterval = 12388608
+                NumFloodingRounds = 100
+                PeerBanDurationInSeconds = 300
+
+        [Antiflood.ConfigsByRound.SlowReacting]
+            IntervalInSeconds = 30
+            ReservedPercent   = 20.0
+            [Antiflood.ConfigsByRound.SlowReacting.PeerMaxInput]
+                BaseMessagesPerInterval = 6000
+                TotalSizePerInterval = 18874368
+                [Antiflood.ConfigsByRound.SlowReacting.PeerMaxInput.IncreaseFactor]
+                    Threshold = 10
+                    Factor = 0.0
+            [Antiflood.ConfigsByRound.SlowReacting.BlackList]
+                ThresholdNumMessagesPerInterval = 100000
+                ThresholdSizePerInterval = 60748736
+                NumFloodingRounds = 20
+                PeerBanDurationInSeconds = 3600
+
+        [Antiflood.ConfigsByRound.OutOfSpecs]
+            IntervalInSeconds = 1
+            ReservedPercent   = 0.0
+            [Antiflood.ConfigsByRound.OutOfSpecs.PeerMaxInput]
+                BaseMessagesPerInterval = 20000
+                TotalSizePerInterval = 104857600
+                [Antiflood.ConfigsByRound.OutOfSpecs.PeerMaxInput.IncreaseFactor]
+                    Threshold = 0
+                    Factor = 0.0
+            [Antiflood.ConfigsByRound.OutOfSpecs.BlackList]
+                ThresholdNumMessagesPerInterval = 36000
+                ThresholdSizePerInterval = 18582912
+                NumFloodingRounds = 20
+                PeerBanDurationInSeconds = 3600
+
+        [Antiflood.ConfigsByRound.PeerMaxOutput]
+            [Antiflood.ConfigsByRound.PeerMaxOutput.PeerMaxInput]
+				BaseMessagesPerInterval  = 150
+				TotalSizePerInterval     = 2097152
+
+        [Antiflood.ConfigsByRound.Cache]
+            Name = "Antiflood"
+            Capacity = 7000
+            Type = "LRU"
+        [Antiflood.ConfigsByRound.Topic]
+            DefaultMaxMessagesPerSec = 15000
+            MaxMessages = [{ Topic = "shardBlocks*", NumMessagesPerSec = 30 },
+                           { Topic = "metachainBlocks", NumMessagesPerSec = 30 }]
+
+        [Antiflood.ConfigsByRound.TxAccumulator]
+            MaxAllowedTimeInMilliseconds = 80
+            MaxDeviationTimeInMilliseconds = 25
+
+[VirtualMachine]
+    [VirtualMachine.Execution]
+        TimeOutForSCExecutionInMilliseconds = 10000 # 10 seconds = 10000 milliseconds
+        WasmerSIGSEGVPassthrough            = true
+        WasmVMVersions = [
+            { StartEpoch = 12, Version = "v0.3" },
+            { StartEpoch = 88, Version = "v1.2" },
+        ]
+		TransferAndExecuteByUserAddresses = [
+			"erd1qqqqqqqqqqqqqpgqr46jrxr6r2unaqh75ugd308dwx5vgnhwh47qtvepe0", #shard 0
+			"erd1qqqqqqqqqqqqqpgqr46jrxr6r2unaqh75ugd308dwx5vgnhwh47qtvepe1", #shard 1
+			"erd1qqqqqqqqqqqqqpgqr46jrxr6r2unaqh75ugd308dwx5vgnhwh47qtvepe2", #shard 2
+		]
+
+    [VirtualMachine.Querying]
+        NumConcurrentVMs = 16
+        WasmVMVersions = [
+            { StartEpoch = 12, Version = "v0.3" },
+            { StartEpoch = 88, Version = "v1.2" },
+        ]
+
+    [VirtualMachine.GasConfig]
+        ShardMaxGasPerVmQuery = 1500000000
+        MetaMaxGasPerVmQuery = 0
+
+[Debug]
+    [Debug.InterceptorResolver]
+        Enabled = true
+        CacheSize = 10000
+        EnablePrint = true
+        IntervalAutoPrintInSeconds = 20
+        NumRequestsThreshold = 9
+        NumResolveFailureThreshold = 3
+        DebugLineExpiration = 10
+    [Debug.Antiflood]
+        Enabled = true
+        CacheSize = 10000
+        IntervalAutoPrintInSeconds = 20
+    [Debug.ShuffleOut]
+        CallGCWhenShuffleOut = true
+        ExtraPrintsOnShuffleOut = true
+        DoProfileOnShuffleOut = true
+
+[StateTriesConfig]
+    SnapshotsEnabled = true
+    AccountsStatePruningEnabled = true
+    PeerStatePruningEnabled = true
+    MaxStateTrieLevelInMemory = 38
+    MaxPeerTrieLevelInMemory = 39
 `
 	cfg := Config{}
 
 	err := toml.Unmarshal([]byte(testString), &cfg)
 
+	require.Nil(t, err)
+	require.Equal(t, cfgExpected, cfg)
+}
+
+func TestTomlEconomicsParser(t *testing.T) {
+	protocolSustainabilityPercentage := 0.1
+	leaderPercentage1 := 0.1
+	leaderPercentage2 := 0.2
+	epoch0 := uint32(0)
+	epoch1 := uint32(1)
+	developerPercentage := 0.3
+	maxGasLimitPerBlock := "18446744073709551615"
+	minGasPrice := "18446744073709551615"
+	minGasLimit := "18446744073709551615"
+	extraGasLimitGuardedTx := "50000"
+	maxGasPriceSetGuardian := "1234567"
+	maxGasHigherFactorAccepted := "10"
+	protocolSustainabilityAddress := "erd1932eft30w753xyvme8d49qejgkjc09n5e49w4mwdjtm0neld797su0dlxp"
+
+	denomination := 18
+
+	cfgEconomicsExpected := EconomicsConfig{
+		GlobalSettings: GlobalSettings{
+			Denomination: denomination,
+		},
+		RewardsSettings: RewardsSettings{
+			RewardsConfigByEpoch: []EpochRewardSettings{
+				{
+					EpochEnable:                      epoch0,
+					LeaderPercentage:                 leaderPercentage1,
+					ProtocolSustainabilityPercentage: protocolSustainabilityPercentage,
+					ProtocolSustainabilityAddress:    protocolSustainabilityAddress,
+					DeveloperPercentage:              developerPercentage,
+				},
+				{
+					EpochEnable:                      epoch1,
+					LeaderPercentage:                 leaderPercentage2,
+					ProtocolSustainabilityPercentage: protocolSustainabilityPercentage,
+					ProtocolSustainabilityAddress:    protocolSustainabilityAddress,
+					DeveloperPercentage:              developerPercentage,
+				},
+			},
+		},
+		FeeSettings: FeeSettings{
+			GasLimitSettings: []GasLimitSetting{
+				{
+					MaxGasLimitPerBlock:        maxGasLimitPerBlock,
+					MinGasLimit:                minGasLimit,
+					ExtraGasLimitGuardedTx:     extraGasLimitGuardedTx,
+					MaxGasHigherFactorAccepted: maxGasHigherFactorAccepted,
+				},
+			},
+			MinGasPrice:            minGasPrice,
+			MaxGasPriceSetGuardian: maxGasPriceSetGuardian,
+		},
+	}
+
+	testString := `
+[GlobalSettings]
+    Denomination = ` + fmt.Sprintf("%d", denomination) + `
+[RewardsSettings]
+    [[RewardsSettings.RewardsConfigByEpoch]]
+    EpochEnable = ` + fmt.Sprintf("%d", epoch0) + `
+    LeaderPercentage = ` + fmt.Sprintf("%.6f", leaderPercentage1) + `
+    DeveloperPercentage = ` + fmt.Sprintf("%.6f", developerPercentage) + `
+    ProtocolSustainabilityPercentage = ` + fmt.Sprintf("%.6f", protocolSustainabilityPercentage) + ` #fraction of value 0.1 - 10%
+    ProtocolSustainabilityAddress = "` + protocolSustainabilityAddress + `"
+
+    [[RewardsSettings.RewardsConfigByEpoch]]
+    EpochEnable = ` + fmt.Sprintf("%d", epoch1) + `
+    LeaderPercentage = ` + fmt.Sprintf("%.6f", leaderPercentage2) + `
+    DeveloperPercentage = ` + fmt.Sprintf("%.6f", developerPercentage) + `
+    ProtocolSustainabilityPercentage = ` + fmt.Sprintf("%.6f", protocolSustainabilityPercentage) + ` #fraction of value 0.1 - 10%
+    ProtocolSustainabilityAddress = "` + protocolSustainabilityAddress + `"
+
+[FeeSettings]
+    GasLimitSettings = [{EnableEpoch = 0, MaxGasLimitPerBlock = "` + maxGasLimitPerBlock + `", MaxGasLimitPerMiniBlock = "", MaxGasLimitPerMetaBlock = "", MaxGasLimitPerMetaMiniBlock = "", MaxGasLimitPerTx = "", MinGasLimit = "` + minGasLimit + `", ExtraGasLimitGuardedTx = "` + extraGasLimitGuardedTx + `", MaxGasHigherFactorAccepted = "` + maxGasHigherFactorAccepted + `"}] 
+    MinGasPrice = "` + minGasPrice + `"
+	MaxGasPriceSetGuardian = "` + maxGasPriceSetGuardian + `"
+`
+	cfg := EconomicsConfig{}
+
+	err := toml.Unmarshal([]byte(testString), &cfg)
+
 	assert.Nil(t, err)
-	assert.Equal(t, cfgExpected, cfg)
+	assert.Equal(t, cfgEconomicsExpected, cfg)
+}
+
+func TestTomlPreferencesParser(t *testing.T) {
+	nodeDisplayName := "test-name"
+	destinationShardAsObs := "3"
+	identity := "test-identity"
+	redundancyLevel := int64(0)
+	prefPubKey0 := "preferred pub key 0"
+	prefPubKey1 := "preferred pub key 1"
+
+	cfgPreferencesExpected := Preferences{
+		Preferences: PreferencesConfig{
+			NodeDisplayName:            nodeDisplayName,
+			DestinationShardAsObserver: destinationShardAsObs,
+			Identity:                   identity,
+			RedundancyLevel:            redundancyLevel,
+			PreferredConnections:       []string{prefPubKey0, prefPubKey1},
+		},
+		BlockProcessingCutoff: BlockProcessingCutoffConfig{
+			Enabled:       true,
+			Mode:          "pause",
+			CutoffTrigger: "round",
+			Value:         55,
+		},
+	}
+
+	testString := `
+[Preferences]
+    NodeDisplayName = "` + nodeDisplayName + `"
+    DestinationShardAsObserver = "` + destinationShardAsObs + `"
+    Identity = "` + identity + `"
+    RedundancyLevel = ` + fmt.Sprintf("%d", redundancyLevel) + `
+    PreferredConnections = [
+        "` + prefPubKey0 + `",
+        "` + prefPubKey1 + `"
+    ]
+
+[BlockProcessingCutoff]
+    Enabled = true
+    Mode = "pause"
+    CutoffTrigger = "round"
+    Value = 55
+`
+	cfg := Preferences{}
+
+	err := toml.Unmarshal([]byte(testString), &cfg)
+
+	assert.Nil(t, err)
+	assert.Equal(t, cfgPreferencesExpected, cfg)
+}
+
+func TestTomlExternalParser(t *testing.T) {
+	indexerURL := "url"
+	elasticUsername := "user"
+	elasticPassword := "pass"
+
+	cfgExternalExpected := ExternalConfig{
+		ElasticSearchConnector: ElasticSearchConfig{
+			Enabled:  true,
+			URL:      indexerURL,
+			Username: elasticUsername,
+			Password: elasticPassword,
+		},
+	}
+
+	testString := `
+[ElasticSearchConnector]
+    Enabled = true
+    URL = "` + indexerURL + `"
+    Username = "` + elasticUsername + `"
+    Password = "` + elasticPassword + `"`
+
+	cfg := ExternalConfig{}
+
+	err := toml.Unmarshal([]byte(testString), &cfg)
+
+	assert.Nil(t, err)
+	assert.Equal(t, cfgExternalExpected, cfg)
+}
+
+func TestAPIRoutesToml(t *testing.T) {
+	package0 := "testPackage0"
+	route0 := "testRoute0"
+	route1 := "testRoute1"
+
+	package1 := "testPackage1"
+	route2 := "testRoute2"
+
+	loggingThreshold := 10
+
+	expectedCfg := ApiRoutesConfig{
+		Logging: ApiLoggingConfig{
+			LoggingEnabled:          true,
+			ThresholdInMicroSeconds: loggingThreshold,
+		},
+		APIPackages: map[string]APIPackageConfig{
+			package0: {
+				Routes: []RouteConfig{
+					{Name: route0, Open: true},
+					{Name: route1, Open: true},
+				},
+			},
+			package1: {
+				Routes: []RouteConfig{
+					{Name: route2, Open: false},
+				},
+			},
+		},
+	}
+
+	testString := `
+[Logging]
+    LoggingEnabled = true
+    ThresholdInMicroSeconds = 10
+
+     # API routes configuration
+[APIPackages]
+
+[APIPackages.` + package0 + `]
+    Routes = [
+        # test comment
+        { Name = "` + route0 + `", Open = true },
+
+        # test comment
+        { Name = "` + route1 + `", Open = true },
+    ]
+
+[APIPackages.` + package1 + `]
+    Routes = [
+         # test comment
+        { Name = "` + route2 + `", Open = false }
+    ]
+ `
+
+	cfg := ApiRoutesConfig{}
+
+	err := toml.Unmarshal([]byte(testString), &cfg)
+
+	assert.Nil(t, err)
+	assert.Equal(t, expectedCfg, cfg)
+}
+
+func TestP2pConfig(t *testing.T) {
+	initialPeersList := "/ip4/127.0.0.1/tcp/9999/p2p/16Uiu2HAkw5SNNtSvH1zJiQ6Gc3WoGNSxiyNueRKe6fuAuh57G3Bk"
+	protocolID1 := "test protocol id 1"
+	protocolID2 := "test protocol id 2"
+	shardingType := "ListSharder"
+	port := "37373-38383"
+
+	testString := `
+#P2P config file
+[Node]
+    Port = "` + port + `"
+    ThresholdMinConnectedPeers = 0
+
+    [Node.Transports]
+        QUICAddress = "/ip4/0.0.0.0/udp/%d/quic-v1"
+        WebSocketAddress = "/ip4/0.0.0.0/tcp/%d/ws" 
+        WebTransportAddress = "/ip4/0.0.0.0/udp/%d/quic-v1/webtransport"
+        [Node.Transports.TCP]
+            ListenAddress = "/ip4/0.0.0.0/tcp/%d"
+            PreventPortReuse = true
+
+    [Node.ResourceLimiter]
+        Type = "default autoscale" #available options "default autoscale", "infinite", "default with manual scale".
+        ManualSystemMemoryInMB = 1 # not taken into account if the type is not "default with manual scale"
+        ManualMaximumFD = 2 # not taken into account if the type is not "default with manual scale"
+
+[KadDhtPeerDiscovery]
+    Enabled = false
+    Type = ""
+    RefreshIntervalInSec = 0
+
+    # ProtocolIDs represents the protocols that this node will advertise to other peers
+    # To connect to other nodes, those nodes should have at least one common protocol string
+    ProtocolIDs = [
+        "` + protocolID1 + `",
+        "` + protocolID2 + `",
+    ]
+    InitialPeerList = ["` + initialPeersList + `"]
+
+    #kademlia's routing table bucket size
+    BucketSize = 0
+
+    #RoutingTableRefreshIntervalInSec defines how many seconds should pass between 2 kad routing table auto refresh calls
+    RoutingTableRefreshIntervalInSec = 0
+
+[Sharding]
+    # The targeted number of peer connections
+    TargetPeerCount = 0
+    MaxIntraShardValidators = 0
+    MaxCrossShardValidators = 0
+    MaxIntraShardObservers = 0
+    MaxCrossShardObservers = 0
+    MaxSeeders = 0
+    Type = "` + shardingType + `"`
+
+	expectedCfg := p2pConfig.P2PConfig{
+		Node: p2pConfig.NodeConfig{
+			Port: port,
+			Transports: p2pConfig.P2PTransportConfig{
+				TCP: p2pConfig.P2PTCPTransport{
+					ListenAddress:    "/ip4/0.0.0.0/tcp/%d",
+					PreventPortReuse: true,
+				},
+				QUICAddress:         "/ip4/0.0.0.0/udp/%d/quic-v1",
+				WebSocketAddress:    "/ip4/0.0.0.0/tcp/%d/ws",
+				WebTransportAddress: "/ip4/0.0.0.0/udp/%d/quic-v1/webtransport",
+			},
+			ResourceLimiter: p2pConfig.P2PResourceLimiterConfig{
+				Type:                   "default autoscale",
+				ManualSystemMemoryInMB: 1,
+				ManualMaximumFD:        2,
+			},
+		},
+		KadDhtPeerDiscovery: p2pConfig.KadDhtPeerDiscoveryConfig{
+			ProtocolIDs:     []string{protocolID1, protocolID2},
+			InitialPeerList: []string{initialPeersList},
+		},
+		Sharding: p2pConfig.ShardingConfig{
+			Type: shardingType,
+		},
+	}
+	cfg := p2pConfig.P2PConfig{}
+
+	err := toml.Unmarshal([]byte(testString), &cfg)
+
+	assert.Nil(t, err)
+	assert.Equal(t, expectedCfg, cfg)
+}
+
+func TestEnableEpochConfig(t *testing.T) {
+	testString := `
+[EnableEpochs]
+    # SCDeployEnableEpoch represents the epoch when the deployment of smart contracts will be enabled
+    SCDeployEnableEpoch = 1
+
+    # BuiltInFunctionsEnableEpoch represents the epoch when the built in functions will be enabled
+    BuiltInFunctionsEnableEpoch = 2
+
+    # RelayedTransactionsEnableEpoch represents the epoch when the relayed transactions will be enabled
+    RelayedTransactionsEnableEpoch = 3
+
+    # PenalizedTooMuchGasEnableEpoch represents the epoch when the penalization for using too much gas will be enabled
+    PenalizedTooMuchGasEnableEpoch = 4
+
+    # SwitchJailWaitingEnableEpoch represents the epoch when the system smart contract processing at end of epoch is enabled
+    SwitchJailWaitingEnableEpoch = 5
+
+    # BelowSignedThresholdEnableEpoch represents the epoch when the change for computing rating for validators below signed rating is enabled
+    BelowSignedThresholdEnableEpoch = 6
+
+    # SwitchHysteresisForMinNodesEnableEpoch represents the epoch when the system smart contract changes its config to consider
+    # also (minimum) hysteresis nodes for the minimum number of nodes
+    SwitchHysteresisForMinNodesEnableEpoch = 7
+
+    # TransactionSignedWithTxHashEnableEpoch represents the epoch when the node will also accept transactions that are
+    # signed with the hash of transaction
+    TransactionSignedWithTxHashEnableEpoch = 8
+
+    # MetaProtectionEnableEpoch represents the epoch when the transactions to the metachain are checked to have enough gas
+    MetaProtectionEnableEpoch = 9
+
+    # AheadOfTimeGasUsageEnableEpoch represents the epoch when the cost of smart contract prepare changes from compiler per byte to ahead of time prepare per byte
+    AheadOfTimeGasUsageEnableEpoch = 10
+
+    # GasPriceModifierEnableEpoch represents the epoch when the gas price modifier in fee computation is enabled
+    GasPriceModifierEnableEpoch = 11
+
+    # RepairCallbackEnableEpoch represents the epoch when the callback repair is activated for scrs
+    RepairCallbackEnableEpoch = 12
+
+    # BlockGasAndFeesReCheckEnableEpoch represents the epoch when gas and fees used in each created or processed block are re-checked
+    BlockGasAndFeesReCheckEnableEpoch = 13
+
+    # BalanceWaitingListsEnableEpoch represents the epoch when the shard waiting lists are balanced at the start of an epoch
+    BalanceWaitingListsEnableEpoch = 14
+
+    # ReturnDataToLastTransferEnableEpoch represents the epoch when returned data is added to last output transfer for callbacks
+    ReturnDataToLastTransferEnableEpoch = 15
+
+    # SenderInOutTransferEnableEpoch represents the epoch when the feature of having different senders in output transfer is enabled
+    SenderInOutTransferEnableEpoch = 16
+
+    # StakeEnableEpoch represents the epoch when staking is enabled
+    StakeEnableEpoch = 17
+
+    # StakingV2EnableEpoch represents the epoch when staking v2 is enabled
+    StakingV2EnableEpoch = 18
+
+    # DoubleKeyProtectionEnableEpoch represents the epoch when the double key protection will be enabled
+    DoubleKeyProtectionEnableEpoch = 19
+
+    # ESDTEnableEpoch represents the epoch when ESDT is enabled
+    ESDTEnableEpoch = 20
+
+    # GovernanceEnableEpoch represents the epoch when governance is enabled
+    GovernanceEnableEpoch = 21
+
+    # GovernanceDisableProposeEnableEpoch represents the epoch when governance disable proposal is enabled
+    GovernanceDisableProposeEnableEpoch = 22
+
+    # GovernanceFixesEnableEpoch represents the epoch when governance fixes are enabled
+    GovernanceFixesEnableEpoch = 23
+
+    # DelegationManagerEnableEpoch represents the epoch when the delegation manager is enabled
+    # epoch should not be 0
+    DelegationManagerEnableEpoch = 22
+
+    # DelegationSmartContractEnableEpoch represents the epoch when delegation smart contract is enabled
+    # epoch should not be 0
+    DelegationSmartContractEnableEpoch = 23
+
+    # CorrectLastUnjailedEnableEpoch represents the epoch when the fix regaring the last unjailed node should apply
+    CorrectLastUnjailedEnableEpoch = 24
+
+    # RelayedTransactionsV2EnableEpoch represents the epoch when the relayed transactions V2 will be enabled
+    RelayedTransactionsV2EnableEpoch = 25
+
+    # UnbondTokensV2EnableEpoch represents the epoch when the new implementation of the unbond tokens function is available
+    UnbondTokensV2EnableEpoch = 26
+
+    # SaveJailedAlwaysEnableEpoch represents the epoch when saving jailed status at end of epoch will happen in all cases
+    SaveJailedAlwaysEnableEpoch = 27
+
+    # ReDelegateBelowMinCheckEnableEpoch represents the epoch when the check for the re-delegated value will be enabled
+    ReDelegateBelowMinCheckEnableEpoch = 28
+
+    # ValidatorToDelegationEnableEpoch represents the epoch when the validator-to-delegation feature will be enabled
+    ValidatorToDelegationEnableEpoch = 29
+
+    # IncrementSCRNonceInMultiTransferEnableEpoch represents the epoch when the fix for preventing the generation of the same SCRs
+    # is enabled. The fix is done by adding an extra increment.
+    IncrementSCRNonceInMultiTransferEnableEpoch = 31
+
+    # ESDTMultiTransferEnableEpoch represents the epoch when esdt multitransfer built in function is enabled
+    ESDTMultiTransferEnableEpoch = 32
+
+    # GlobalMintBurnDisableEpoch represents the epoch when the global mint and burn functions are disabled
+    GlobalMintBurnDisableEpoch = 33
+
+    # ESDTTransferRoleEnableEpoch represents the epoch when esdt transfer role set is enabled
+    ESDTTransferRoleEnableEpoch = 34
+
+    # ComputeRewardCheckpointEnableEpoch represents the epoch when compute rewards checkpoint epoch is enabled
+    ComputeRewardCheckpointEnableEpoch = 36
+
+    # SCRSizeInvariantCheckEnableEpoch represents the epoch when the scr size invariant check is enabled
+    SCRSizeInvariantCheckEnableEpoch = 37
+
+    # BackwardCompSaveKeyValueEnableEpoch represents the epoch when the backward compatibility for save key value error is enabled
+    BackwardCompSaveKeyValueEnableEpoch = 38
+
+    # ESDTNFTCreateOnMultiShardEnableEpoch represents the epoch when esdt nft creation is enabled on multiple shards
+    ESDTNFTCreateOnMultiShardEnableEpoch = 39
+
+    # MetaESDTSetEnableEpoch represents the epoch when the backward compatibility for save key value error is enabled
+    MetaESDTSetEnableEpoch = 40
+
+    # AddTokensToDelegationEnableEpoch represents the epoch when adding tokens to delegation is enabled for whitelisted address
+    AddTokensToDelegationEnableEpoch = 41
+
+    # MultiESDTTransferFixOnCallBackOnEnableEpoch represents the epoch when multi esdt transfer on callback fix is enabled
+    MultiESDTTransferFixOnCallBackOnEnableEpoch = 42
+
+    # OptimizeGasUsedInCrossMiniBlocksEnableEpoch represents the epoch when gas used in cross shard mini blocks will be optimized
+    OptimizeGasUsedInCrossMiniBlocksEnableEpoch = 43
+
+    # CorrectFirstQueuedEpoch represents the epoch when the backward compatibility for setting the first queued node is enabled
+    CorrectFirstQueuedEpoch = 44
+
+    # DeleteDelegatorAfterClaimRewardsEnableEpoch represents the epoch when the delegators data is deleted for delegators that have to claim rewards after they withdraw all funds
+    DeleteDelegatorAfterClaimRewardsEnableEpoch = 45
+
+    # FixOOGReturnCodeEnableEpoch represents the epoch when the backward compatibility returning out of gas error is enabled
+    FixOOGReturnCodeEnableEpoch = 46
+
+    # RemoveNonUpdatedStorageEnableEpoch represents the epoch when the backward compatibility for removing non updated storage is enabled
+    RemoveNonUpdatedStorageEnableEpoch = 47
+
+    # OptimizeNFTStoreEnableEpoch represents the epoch when optimizations on NFT metadata store and send are enabled
+    OptimizeNFTStoreEnableEpoch = 48
+
+    # CreateNFTThroughExecByCallerEnableEpoch represents the epoch when nft creation through execution on destination by caller is enabled
+    CreateNFTThroughExecByCallerEnableEpoch = 49
+
+    # StopDecreasingValidatorRatingWhenStuckEnableEpoch represents the epoch when we should stop decreasing validator's rating if, for instance, a shard gets stuck
+    StopDecreasingValidatorRatingWhenStuckEnableEpoch = 50
+
+    # FrontRunningProtectionEnableEpoch represents the epoch when the first version of protection against front running is enabled
+    FrontRunningProtectionEnableEpoch = 51
+
+    # IsPayableBySCEnableEpoch represents the epoch when a new flag isPayable by SC is enabled
+    IsPayableBySCEnableEpoch = 52
+
+    # CleanUpInformativeSCRsEnableEpoch represents the epoch when the informative-only scrs are cleaned from miniblocks and logs are created from them
+    CleanUpInformativeSCRsEnableEpoch = 53
+
+    # StorageAPICostOptimizationEnableEpoch represents the epoch when new storage helper functions are enabled and cost is reduced in Wasm VM
+    StorageAPICostOptimizationEnableEpoch = 54
+
+    # ESDTRegisterAndSetAllRolesEnableEpoch represents the epoch when new function to register tickerID and set all roles is enabled
+    ESDTRegisterAndSetAllRolesEnableEpoch = 56
+
+    # ScheduledMiniBlocksEnableEpoch represents the epoch when scheduled mini blocks would be created if needed
+    ScheduledMiniBlocksEnableEpoch = 57
+
+    # CorrectJailedNotUnstakedEpoch represents the epoch when the jailed validators will also be unstaked if the queue is empty
+    CorrectJailedNotUnstakedEmptyQueueEpoch = 58
+
+    # DoNotReturnOldBlockInBlockchainHookEnableEpoch represents the epoch when the fetch old block operation is
+    # disabled in the blockchain hook component
+    DoNotReturnOldBlockInBlockchainHookEnableEpoch = 59
+
+    # AddFailedRelayedTxToInvalidMBsDisableEpoch represents the epoch when adding the failed relayed txs to invalid miniblocks is disabled
+    AddFailedRelayedTxToInvalidMBsDisableEpoch = 60
+
+    # SCRSizeInvariantOnBuiltInResultEnableEpoch represents the epoch when scr size invariant on built in result is enabled
+    SCRSizeInvariantOnBuiltInResultEnableEpoch = 61
+
+    # CheckCorrectTokenIDForTransferRoleEnableEpoch represents the epoch when the correct token ID check is applied for transfer role verification
+    CheckCorrectTokenIDForTransferRoleEnableEpoch = 62
+
+    # DisableExecByCallerEnableEpoch represents the epoch when the check on value is disabled on exec by caller
+    DisableExecByCallerEnableEpoch = 63
+
+    # RefactorContextEnableEpoch represents the epoch when refactoring/simplifying is enabled in contexts
+    RefactorContextEnableEpoch = 64
+
+    # FailExecutionOnEveryAPIErrorEnableEpoch represent the epoch when new protection in VM is enabled to fail all wrong API calls
+    FailExecutionOnEveryAPIErrorEnableEpoch = 65
+
+    # ManagedCryptoAPIsEnableEpoch represents the epoch when new managed crypto APIs are enabled in the wasm VM
+    ManagedCryptoAPIsEnableEpoch = 66
+
+    # CheckFunctionArgumentEnableEpoch represents the epoch when the extra argument check is enabled in vm-common
+    CheckFunctionArgumentEnableEpoch = 67
+
+    # CheckExecuteOnReadOnlyEnableEpoch represents the epoch when the extra checks are enabled for execution on read only
+    CheckExecuteOnReadOnlyEnableEpoch = 68
+
+    # ESDTMetadataContinuousCleanupEnableEpoch represents the epoch when esdt metadata is automatically deleted according to inshard liquidity
+    ESDTMetadataContinuousCleanupEnableEpoch = 69
+
+    # MiniBlockPartialExecutionEnableEpoch represents the epoch when mini block partial execution will be enabled
+    MiniBlockPartialExecutionEnableEpoch = 70
+
+    # FixAsyncCallBackArgsListEnableEpoch represents the epoch when the async callback arguments lists fix will be enabled
+    FixAsyncCallBackArgsListEnableEpoch = 71
+
+    # FixOldTokenLiquidityEnableEpoch represents the epoch when the fix for old token liquidity is enabled
+    FixOldTokenLiquidityEnableEpoch = 72
+
+    # RuntimeMemStoreLimitEnableEpoch represents the epoch when the condition for Runtime MemStore is enabled
+    RuntimeMemStoreLimitEnableEpoch = 73
+
+    # SetSenderInEeiOutputTransferEnableEpoch represents the epoch when setting the sender in eei output transfers will be enabled
+    SetSenderInEeiOutputTransferEnableEpoch = 74
+
+    # RefactorPeersMiniBlocksEnableEpoch represents the epoch when refactor of the peers mini blocks will be enabled
+    RefactorPeersMiniBlocksEnableEpoch = 75
+
+    # MaxBlockchainHookCountersEnableEpoch represents the epoch when the max blockchainhook counters are enabled
+    MaxBlockchainHookCountersEnableEpoch = 76
+
+    # WipeSingleNFTLiquidityDecreaseEnableEpoch represents the epoch when the system account liquidity is decreased for wipeSingleNFT as well
+    WipeSingleNFTLiquidityDecreaseEnableEpoch = 77
+
+    # AlwaysSaveTokenMetaDataEnableEpoch represents the epoch when the token metadata is always saved
+    AlwaysSaveTokenMetaDataEnableEpoch = 78
+
+    # RuntimeCodeSizeFixEnableEpoch represents the epoch when the code size fix in the VM is enabled
+    RuntimeCodeSizeFixEnableEpoch = 79
+
+    # RelayedNonceFixEnableEpoch represents the epoch when the nonce fix for relayed txs is enabled
+    RelayedNonceFixEnableEpoch = 80
+
+    # SetGuardianEnableEpoch represents the epoch when the guard account feature is enabled in the protocol
+    SetGuardianEnableEpoch = 81
+
+    # AutoBalanceDataTriesEnableEpoch represents the epoch when the data tries are automatically balanced by inserting at the hashed key instead of the normal key
+    AutoBalanceDataTriesEnableEpoch = 82
+
+    # KeepExecOrderOnCreatedSCRsEnableEpoch represents the epoch when the execution order of created SCRs is ensured
+    KeepExecOrderOnCreatedSCRsEnableEpoch = 83
+
+    # MultiClaimOnDelegationEnableEpoch represents the epoch when the multi claim on delegation is enabled
+    MultiClaimOnDelegationEnableEpoch = 84
+
+    # ChangeUsernameEnableEpoch represents the epoch when changing username is enabled
+    ChangeUsernameEnableEpoch = 85
+
+    # ConsistentTokensValuesLengthCheckEnableEpoch represents the epoch when the consistent tokens values length check is enabled
+    ConsistentTokensValuesLengthCheckEnableEpoch = 86
+
+    # FixDelegationChangeOwnerOnAccountEnableEpoch represents the epoch when the fix for the delegation system smart contract is enabled
+    FixDelegationChangeOwnerOnAccountEnableEpoch = 87
+
+    # DeterministicSortOnValidatorsInfoEnableEpoch represents the epoch when the deterministic sorting on validators info is enabled
+    DeterministicSortOnValidatorsInfoEnableEpoch = 66
+
+    # DynamicGasCostForDataTrieStorageLoadEnableEpoch represents the epoch when dynamic gas cost for data trie storage load will be enabled
+    DynamicGasCostForDataTrieStorageLoadEnableEpoch = 64
+
+	# ScToScLogEventEnableEpoch represents the epoch when the sc to sc log event feature is enabled
+	ScToScLogEventEnableEpoch = 88
+
+    # NFTStopCreateEnableEpoch represents the epoch when NFT stop create feature is enabled
+    NFTStopCreateEnableEpoch = 89
+
+    # ChangeOwnerAddressCrossShardThroughSCEnableEpoch represents the epoch when the change owner address built in function will work also through a smart contract call cross shard
+    ChangeOwnerAddressCrossShardThroughSCEnableEpoch = 90
+
+    # FixGasRemainingForSaveKeyValueBuiltinFunctionEnableEpoch represents the epoch when the fix for the remaining gas in the SaveKeyValue builtin function is enabled
+    FixGasRemainingForSaveKeyValueBuiltinFunctionEnableEpoch = 91
+    
+    # MigrateDataTrieEnableEpoch represents the epoch when the data tries migration is enabled
+    MigrateDataTrieEnableEpoch = 92
+
+    # CurrentRandomnessOnSortingEnableEpoch represents the epoch when the current randomness on sorting is enabled
+    CurrentRandomnessOnSortingEnableEpoch = 93
+
+    # AlwaysMergeContextsInEEIEnableEpoch represents the epoch in which the EEI will always merge the contexts
+    AlwaysMergeContextsInEEIEnableEpoch = 94
+
+    # CleanupAuctionOnLowWaitingListEnableEpoch represents the epoch when the cleanup auction on low waiting list is enabled
+    CleanupAuctionOnLowWaitingListEnableEpoch = 95
+
+    # UseGasBoundedShouldFailExecutionEnableEpoch represents the epoch when use bounded gas function should fail execution in case of error
+    UseGasBoundedShouldFailExecutionEnableEpoch = 96
+
+    # DynamicESDTEnableEpoch represents the epoch when dynamic NFT feature is enabled
+    DynamicESDTEnableEpoch = 97
+
+    # EGLDInMultiTransferEnableEpoch represents the epoch when EGLD in MultiTransfer is enabled
+    EGLDInMultiTransferEnableEpoch = 98
+
+    # CryptoOpcodesV2EnableEpoch represents the epoch when BLSMultiSig, Secp256r1 and other opcodes are enabled
+    CryptoOpcodesV2EnableEpoch = 99
+
+    # FixRelayedBaseCostEnableEpoch represents the epoch when the fix for relayed base cost will be enabled
+    FixRelayedBaseCostEnableEpoch = 100
+
+    # MultiESDTNFTTransferAndExecuteByUserEnableEpoch represents the epoch when enshrined sovereign cross chain opcodes are enabled
+    MultiESDTNFTTransferAndExecuteByUserEnableEpoch = 101
+
+	# FixRelayedMoveBalanceToNonPayableSCEnableEpoch represents the epoch when the fix for relayed move balance to non payable sc will be enabled
+    FixRelayedMoveBalanceToNonPayableSCEnableEpoch = 102
+
+	# RelayedTransactionsV3EnableEpoch represents the epoch when the relayed transactions v3 will be enabled
+    RelayedTransactionsV3EnableEpoch = 103
+
+	# RelayedTransactionsV3FixESDTTransferEnableEpoch represents the epoch when the fix for relayed transactions v3 with esdt transfer will be enabled
+    RelayedTransactionsV3FixESDTTransferEnableEpoch = 104
+
+	# AndromedaEnableEpoch represents the epoch when the equivalent messages are enabled
+	AndromedaEnableEpoch = 105
+
+    # CheckBuiltInCallOnTransferValueAndFailEnableRound represents the ROUND when the check on transfer value fix is activated
+    CheckBuiltInCallOnTransferValueAndFailEnableRound = 106
+
+	# MaskVMInternalDependenciesErrorsEnableEpoch represents the epoch when the additional internal erorr masking in vm is enabled
+	MaskVMInternalDependenciesErrorsEnableEpoch = 107
+
+	# FixBackTransferOPCODEEnableEpoch represents the epoch when the fix for back transfers opcode will be enabled
+	FixBackTransferOPCODEEnableEpoch = 108
+
+	# ValidationOnGobDecodeEnableEpoch represents the epoch when validation on GobDecode will be taken into account
+    ValidationOnGobDecodeEnableEpoch = 109
+
+	# BarnardOpcodesEnableEpoch represents the epoch when Barnard opcodes will be enabled
+	BarnardOpcodesEnableEpoch = 110
+
+    # AutomaticActivationOfNodesDisableEpoch represents the epoch when automatic activation of nodes for validators is disabled
+    AutomaticActivationOfNodesDisableEpoch = 111
+
+    # FixGetBalanceEnableEpoch represents the epoch when get balance opcode fix is enabled
+    FixGetBalanceEnableEpoch = 112
+
+    # RelayedTransactionsV1V2DisableEpoch represents the epoch when relayed transactions v1 and v2 are disabled
+    RelayedTransactionsV1V2DisableEpoch = 113
+
+    # ConsumedGasInEconomicsFixEnableEpoch represents the epoch when consumed gas in accumulated economics is fixed
+    ConsumedGasInEconomicsFixEnableEpoch = 114
+
+    # AttributeExtraGasUsageEnableEpoch represents the epoch when the extra gas usage for attributes is enabled
+    AttributeExtraGasUsageEnableEpoch = 115
+
+    # FixCorrectSmallIntAndGasLimitsEnableEpoch represents the epoch when the fix for signed small int encoding and gas loopholes is enabled
+    FixCorrectSmallIntAndGasLimitsEnableEpoch = 116
+
+    # OutputRollbackOnDestContextEnableEpoch represents the epoch when output state rollback on failed destination context calls is enabled
+    OutputRollbackOnDestContextEnableEpoch = 117
+
+    # SupernovaEnableEpoch represents the epoch when sub-second finality will be enabled
+    SupernovaEnableEpoch = 118
+
+    # FixEpochChangeProposedCurrentEpochEnableEpoch represents the epoch when epoch change proposed blocks expose the prepared epoch
+    FixEpochChangeProposedCurrentEpochEnableEpoch = 119
+
+    # MaxNodesChangeEnableEpoch holds configuration for changing the maximum number of nodes and the enabling epoch
+    MaxNodesChangeEnableEpoch = [
+        { EpochEnable = 44, MaxNumNodes = 2169, NodesToShufflePerShard = 80 },
+        { EpochEnable = 45, MaxNumNodes = 3200, NodesToShufflePerShard = 80 }
+    ]
+
+    BLSMultiSignerEnableEpoch = [
+        {EnableEpoch = 0, Type = "no-KOSK"},
+        {EnableEpoch = 3, Type = "KOSK"}
+    ]
+	
+[GasSchedule]
+    GasScheduleByEpochs = [
+        { StartEpoch = 46, FileName = "gasScheduleV1.toml" },
+        { StartEpoch = 47, FileName = "gasScheduleV3.toml" },
+    ]
+`
+
+	expectedCfg := EpochConfig{
+		EnableEpochs: EnableEpochs{
+			SCDeployEnableEpoch:                                      1,
+			BuiltInFunctionsEnableEpoch:                              2,
+			RelayedTransactionsEnableEpoch:                           3,
+			PenalizedTooMuchGasEnableEpoch:                           4,
+			SwitchJailWaitingEnableEpoch:                             5,
+			BelowSignedThresholdEnableEpoch:                          6,
+			SwitchHysteresisForMinNodesEnableEpoch:                   7,
+			TransactionSignedWithTxHashEnableEpoch:                   8,
+			MetaProtectionEnableEpoch:                                9,
+			AheadOfTimeGasUsageEnableEpoch:                           10,
+			GasPriceModifierEnableEpoch:                              11,
+			RepairCallbackEnableEpoch:                                12,
+			BlockGasAndFeesReCheckEnableEpoch:                        13,
+			BalanceWaitingListsEnableEpoch:                           14,
+			ReturnDataToLastTransferEnableEpoch:                      15,
+			SenderInOutTransferEnableEpoch:                           16,
+			StakeEnableEpoch:                                         17,
+			StakingV2EnableEpoch:                                     18,
+			DoubleKeyProtectionEnableEpoch:                           19,
+			ESDTEnableEpoch:                                          20,
+			GovernanceEnableEpoch:                                    21,
+			GovernanceDisableProposeEnableEpoch:                      22,
+			GovernanceFixesEnableEpoch:                               23,
+			DelegationManagerEnableEpoch:                             22,
+			DelegationSmartContractEnableEpoch:                       23,
+			CorrectLastUnjailedEnableEpoch:                           24,
+			RelayedTransactionsV2EnableEpoch:                         25,
+			UnbondTokensV2EnableEpoch:                                26,
+			SaveJailedAlwaysEnableEpoch:                              27,
+			ReDelegateBelowMinCheckEnableEpoch:                       28,
+			ValidatorToDelegationEnableEpoch:                         29,
+			IncrementSCRNonceInMultiTransferEnableEpoch:              31,
+			ESDTMultiTransferEnableEpoch:                             32,
+			GlobalMintBurnDisableEpoch:                               33,
+			ESDTTransferRoleEnableEpoch:                              34,
+			ComputeRewardCheckpointEnableEpoch:                       36,
+			SCRSizeInvariantCheckEnableEpoch:                         37,
+			BackwardCompSaveKeyValueEnableEpoch:                      38,
+			ESDTNFTCreateOnMultiShardEnableEpoch:                     39,
+			MetaESDTSetEnableEpoch:                                   40,
+			AddTokensToDelegationEnableEpoch:                         41,
+			MultiESDTTransferFixOnCallBackOnEnableEpoch:              42,
+			OptimizeGasUsedInCrossMiniBlocksEnableEpoch:              43,
+			CorrectFirstQueuedEpoch:                                  44,
+			DeleteDelegatorAfterClaimRewardsEnableEpoch:              45,
+			FixOOGReturnCodeEnableEpoch:                              46,
+			RemoveNonUpdatedStorageEnableEpoch:                       47,
+			OptimizeNFTStoreEnableEpoch:                              48,
+			CreateNFTThroughExecByCallerEnableEpoch:                  49,
+			StopDecreasingValidatorRatingWhenStuckEnableEpoch:        50,
+			FrontRunningProtectionEnableEpoch:                        51,
+			IsPayableBySCEnableEpoch:                                 52,
+			CleanUpInformativeSCRsEnableEpoch:                        53,
+			StorageAPICostOptimizationEnableEpoch:                    54,
+			ESDTRegisterAndSetAllRolesEnableEpoch:                    56,
+			ScheduledMiniBlocksEnableEpoch:                           57,
+			CorrectJailedNotUnstakedEmptyQueueEpoch:                  58,
+			DoNotReturnOldBlockInBlockchainHookEnableEpoch:           59,
+			AddFailedRelayedTxToInvalidMBsDisableEpoch:               60,
+			SCRSizeInvariantOnBuiltInResultEnableEpoch:               61,
+			CheckCorrectTokenIDForTransferRoleEnableEpoch:            62,
+			DisableExecByCallerEnableEpoch:                           63,
+			RefactorContextEnableEpoch:                               64,
+			FailExecutionOnEveryAPIErrorEnableEpoch:                  65,
+			ManagedCryptoAPIsEnableEpoch:                             66,
+			CheckFunctionArgumentEnableEpoch:                         67,
+			CheckExecuteOnReadOnlyEnableEpoch:                        68,
+			ESDTMetadataContinuousCleanupEnableEpoch:                 69,
+			MiniBlockPartialExecutionEnableEpoch:                     70,
+			FixAsyncCallBackArgsListEnableEpoch:                      71,
+			FixOldTokenLiquidityEnableEpoch:                          72,
+			RuntimeMemStoreLimitEnableEpoch:                          73,
+			SetSenderInEeiOutputTransferEnableEpoch:                  74,
+			RefactorPeersMiniBlocksEnableEpoch:                       75,
+			MaxBlockchainHookCountersEnableEpoch:                     76,
+			WipeSingleNFTLiquidityDecreaseEnableEpoch:                77,
+			AlwaysSaveTokenMetaDataEnableEpoch:                       78,
+			RuntimeCodeSizeFixEnableEpoch:                            79,
+			RelayedNonceFixEnableEpoch:                               80,
+			SetGuardianEnableEpoch:                                   81,
+			AutoBalanceDataTriesEnableEpoch:                          82,
+			KeepExecOrderOnCreatedSCRsEnableEpoch:                    83,
+			MultiClaimOnDelegationEnableEpoch:                        84,
+			ChangeUsernameEnableEpoch:                                85,
+			ConsistentTokensValuesLengthCheckEnableEpoch:             86,
+			FixDelegationChangeOwnerOnAccountEnableEpoch:             87,
+			ScToScLogEventEnableEpoch:                                88,
+			NFTStopCreateEnableEpoch:                                 89,
+			ChangeOwnerAddressCrossShardThroughSCEnableEpoch:         90,
+			FixGasRemainingForSaveKeyValueBuiltinFunctionEnableEpoch: 91,
+			MigrateDataTrieEnableEpoch:                               92,
+			CurrentRandomnessOnSortingEnableEpoch:                    93,
+			AlwaysMergeContextsInEEIEnableEpoch:                      94,
+			CleanupAuctionOnLowWaitingListEnableEpoch:                95,
+			UseGasBoundedShouldFailExecutionEnableEpoch:              96,
+			DynamicESDTEnableEpoch:                                   97,
+			EGLDInMultiTransferEnableEpoch:                           98,
+			CryptoOpcodesV2EnableEpoch:                               99,
+			FixRelayedBaseCostEnableEpoch:                            100,
+			MultiESDTNFTTransferAndExecuteByUserEnableEpoch:          101,
+			FixRelayedMoveBalanceToNonPayableSCEnableEpoch:           102,
+			RelayedTransactionsV3EnableEpoch:                         103,
+			RelayedTransactionsV3FixESDTTransferEnableEpoch:          104,
+			AndromedaEnableEpoch:                                     105,
+			CheckBuiltInCallOnTransferValueAndFailEnableRound:        106,
+			MaskVMInternalDependenciesErrorsEnableEpoch:              107,
+			FixBackTransferOPCODEEnableEpoch:                         108,
+			ValidationOnGobDecodeEnableEpoch:                         109,
+			BarnardOpcodesEnableEpoch:                                110,
+			AutomaticActivationOfNodesDisableEpoch:                   111,
+			FixGetBalanceEnableEpoch:                                 112,
+			RelayedTransactionsV1V2DisableEpoch:                      113,
+			ConsumedGasInEconomicsFixEnableEpoch:                     114,
+			AttributeExtraGasUsageEnableEpoch:                        115,
+			FixCorrectSmallIntAndGasLimitsEnableEpoch:                116,
+			OutputRollbackOnDestContextEnableEpoch:                   117,
+			SupernovaEnableEpoch:                                     118,
+			FixEpochChangeProposedCurrentEpochEnableEpoch:            119,
+			MaxNodesChangeEnableEpoch: []MaxNodesChangeConfig{
+				{
+					EpochEnable:            44,
+					MaxNumNodes:            2169,
+					NodesToShufflePerShard: 80,
+				},
+				{
+					EpochEnable:            45,
+					MaxNumNodes:            3200,
+					NodesToShufflePerShard: 80,
+				},
+			},
+			DeterministicSortOnValidatorsInfoEnableEpoch:    66,
+			DynamicGasCostForDataTrieStorageLoadEnableEpoch: 64,
+			BLSMultiSignerEnableEpoch: []MultiSignerConfig{
+				{
+					EnableEpoch: 0,
+					Type:        "no-KOSK",
+				},
+				{
+					EnableEpoch: 3,
+					Type:        "KOSK",
+				},
+			},
+		},
+
+		GasSchedule: GasScheduleConfig{
+			GasScheduleByEpochs: []GasScheduleByEpochs{
+				{
+					StartEpoch: 46,
+					FileName:   "gasScheduleV1.toml",
+				},
+				{
+					StartEpoch: 47,
+					FileName:   "gasScheduleV3.toml",
+				},
+			},
+		},
+	}
+	cfg := EpochConfig{}
+
+	err := toml.Unmarshal([]byte(testString), &cfg)
+
+	assert.Nil(t, err)
+	assert.Equal(t, expectedCfg, cfg)
+}
+
+func TestEnableRoundsConfig(t *testing.T) {
+	testString := `
+[RoundActivations]
+    [RoundActivations.DisableAsyncCallV1]
+        Options = []
+        Round = "0"
+
+    [RoundActivations.SupernovaEnableRound]
+        Options = []
+        Round = "75"
+`
+
+	expectedCfg := RoundConfig{
+		RoundActivations: map[string]ActivationRoundByName{
+			"DisableAsyncCallV1": {
+				Round:   "0",
+				Options: []string{},
+			},
+			"SupernovaEnableRound": {
+				Round:   "75",
+				Options: []string{},
+			},
+		},
+	}
+	cfg := RoundConfig{}
+
+	err := toml.Unmarshal([]byte(testString), &cfg)
+
+	assert.Nil(t, err)
+	assert.Equal(t, expectedCfg, cfg)
 }

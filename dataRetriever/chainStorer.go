@@ -1,13 +1,16 @@
 package dataRetriever
 
 import (
+	"fmt"
 	"sync"
 
-	"github.com/ElrondNetwork/elrond-go/storage"
+	"github.com/multiversx/mx-chain-go/storage"
 )
 
+var _ StorageService = (*ChainStorer)(nil)
+
 // ChainStorer is a StorageService implementation that can hold multiple storages
-//  grouped by storage unit type
+// grouped by storage unit type
 type ChainStorer struct {
 	lock  sync.RWMutex
 	chain map[UnitType]storage.Storer
@@ -27,13 +30,17 @@ func (bc *ChainStorer) AddStorer(key UnitType, s storage.Storer) {
 	bc.lock.Unlock()
 }
 
-// GetStorer returns the storer from the chain map or nil if the storer was not found
-func (bc *ChainStorer) GetStorer(unitType UnitType) storage.Storer {
+// GetStorer returns the storer from the chain map or nil if the storer was not found with error
+func (bc *ChainStorer) GetStorer(unitType UnitType) (storage.Storer, error) {
 	bc.lock.RLock()
-	storer := bc.chain[unitType]
+	storer, ok := bc.chain[unitType]
 	bc.lock.RUnlock()
 
-	return storer
+	if !ok {
+		return nil, fmt.Errorf("%s %w", unitType.String(), ErrStorerNotFound)
+	}
+
+	return storer, nil
 }
 
 // Has returns true if the key is found in the selected Unit or false otherwise
@@ -75,10 +82,27 @@ func (bc *ChainStorer) Put(unitType UnitType, key []byte, value []byte) error {
 	bc.lock.RUnlock()
 
 	if storer == nil {
-		return ErrNoSuchStorageUnit
+		return fmt.Errorf("%w for unit type %s", ErrNoSuchStorageUnit, unitType.String())
 	}
 
 	return storer.Put(key, value)
+}
+
+// SetEpochForPutOperation will set the epoch to be used in all persisters for the put operation
+func (bc *ChainStorer) SetEpochForPutOperation(epoch uint32) {
+	// read lock: the chain map is only iterated here, each storer guards its own epoch. A write lock
+	// would park every concurrent reader behind this call, which runs on each committed block
+	bc.lock.RLock()
+	defer bc.lock.RUnlock()
+
+	for _, storer := range bc.chain {
+		storerWithPutInEpoch, ok := storer.(storage.StorerWithPutInEpoch)
+		if !ok {
+			continue
+		}
+
+		storerWithPutInEpoch.SetEpochForPutOperation(epoch)
+	}
 }
 
 // GetAll gets all the elements with keys in the keys array, from the selected storage unit
@@ -108,6 +132,18 @@ func (bc *ChainStorer) GetAll(unitType UnitType, keys [][]byte) (map[string][]by
 	return m, nil
 }
 
+// GetAllStorers returns all the available storers
+func (bc *ChainStorer) GetAllStorers() map[UnitType]storage.Storer {
+	bc.lock.RLock()
+	chainMapCopy := make(map[UnitType]storage.Storer, len(bc.chain))
+	for key, value := range bc.chain {
+		chainMapCopy[key] = value
+	}
+	bc.lock.RUnlock()
+
+	return chainMapCopy
+}
+
 // Destroy removes the underlying files/resources used by the storage service
 func (bc *ChainStorer) Destroy() error {
 	bc.lock.Lock()
@@ -125,10 +161,27 @@ func (bc *ChainStorer) Destroy() error {
 	return nil
 }
 
+// CloseAll will close all the active units
+func (bc *ChainStorer) CloseAll() error {
+	bc.lock.Lock()
+	defer bc.lock.Unlock()
+
+	closedSuccessfully := true
+	for _, unit := range bc.chain {
+		err := unit.Close()
+		if err != nil {
+			closedSuccessfully = false
+		}
+	}
+
+	if closedSuccessfully {
+		return nil
+	}
+
+	return storage.ErrClosingPersisters
+}
+
 // IsInterfaceNil returns true if there is no value under the interface
 func (bc *ChainStorer) IsInterfaceNil() bool {
-	if bc == nil {
-		return true
-	}
-	return false
+	return bc == nil
 }

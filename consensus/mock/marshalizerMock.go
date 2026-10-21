@@ -5,6 +5,7 @@ import (
 	"errors"
 )
 
+// ErrMockMarshalizer -
 var ErrMockMarshalizer = errors.New("MarshalizerMock generic error")
 
 // MarshalizerMock that will be used for testing
@@ -46,15 +47,7 @@ func (mm MarshalizerMock) Unmarshal(obj interface{}, buff []byte) error {
 	return json.Unmarshal(buff, obj)
 }
 
-// Version is deprecated and will be removed
-func (MarshalizerMock) Version() string {
-	return "JSON/v.0.0.0.1"
-}
-
 // IsInterfaceNil returns true if there is no value under the interface
 func (mm MarshalizerMock) IsInterfaceNil() bool {
-	if &mm == nil {
-		return true
-	}
 	return false
 }

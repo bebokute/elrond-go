@@ -1,0 +1,195 @@
+package interceptors
+
+import (
+	"fmt"
+	"sync"
+
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/core/check"
+	"github.com/multiversx/mx-chain-core-go/data"
+	"github.com/multiversx/mx-chain-core-go/hashing"
+	"github.com/multiversx/mx-chain-core-go/marshal"
+
+	"github.com/multiversx/mx-chain-go/p2p"
+	"github.com/multiversx/mx-chain-go/process"
+	"github.com/multiversx/mx-chain-go/process/factory"
+)
+
+// ArgsEpochStartMetaBlockInterceptor holds the arguments needed for creating a new epochStartMetaBlockInterceptor
+type ArgsEpochStartMetaBlockInterceptor struct {
+	Marshalizer               marshal.Marshalizer
+	Hasher                    hashing.Hasher
+	NumConnectedPeersProvider process.NumConnectedPeersProvider
+	ConsensusPercentage       int
+}
+
+type epochStartMetaBlockInterceptor struct {
+	marshalizer               marshal.Marshalizer
+	hasher                    hashing.Hasher
+	numConnectedPeersProvider process.NumConnectedPeersProvider
+	consensusPercentage       float32
+
+	mutReceivedMetaBlocks  sync.RWMutex
+	mapReceivedMetaBlocks  map[string]data.MetaHeaderHandler
+	mapMetaBlocksFromPeers map[string][]core.PeerID
+
+	registeredHandlers []func(topic string, hash []byte, data interface{})
+	mutHandlers        sync.RWMutex
+}
+
+// NewEpochStartMetaBlockInterceptor returns a new instance of epochStartMetaBlockInterceptor
+func NewEpochStartMetaBlockInterceptor(args ArgsEpochStartMetaBlockInterceptor) (*epochStartMetaBlockInterceptor, error) {
+	err := checkArgs(args)
+	if err != nil {
+		return nil, err
+	}
+
+	consensusPercentageFloat := float32(args.ConsensusPercentage) / 100.0
+	return &epochStartMetaBlockInterceptor{
+		marshalizer:               args.Marshalizer,
+		hasher:                    args.Hasher,
+		numConnectedPeersProvider: args.NumConnectedPeersProvider,
+		consensusPercentage:       consensusPercentageFloat,
+		mapReceivedMetaBlocks:     make(map[string]data.MetaHeaderHandler),
+		mapMetaBlocksFromPeers:    make(map[string][]core.PeerID),
+		registeredHandlers:        make([]func(topic string, hash []byte, data interface{}), 0),
+	}, nil
+}
+
+// ProcessReceivedMessage will handle received messages containing epoch start meta blocks
+func (e *epochStartMetaBlockInterceptor) ProcessReceivedMessage(message p2p.MessageP2P, fromConnectedPeer core.PeerID, _ p2p.MessageHandler) ([]byte, error) {
+	epochStartMb, err := process.UnmarshalMetaHeader(e.marshalizer, message.Data())
+	if err != nil {
+		return nil, err
+	}
+
+	mbHash, err := core.CalculateHash(e.marshalizer, e.hasher, epochStartMb)
+	if err != nil {
+		return nil, err
+	}
+
+	if !epochStartMb.IsStartOfEpochBlock() {
+		log.Trace("epochStartMetaBlockInterceptor-ProcessReceivedMessage: received meta block is not of "+
+			"type epoch start meta block", "hash", mbHash)
+		return nil, process.ErrNotEpochStartBlock
+	}
+
+	log.Trace("received epoch start meta", "epoch", epochStartMb.GetEpoch(), "from peer", fromConnectedPeer.Pretty())
+	e.mutReceivedMetaBlocks.Lock()
+	e.mapReceivedMetaBlocks[string(mbHash)] = epochStartMb
+	e.addToPeerList(string(mbHash), fromConnectedPeer)
+	e.mutReceivedMetaBlocks.Unlock()
+
+	metaBlock, found := e.checkMaps()
+	if !found {
+		return mbHash, nil
+	}
+
+	e.handleFoundEpochStartMetaBlock(metaBlock)
+	return mbHash, nil
+}
+
+// this func should be called under mutex protection
+func (e *epochStartMetaBlockInterceptor) addToPeerList(hash string, peer core.PeerID) {
+	peersListForHash := e.mapMetaBlocksFromPeers[hash]
+	for _, pid := range peersListForHash {
+		if pid == peer {
+			return
+		}
+	}
+	e.mapMetaBlocksFromPeers[hash] = append(e.mapMetaBlocksFromPeers[hash], peer)
+}
+
+func (e *epochStartMetaBlockInterceptor) checkMaps() (data.MetaHeaderHandler, bool) {
+	e.mutReceivedMetaBlocks.RLock()
+	defer e.mutReceivedMetaBlocks.RUnlock()
+
+	numConnectedPeers := len(e.numConnectedPeersProvider.ConnectedPeers())
+	numPeersTarget := int(float32(numConnectedPeers) * e.consensusPercentage)
+	for hash, peersList := range e.mapMetaBlocksFromPeers {
+		log.Trace("metablock from peers", "num peers", len(peersList), "hash", []byte(hash))
+		metaBlock, found := e.processEntry(peersList, hash, numPeersTarget)
+		if found {
+			return metaBlock, true
+		}
+	}
+
+	return nil, false
+}
+
+func (e *epochStartMetaBlockInterceptor) processEntry(
+	peersList []core.PeerID,
+	hash string,
+	numPeersTarget int,
+) (data.MetaHeaderHandler, bool) {
+	if len(peersList) >= numPeersTarget {
+		log.Debug("got consensus for epoch start metablock", "len", len(peersList))
+		return e.mapReceivedMetaBlocks[hash], true
+	}
+
+	return nil, false
+}
+
+// SetInterceptedDebugHandler won't do anything
+func (e *epochStartMetaBlockInterceptor) SetInterceptedDebugHandler(_ process.InterceptedDebugger) error {
+	return nil
+}
+
+// RegisterHandler will append the handler to the slice, so it will be called when the epoch start meta block is fetched
+func (e *epochStartMetaBlockInterceptor) RegisterHandler(handler func(topic string, hash []byte, data interface{})) {
+	if handler == nil {
+		return
+	}
+
+	e.mutHandlers.Lock()
+	e.registeredHandlers = append(e.registeredHandlers, handler)
+	e.mutHandlers.Unlock()
+}
+
+func (e *epochStartMetaBlockInterceptor) handleFoundEpochStartMetaBlock(metaBlock data.MetaHeaderHandler) {
+	e.mutHandlers.RLock()
+	for _, handler := range e.registeredHandlers {
+		handler(factory.MetachainBlocksTopic, []byte(""), metaBlock)
+	}
+	e.mutHandlers.RUnlock()
+
+	e.resetMaps()
+}
+
+func (e *epochStartMetaBlockInterceptor) resetMaps() {
+	e.mutReceivedMetaBlocks.Lock()
+	e.mapMetaBlocksFromPeers = make(map[string][]core.PeerID)
+	e.mapReceivedMetaBlocks = make(map[string]data.MetaHeaderHandler)
+	e.mutReceivedMetaBlocks.Unlock()
+}
+
+// Close returns nil
+func (e *epochStartMetaBlockInterceptor) Close() error {
+	return nil
+}
+
+// IsInterfaceNil returns true if there is no value under the interface
+func (e *epochStartMetaBlockInterceptor) IsInterfaceNil() bool {
+	return e == nil
+}
+
+func checkArgs(args ArgsEpochStartMetaBlockInterceptor) error {
+	if check.IfNil(args.Marshalizer) {
+		return wrapArgsError(process.ErrNilMarshalizer)
+	}
+	if check.IfNil(args.Hasher) {
+		return wrapArgsError(process.ErrNilHasher)
+	}
+	if check.IfNil(args.NumConnectedPeersProvider) {
+		return wrapArgsError(process.ErrNilNumConnectedPeersProvider)
+	}
+	if !(args.ConsensusPercentage >= 0 && args.ConsensusPercentage <= 100) {
+		return wrapArgsError(process.ErrInvalidEpochStartMetaBlockConsensusPercentage)
+	}
+
+	return nil
+}
+
+func wrapArgsError(err error) error {
+	return fmt.Errorf("%w when creating epochStartMetaBlockInterceptor", err)
+}

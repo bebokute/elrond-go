@@ -1,0 +1,225 @@
+package resolvers
+
+import (
+	"errors"
+	"fmt"
+	"runtime/debug"
+
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/core/check"
+	"github.com/multiversx/mx-chain-core-go/data/batch"
+	logger "github.com/multiversx/mx-chain-logger-go"
+
+	"github.com/multiversx/mx-chain-go/dataRetriever"
+	"github.com/multiversx/mx-chain-go/p2p"
+	"github.com/multiversx/mx-chain-go/storage"
+)
+
+var _ dataRetriever.Resolver = (*miniblockResolver)(nil)
+
+// ArgMiniblockResolver is the argument structure used to create a new miniblockResolver instance
+type ArgMiniblockResolver struct {
+	ArgBaseResolver
+	MiniBlockPool     storage.Cacher
+	MiniBlockStorage  storage.Storer
+	DataPacker        dataRetriever.DataPacker
+	IsFullHistoryNode bool
+}
+
+// miniblockResolver is a wrapper over Resolver that is specialized in resolving miniblocks requests
+// TODO extract common functionality between this and transactionResolver
+type miniblockResolver struct {
+	*baseResolver
+	messageProcessor
+	baseStorageResolver
+	miniBlockPool storage.Cacher
+	dataPacker    dataRetriever.DataPacker
+}
+
+// NewMiniblockResolver creates a miniblock resolver
+func NewMiniblockResolver(arg ArgMiniblockResolver) (*miniblockResolver, error) {
+	err := checkArgMiniblockResolver(arg)
+	if err != nil {
+		return nil, err
+	}
+
+	mbResolver := &miniblockResolver{
+		baseResolver: &baseResolver{
+			TopicResolverSender: arg.SenderResolver,
+		},
+		miniBlockPool:       arg.MiniBlockPool,
+		baseStorageResolver: createBaseStorageResolver(arg.MiniBlockStorage, arg.IsFullHistoryNode),
+		dataPacker:          arg.DataPacker,
+		messageProcessor: messageProcessor{
+			marshalizer:      arg.Marshaller,
+			antifloodHandler: arg.AntifloodHandler,
+			topic:            arg.SenderResolver.RequestTopic(),
+			throttler:        arg.Throttler,
+		},
+	}
+
+	return mbResolver, nil
+}
+
+func checkArgMiniblockResolver(arg ArgMiniblockResolver) error {
+	err := checkArgBase(arg.ArgBaseResolver)
+	if err != nil {
+		return err
+	}
+	if check.IfNil(arg.MiniBlockPool) {
+		return dataRetriever.ErrNilMiniblocksPool
+	}
+	if check.IfNil(arg.MiniBlockStorage) {
+		return dataRetriever.ErrNilMiniblocksStorage
+	}
+	if check.IfNil(arg.DataPacker) {
+		return dataRetriever.ErrNilDataPacker
+	}
+	return nil
+}
+
+// ProcessReceivedMessage will be the callback func from the p2p.Messenger and will be called each time a new message was received
+// (for the topic this validator was registered to, usually a request topic)
+func (mbRes *miniblockResolver) ProcessReceivedMessage(message p2p.MessageP2P, fromConnectedPeer core.PeerID, source p2p.MessageHandler) (msg []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			logTrieNodes.Error("panic recovered", "peer", fromConnectedPeer, "panic", r, "stack", string(debug.Stack()))
+			err = fmt.Errorf("panic in miniblockResolver.ProcessReceivedMessage: %v", r)
+		}
+	}()
+
+	err = mbRes.canProcessMessage(message, fromConnectedPeer)
+	if err != nil {
+		return nil, err
+	}
+
+	mbRes.throttler.StartProcessing()
+	defer mbRes.throttler.EndProcessing()
+
+	rd, err := mbRes.parseReceivedMessage(message, fromConnectedPeer)
+	if err != nil {
+		return nil, err
+	}
+
+	switch rd.Type {
+	case dataRetriever.HashType:
+		err = validateRequestedHashSize(rd.Value)
+		if err != nil {
+			return nil, err
+		}
+		err = mbRes.resolveMbRequestByHash(rd.Value, message.Peer(), rd.Epoch, source)
+	case dataRetriever.HashArrayType:
+		err = mbRes.resolveMbRequestByHashArray(rd.Value, message.Peer(), rd.Epoch, source, fromConnectedPeer, message.SeqNo())
+	default:
+		err = dataRetriever.ErrRequestTypeNotImplemented
+	}
+
+	if err != nil {
+		if errors.Is(err, dataRetriever.ErrBadRequest) {
+			return nil, err
+		}
+
+		return nil, fmt.Errorf("%w for hash %s", err, logger.DisplayByteSlice(rd.Value))
+	}
+
+	return []byte{}, nil
+}
+
+func (mbRes *miniblockResolver) resolveMbRequestByHash(hash []byte, pid core.PeerID, epoch uint32, source p2p.MessageHandler) error {
+	mb, err := mbRes.fetchMbAsByteSlice(hash, epoch)
+	if err != nil {
+		return err
+	}
+
+	b := &batch.Batch{
+		Data: [][]byte{mb},
+	}
+	buffToSend, err := mbRes.marshalizer.Marshal(b)
+	if err != nil {
+		return err
+	}
+
+	return mbRes.Send(buffToSend, pid, source)
+}
+
+func (mbRes *miniblockResolver) fetchMbAsByteSlice(hash []byte, epoch uint32) ([]byte, error) {
+	value, ok := mbRes.miniBlockPool.Peek(hash)
+	if ok {
+		return mbRes.marshalizer.Marshal(value)
+	}
+
+	buff, err := mbRes.getFromStorage(hash, epoch)
+	if err != nil {
+		mbRes.DebugHandler().LogFailedToResolveData(
+			mbRes.topic,
+			hash,
+			err,
+		)
+
+		return nil, err
+	}
+
+	mbRes.DebugHandler().LogSucceededToResolveData(mbRes.topic, hash)
+
+	return buff, nil
+}
+
+func (mbRes *miniblockResolver) resolveMbRequestByHashArray(
+	mbBuff []byte,
+	pid core.PeerID,
+	epoch uint32,
+	source p2p.MessageHandler,
+	fromConnectedPeer core.PeerID,
+	sequence []byte,
+) error {
+	hashes, err := mbRes.parseRequestedHashesWithPartialResponse(mbBuff, fromConnectedPeer, sequence)
+	if err != nil {
+		return err
+	}
+	err = validateRequestedHashesSize(hashes)
+	if err != nil {
+		return err
+	}
+
+	var errFetch error
+	errorsFound := 0
+	reply := newHashArrayReply()
+	for _, hash := range hashes {
+		mb, errTemp := mbRes.fetchMbAsByteSlice(hash, epoch)
+		if errTemp != nil {
+			errFetch = fmt.Errorf("%w for hash %s", errTemp, logger.DisplayByteSlice(hash))
+			log.Trace("fetchMbAsByteSlice missing",
+				"error", errFetch.Error(),
+				"hash", hash)
+			errorsFound++
+
+			continue
+		}
+		if !reply.add(mb) {
+			break
+		}
+	}
+
+	buffsToSend, errPack := mbRes.dataPacker.PackDataInChunks(reply.data, maxBuffToSendBulkMiniblocks)
+	if errPack != nil {
+		return errPack
+	}
+
+	for _, buff := range buffsToSend {
+		errSend := mbRes.Send(buff, pid, source)
+		if errSend != nil {
+			return errSend
+		}
+	}
+
+	if errFetch != nil {
+		errFetch = fmt.Errorf("resolveMbRequestByHashArray last error %w from %d encountered errors", errFetch, errorsFound)
+	}
+
+	return errFetch
+}
+
+// IsInterfaceNil returns true if there is no value under the interface
+func (mbRes *miniblockResolver) IsInterfaceNil() bool {
+	return mbRes == nil
+}

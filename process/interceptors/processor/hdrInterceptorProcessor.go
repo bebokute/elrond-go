@@ -1,0 +1,122 @@
+package processor
+
+import (
+	"sync"
+
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/core/check"
+	"github.com/multiversx/mx-chain-core-go/data"
+	"github.com/multiversx/mx-chain-go/p2p"
+
+	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/dataRetriever"
+	"github.com/multiversx/mx-chain-go/process"
+)
+
+var _ process.InterceptorProcessor = (*HdrInterceptorProcessor)(nil)
+
+// HdrInterceptorProcessor is the processor used when intercepting headers
+// (shard headers, meta headers) structs which satisfy HeaderHandler interface.
+type HdrInterceptorProcessor struct {
+	headers             dataRetriever.HeadersPool
+	proofs              dataRetriever.ProofsPool
+	blackList           process.TimeCacher
+	enableEpochsHandler common.EnableEpochsHandler
+	roundExclusions     common.RoundExclusionHandler
+	registeredHandlers  []func(topic string, hash []byte, data interface{})
+	mutHandlers         sync.RWMutex
+}
+
+// NewHdrInterceptorProcessor creates a new TxInterceptorProcessor instance
+func NewHdrInterceptorProcessor(argument *ArgHdrInterceptorProcessor) (*HdrInterceptorProcessor, error) {
+	if argument == nil {
+		return nil, process.ErrNilArgumentStruct
+	}
+	if check.IfNil(argument.Headers) {
+		return nil, process.ErrNilCacher
+	}
+	if check.IfNil(argument.Proofs) {
+		return nil, process.ErrNilProofsPool
+	}
+	if check.IfNil(argument.BlockBlackList) {
+		return nil, process.ErrNilBlackListCacher
+	}
+	if check.IfNil(argument.EnableEpochsHandler) {
+		return nil, process.ErrNilEnableEpochsHandler
+	}
+	if check.IfNil(argument.RoundExclusions) {
+		return nil, common.ErrNilRoundExclusionHandler
+	}
+
+	return &HdrInterceptorProcessor{
+		headers:             argument.Headers,
+		proofs:              argument.Proofs,
+		blackList:           argument.BlockBlackList,
+		enableEpochsHandler: argument.EnableEpochsHandler,
+		roundExclusions:     argument.RoundExclusions,
+		registeredHandlers:  make([]func(topic string, hash []byte, data interface{}), 0),
+	}, nil
+}
+
+// Validate checks if the intercepted data can be processed
+func (hip *HdrInterceptorProcessor) Validate(data process.InterceptedData, _ core.PeerID) error {
+	interceptedHdr, ok := data.(process.HdrValidatorHandler)
+	if !ok {
+		return process.ErrWrongTypeAssertion
+	}
+	header := interceptedHdr.HeaderHandler()
+	if !check.IfNil(header) && common.IsHeaderExcluded(hip.roundExclusions, header.GetRound(), header.GetShardID(), interceptedHdr.Hash()) {
+		return common.ErrRoundExcluded
+	}
+
+	hip.blackList.Sweep()
+	isBlackListed := hip.blackList.Has(string(interceptedHdr.Hash()))
+	if isBlackListed {
+		return process.ErrHeaderIsBlackListed
+	}
+
+	return nil
+}
+
+// Save will save the received data into the headers cacher as hash<->[plain header structure]
+// and in headersNonces as nonce<->hash
+func (hip *HdrInterceptorProcessor) Save(data process.InterceptedData, _ core.PeerID, topic string, _ p2p.BroadcastMethod) (bool, error) {
+	interceptedHdr, ok := data.(process.HdrValidatorHandler)
+	if !ok {
+		return false, process.ErrWrongTypeAssertion
+	}
+	header := interceptedHdr.HeaderHandler()
+	if !check.IfNil(header) && common.IsHeaderExcluded(hip.roundExclusions, header.GetRound(), header.GetShardID(), interceptedHdr.Hash()) {
+		return false, common.ErrRoundExcluded
+	}
+
+	go hip.notify(header, interceptedHdr.Hash(), topic)
+
+	hip.headers.AddHeader(interceptedHdr.Hash(), header)
+
+	return true, nil
+}
+
+// RegisterHandler registers a callback function to be notified of incoming headers
+func (hip *HdrInterceptorProcessor) RegisterHandler(handler func(topic string, hash []byte, data interface{})) {
+	if handler == nil {
+		return
+	}
+
+	hip.mutHandlers.Lock()
+	hip.registeredHandlers = append(hip.registeredHandlers, handler)
+	hip.mutHandlers.Unlock()
+}
+
+// IsInterfaceNil returns true if there is no value under the interface
+func (hip *HdrInterceptorProcessor) IsInterfaceNil() bool {
+	return hip == nil
+}
+
+func (hip *HdrInterceptorProcessor) notify(header data.HeaderHandler, hash []byte, topic string) {
+	hip.mutHandlers.RLock()
+	for _, handler := range hip.registeredHandlers {
+		handler(topic, hash, header)
+	}
+	hip.mutHandlers.RUnlock()
+}

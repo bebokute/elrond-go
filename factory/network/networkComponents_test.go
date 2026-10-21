@@ -1,0 +1,190 @@
+package network_test
+
+import (
+	"errors"
+	"testing"
+
+	errorsMx "github.com/multiversx/mx-chain-go/errors"
+	networkComp "github.com/multiversx/mx-chain-go/factory/network"
+	"github.com/multiversx/mx-chain-go/process"
+	componentsMock "github.com/multiversx/mx-chain-go/testscommon/components"
+	"github.com/stretchr/testify/require"
+)
+
+func TestNewNetworkComponentsFactory(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil StatusHandler should error", func(t *testing.T) {
+		t.Parallel()
+
+		args := componentsMock.GetNetworkFactoryArgs()
+		args.StatusHandler = nil
+		ncf, err := networkComp.NewNetworkComponentsFactory(args)
+		require.Nil(t, ncf)
+		require.Equal(t, errorsMx.ErrNilStatusHandler, err)
+	})
+	t.Run("nil core components should error", func(t *testing.T) {
+		t.Parallel()
+
+		args := componentsMock.GetNetworkFactoryArgs()
+		args.CoreComponents = nil
+
+		ncf, err := networkComp.NewNetworkComponentsFactory(args)
+		require.Nil(t, ncf)
+		require.True(t, errors.Is(err, process.ErrNilCoreComponentsHolder))
+	})
+	t.Run("nil Marshalizer should error", func(t *testing.T) {
+		t.Parallel()
+
+		args := componentsMock.GetNetworkFactoryArgs()
+		coreComps := componentsMock.GetDefaultCoreComponents()
+		_ = coreComps.SetInternalMarshalizer(nil)
+		args.CoreComponents = coreComps
+
+		ncf, err := networkComp.NewNetworkComponentsFactory(args)
+		require.Nil(t, ncf)
+		require.True(t, errors.Is(err, errorsMx.ErrNilMarshalizer))
+	})
+	t.Run("nil Syncer should error", func(t *testing.T) {
+		t.Parallel()
+
+		args := componentsMock.GetNetworkFactoryArgs()
+		coreComps := componentsMock.GetDefaultCoreComponents()
+		coreComps.NtpSyncTimer = nil
+		args.CoreComponents = coreComps
+
+		ncf, err := networkComp.NewNetworkComponentsFactory(args)
+		require.Nil(t, ncf)
+		require.Equal(t, errorsMx.ErrNilSyncTimer, err)
+	})
+	t.Run("nil process configs handler, should error", func(t *testing.T) {
+		t.Parallel()
+
+		args := componentsMock.GetNetworkFactoryArgs()
+		coreComps := componentsMock.GetDefaultCoreComponents()
+		coreComps.ProcessConfigsHandlerField = nil
+		args.CoreComponents = coreComps
+
+		ncf, err := networkComp.NewNetworkComponentsFactory(args)
+		require.Nil(t, ncf)
+		require.ErrorIs(t, err, process.ErrNilProcessConfigsHandler)
+	})
+	t.Run("nil CryptoComponents should error", func(t *testing.T) {
+		t.Parallel()
+
+		args := componentsMock.GetNetworkFactoryArgs()
+		args.CryptoComponents = nil
+		ncf, err := networkComp.NewNetworkComponentsFactory(args)
+		require.Nil(t, ncf)
+		require.Equal(t, errorsMx.ErrNilCryptoComponentsHolder, err)
+	})
+	t.Run("invalid node operation mode should error", func(t *testing.T) {
+		t.Parallel()
+
+		args := componentsMock.GetNetworkFactoryArgs()
+		args.NodeOperationMode = "invalid"
+
+		ncf, err := networkComp.NewNetworkComponentsFactory(args)
+		require.Equal(t, errorsMx.ErrInvalidNodeOperationMode, err)
+		require.Nil(t, ncf)
+	})
+	t.Run("should work", func(t *testing.T) {
+		t.Parallel()
+
+		args := componentsMock.GetNetworkFactoryArgs()
+		ncf, err := networkComp.NewNetworkComponentsFactory(args)
+		require.NoError(t, err)
+		require.NotNil(t, ncf)
+	})
+}
+
+func TestNetworkComponentsFactory_Create(t *testing.T) {
+	t.Parallel()
+
+	t.Run("NewPeersHolder fails should error", func(t *testing.T) {
+		t.Parallel()
+
+		args := componentsMock.GetNetworkFactoryArgs()
+		args.PreferredPeersSlices = []string{"invalid peer"}
+
+		ncf, _ := networkComp.NewNetworkComponentsFactory(args)
+
+		nc, err := ncf.Create()
+		require.Error(t, err)
+		require.Nil(t, nc)
+	})
+	t.Run("first NewLRUCache fails should error", func(t *testing.T) {
+		t.Parallel()
+
+		args := componentsMock.GetNetworkFactoryArgs()
+		args.MainConfig.PeersRatingConfig.BadRatedCacheCapacity = 0
+
+		ncf, _ := networkComp.NewNetworkComponentsFactory(args)
+
+		nc, err := ncf.Create()
+		require.Error(t, err)
+		require.Nil(t, nc)
+	})
+	t.Run("second NewLRUCache fails should error", func(t *testing.T) {
+		t.Parallel()
+
+		args := componentsMock.GetNetworkFactoryArgs()
+		args.MainConfig.PeersRatingConfig.TopRatedCacheCapacity = 0
+
+		ncf, _ := networkComp.NewNetworkComponentsFactory(args)
+
+		nc, err := ncf.Create()
+		require.Error(t, err)
+		require.Nil(t, nc)
+	})
+
+	t.Run("NewAntifloodDebugger fails should error", func(t *testing.T) {
+		t.Parallel()
+
+		args := componentsMock.GetNetworkFactoryArgs()
+		args.MainConfig.Antiflood.Enabled = true
+		args.MainConfig.Debug.Antiflood.CacheSize = 0 // NewAntifloodDebugger fails
+
+		ncf, _ := networkComp.NewNetworkComponentsFactory(args)
+
+		nc, err := ncf.Create()
+		require.Error(t, err)
+		require.Nil(t, nc)
+	})
+	t.Run("createPeerHonestyHandler fails should error", func(t *testing.T) {
+		t.Parallel()
+
+		args := componentsMock.GetNetworkFactoryArgs()
+		args.MainConfig.PeerHonesty.Type = "invalid" // createPeerHonestyHandler fails
+
+		ncf, _ := networkComp.NewNetworkComponentsFactory(args)
+
+		nc, err := ncf.Create()
+		require.Error(t, err)
+		require.Nil(t, nc)
+	})
+	t.Run("should work", func(t *testing.T) {
+		t.Parallel()
+
+		args := componentsMock.GetNetworkFactoryArgs()
+		ncf, _ := networkComp.NewNetworkComponentsFactory(args)
+
+		nc, err := ncf.Create()
+		require.NoError(t, err)
+		require.NotNil(t, nc)
+		require.NoError(t, nc.Close())
+	})
+}
+
+func TestNetworkComponents_Close(t *testing.T) {
+	t.Parallel()
+
+	args := componentsMock.GetNetworkFactoryArgs()
+	ncf, _ := networkComp.NewNetworkComponentsFactory(args)
+
+	nc, err := ncf.Create()
+	require.Nil(t, err)
+
+	err = nc.Close()
+	require.NoError(t, err)
+}

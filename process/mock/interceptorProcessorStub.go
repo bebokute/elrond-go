@@ -1,0 +1,36 @@
+package mock
+
+import (
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-go/p2p"
+	"github.com/multiversx/mx-chain-go/process"
+)
+
+// InterceptorProcessorStub -
+type InterceptorProcessorStub struct {
+	ValidateCalled        func(data process.InterceptedData) error
+	SaveCalled            func(data process.InterceptedData) (bool, error)
+	RegisterHandlerCalled func(handler func(topic string, hash []byte, data interface{}))
+}
+
+// Validate -
+func (ips *InterceptorProcessorStub) Validate(data process.InterceptedData, _ core.PeerID) error {
+	return ips.ValidateCalled(data)
+}
+
+// Save -
+func (ips *InterceptorProcessorStub) Save(data process.InterceptedData, _ core.PeerID, _ string, _ p2p.BroadcastMethod) (bool, error) {
+	return ips.SaveCalled(data)
+}
+
+// RegisterHandler -
+func (ips *InterceptorProcessorStub) RegisterHandler(handler func(topic string, hash []byte, data interface{})) {
+	if ips.RegisterHandlerCalled != nil {
+		ips.RegisterHandlerCalled(handler)
+	}
+}
+
+// IsInterfaceNil -
+func (ips *InterceptorProcessorStub) IsInterfaceNil() bool {
+	return ips == nil
+}

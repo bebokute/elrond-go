@@ -1,232 +1,291 @@
 package shardedData
 
 import (
+	"fmt"
 	"sync"
+	"time"
 
-	"github.com/ElrondNetwork/elrond-go/core/logger"
-	"github.com/ElrondNetwork/elrond-go/storage"
-	"github.com/ElrondNetwork/elrond-go/storage/storageUnit"
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/core/counting"
+	"github.com/multiversx/mx-chain-core-go/data"
+	"github.com/multiversx/mx-chain-core-go/data/block"
+	"github.com/multiversx/mx-chain-core-go/marshal"
+	logger "github.com/multiversx/mx-chain-logger-go"
+
+	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/dataRetriever"
+	"github.com/multiversx/mx-chain-go/storage"
+	"github.com/multiversx/mx-chain-go/storage/cache"
+	"github.com/multiversx/mx-chain-go/storage/storageunit"
 )
 
-var log = logger.DefaultLogger()
+var log = logger.GetOrCreate("dataretriever/shardeddata")
+
+var _ dataRetriever.ShardedDataCacherNotifier = (*shardedData)(nil)
+
+const untitledCacheName = "untitled"
 
 // shardedData holds the list of data organised by destination shard
 //
-// The shardStores field maps a cacher, containing data
-//  hashes, to a corresponding identifier. It is able to add or remove
-//  data given the shard id it is associated with. It can
-//  also merge and split pools when required
+//	The shardStores field maps a cacher, containing data
+//	hashes, to a corresponding identifier. It is able to add or remove
+//	data given the shard id it is associated with. It can
+//	also merge and split pools when required
 type shardedData struct {
+	name                string
 	mutShardedDataStore sync.RWMutex
 	// shardedDataStore is a key value store
 	// Each key represents a destination shard id and the value will contain all
-	//  data hashes that have that shard as destination
+	// data hashes that have that shard as destination
 	shardedDataStore map[string]*shardStore
-	cacherConfig     storageUnit.CacheConfig
+	configPrototype  cache.CacheConfig
 
 	mutAddedDataHandlers sync.RWMutex
-	addedDataHandlers    []func(key []byte)
+	addedDataHandlers    []func(key []byte, value interface{})
 }
 
 type shardStore struct {
-	CacheID   string
-	DataStore storage.Cacher
+	cacheID string
+	cache   immunityCache
 }
 
 // NewShardedData is responsible for creating an empty pool of data
-func NewShardedData(cacherConfig storageUnit.CacheConfig) (*shardedData, error) {
-	err := verifyCacherConfig(cacherConfig)
+func NewShardedData(name string, config storageunit.CacheConfig) (*shardedData, error) {
+	log.Debug("NewShardedData", "name", name, "config", config.String())
+
+	configPrototype := cache.CacheConfig{
+		Name:                        untitledCacheName,
+		NumChunks:                   config.Shards,
+		MaxNumItems:                 config.Capacity,
+		MaxNumBytes:                 uint32(config.SizeInBytes),
+		NumItemsToPreemptivelyEvict: storage.ShardedDataNumItemsToPreemptivelyEvict,
+	}
+
+	err := configPrototype.Verify()
 	if err != nil {
 		return nil, err
 	}
 
 	return &shardedData{
-		cacherConfig:         cacherConfig,
-		mutShardedDataStore:  sync.RWMutex{},
-		shardedDataStore:     make(map[string]*shardStore),
-		mutAddedDataHandlers: sync.RWMutex{},
-		addedDataHandlers:    make([]func(key []byte), 0),
+		name:              name,
+		configPrototype:   configPrototype,
+		shardedDataStore:  make(map[string]*shardStore),
+		addedDataHandlers: make([]func(key []byte, value interface{}), 0),
 	}, nil
-}
-
-func verifyCacherConfig(cacherConfig storageUnit.CacheConfig) error {
-	_, err := newShardStore("", cacherConfig)
-	return err
-}
-
-// newShardStore is responsible for creating an empty shardStore
-func newShardStore(cacheId string, cacherConfig storageUnit.CacheConfig) (*shardStore, error) {
-	cacher, err := storageUnit.NewCache(cacherConfig.Type, cacherConfig.Size, cacherConfig.Shards)
-	if err != nil {
-		return nil, err
-	}
-	return &shardStore{
-		CacheID:   cacheId,
-		DataStore: cacher,
-	}, nil
-}
-
-// CreateShardStore is a ShardedData method that is responsible for creating
-//  a new shardStore with cacheId index in the shardedDataStore map
-func (sd *shardedData) CreateShardStore(cacheId string) {
-	sd.mutShardedDataStore.Lock()
-	sd.newShardStoreNoLock(cacheId)
-	sd.mutShardedDataStore.Unlock()
-}
-
-func (sd *shardedData) newShardStoreNoLock(cacheId string) *shardStore {
-	shardStore, err := newShardStore(cacheId, sd.cacherConfig)
-	log.LogIfError(err)
-
-	sd.shardedDataStore[cacheId] = shardStore
-	return shardStore
-}
-
-// ShardStore returns a shard store of data associated with a given destination cacheId
-func (sd *shardedData) ShardStore(cacheId string) *shardStore {
-	sd.mutShardedDataStore.RLock()
-	mp := sd.shardedDataStore[cacheId]
-	sd.mutShardedDataStore.RUnlock()
-	return mp
 }
 
 // ShardDataStore returns the shard data store containing data hashes
-//  associated with a given destination cacheId
-func (sd *shardedData) ShardDataStore(cacheId string) (c storage.Cacher) {
-	mp := sd.ShardStore(cacheId)
-	if mp == nil {
+// associated with a given destination cacheID
+func (sd *shardedData) ShardDataStore(cacheID string) (c storage.Cacher) {
+	store := sd.shardStore(cacheID)
+	if store == nil {
 		return nil
 	}
-	return mp.DataStore
+
+	return store.cache
+}
+
+func (sd *shardedData) shardStore(cacheID string) *shardStore {
+	sd.mutShardedDataStore.RLock()
+	store := sd.shardedDataStore[cacheID]
+	sd.mutShardedDataStore.RUnlock()
+	return store
 }
 
 // AddData will add data to the corresponding shard store
-func (sd *shardedData) AddData(key []byte, data interface{}, cacheId string) {
-	var mp *shardStore
+func (sd *shardedData) AddData(key []byte, value interface{}, sizeInBytes int, cacheID string) {
+	log.Trace("shardedData.AddData()", "name", sd.name, "cacheID", cacheID, "key", key, "size", sizeInBytes)
 
-	sd.mutShardedDataStore.Lock()
-	mp = sd.shardedDataStore[cacheId]
-	if mp == nil {
-		mp = sd.newShardStoreNoLock(cacheId)
-	}
-	sd.mutShardedDataStore.Unlock()
+	store := sd.getOrCreateShardStoreWithLock(cacheID)
 
-	found, _ := mp.DataStore.HasOrAdd(key, data)
-
-	if !found {
+	_, added := store.cache.HasOrAdd(key, value, sizeInBytes)
+	if added {
 		sd.mutAddedDataHandlers.RLock()
 		for _, handler := range sd.addedDataHandlers {
-			go handler(key)
+			handler(key, value)
 		}
 		sd.mutAddedDataHandlers.RUnlock()
 	}
 }
 
+func (sd *shardedData) getOrCreateShardStoreWithLock(cacheID string) *shardStore {
+	sd.mutShardedDataStore.Lock()
+	defer sd.mutShardedDataStore.Unlock()
+
+	store, ok := sd.shardedDataStore[cacheID]
+	if !ok {
+		store = sd.addShardStoreNoLock(cacheID)
+	}
+
+	return store
+}
+
+func (sd *shardedData) addShardStoreNoLock(cacheID string) *shardStore {
+	store, err := sd.newShardStore(cacheID)
+	if err != nil {
+		log.Error("addShardStoreNoLock", "error", err.Error())
+		return nil
+	}
+
+	sd.shardedDataStore[cacheID] = store
+	return store
+}
+
+func (sd *shardedData) newShardStore(cacheID string) (*shardStore, error) {
+	config := sd.configPrototype
+	config.Name = fmt.Sprintf("%s:%s", sd.name, cacheID)
+	newImmunityCache, err := cache.NewImmunityCache(config)
+	if err != nil {
+		return nil, err
+	}
+
+	return &shardStore{
+		cacheID: cacheID,
+		cache:   newImmunityCache,
+	}, nil
+}
+
 // SearchFirstData searches the key against all shard data store, retrieving first value found
 func (sd *shardedData) SearchFirstData(key []byte) (value interface{}, ok bool) {
 	sd.mutShardedDataStore.RLock()
-	for k := range sd.shardedDataStore {
-		m := sd.shardedDataStore[k]
-		if m == nil || m.DataStore == nil {
-			continue
-		}
+	defer sd.mutShardedDataStore.RUnlock()
 
-		if m.DataStore.Has(key) {
-			value, _ = m.DataStore.Peek(key)
-			sd.mutShardedDataStore.RUnlock()
-			return value, true
+	for _, store := range sd.shardedDataStore {
+		value, ok = store.cache.Peek(key)
+		if ok {
+			return
 		}
 	}
-	sd.mutShardedDataStore.RUnlock()
 
-	return nil, false
+	return
 }
 
 // RemoveSetOfDataFromPool removes a list of keys from the corresponding pool
-func (sd *shardedData) RemoveSetOfDataFromPool(keys [][]byte, cacheId string) {
+func (sd *shardedData) RemoveSetOfDataFromPool(keys [][]byte, cacheID string) {
+	store := sd.shardStore(cacheID)
+	if store == nil {
+		return
+	}
+
+	stopWatch := core.NewStopWatch()
+	stopWatch.Start("removal")
+
+	numRemoved := 0
 	for _, key := range keys {
-		sd.RemoveData(key, cacheId)
+		if store.cache.RemoveWithResult(key) {
+			numRemoved++
+		}
+	}
+
+	stopWatch.Stop("removal")
+
+	log.Debug("shardedData.removeTxBulk",
+		"name", sd.name,
+		"cacheID", cacheID,
+		"numToRemove", len(keys),
+		"numRemoved", numRemoved,
+		"duration", stopWatch.GetMeasurement("removal"),
+	)
+}
+
+// ImmunizeSetOfDataAgainstEviction marks the items as non-evictable for the provided confirmation nonce
+func (sd *shardedData) ImmunizeSetOfDataAgainstEviction(keys [][]byte, cacheID string, nonce uint64) {
+	store := sd.getOrCreateShardStoreWithLock(cacheID)
+	numNow, numFuture := store.cache.ImmunizeKeys(keys, nonce)
+	log.Trace("shardedData.ImmunizeSetOfDataAgainstEviction()", "name", sd.name, "cacheID", cacheID, "len(keys)", len(keys), "numNow", numNow, "numFuture", numFuture, "nonce", nonce)
+}
+
+// SetOldestImmuneNonce deactivates immunity below the provided nonce
+func (sd *shardedData) SetOldestImmuneNonce(cacheID string, nonce uint64) {
+	store := sd.shardStore(cacheID)
+	if store == nil {
+		return
+	}
+
+	store.cache.SetOldestImmuneNonce(nonce)
+}
+
+// SetOldestImmuneNonceForAllCaches deactivates immunity below the provided nonce
+// on every backing shard store. Called from the shard's commit path once the
+// cross-notarized metablock has advanced.
+func (sd *shardedData) SetOldestImmuneNonceForAllCaches(nonce uint64) {
+	sd.mutShardedDataStore.RLock()
+	defer sd.mutShardedDataStore.RUnlock()
+
+	for _, store := range sd.shardedDataStore {
+		store.cache.SetOldestImmuneNonce(nonce)
 	}
 }
 
 // RemoveData will remove data hash from the corresponding shard store
-func (sd *shardedData) RemoveData(key []byte, cacheId string) {
-	mpdata := sd.ShardDataStore(cacheId)
-
-	if mpdata != nil {
-		mpdata.Remove(key)
+func (sd *shardedData) RemoveData(key []byte, cacheID string) {
+	store := sd.shardStore(cacheID)
+	if store == nil {
+		return
 	}
+
+	store.cache.Remove(key)
 }
 
 // RemoveDataFromAllShards will remove data from the store given only
-//  the data hash. It will iterate over all shard store map and will remove it everywhere
+//
+//	the data hash. It will iterate over all shard store map and will remove it everywhere
 func (sd *shardedData) RemoveDataFromAllShards(key []byte) {
 	sd.mutShardedDataStore.RLock()
-	for k := range sd.shardedDataStore {
-		m := sd.shardedDataStore[k]
-		if m == nil || m.DataStore == nil {
-			continue
-		}
+	defer sd.mutShardedDataStore.RUnlock()
 
-		if m.DataStore.Has(key) {
-			m.DataStore.Remove(key)
-		}
+	for _, store := range sd.shardedDataStore {
+		store.cache.Remove(key)
 	}
-	sd.mutShardedDataStore.RUnlock()
 }
 
 // MergeShardStores will take all data associated with the sourceCacheId and move them
 // to the destCacheId. It will then remove the sourceCacheId key from the store map
-func (sd *shardedData) MergeShardStores(sourceCacheId, destCacheId string) {
-	sourceStore := sd.ShardDataStore(sourceCacheId)
+func (sd *shardedData) MergeShardStores(sourceCacheID, destCacheID string) {
+	sourceStore := sd.shardStore(sourceCacheID)
 
 	if sourceStore != nil {
-		for _, key := range sourceStore.Keys() {
-			val, _ := sourceStore.Get(key)
-			sd.AddData(key, val, destCacheId)
+		for _, key := range sourceStore.cache.Keys() {
+			val, ok := sourceStore.cache.Get(key)
+			if !ok {
+				log.Warn("programming error in shardedData: Keys() function reported a key that can not be retrieved")
+				continue
+			}
+
+			valSizer, ok := val.(marshal.Sizer)
+			if !ok {
+				log.Warn("programming error in shardedData, objects contained are not of type marshal.Sizer")
+				continue
+			}
+
+			sd.AddData(key, valSizer, valSizer.Size(), destCacheID)
 		}
 	}
 
 	sd.mutShardedDataStore.Lock()
-	delete(sd.shardedDataStore, sourceCacheId)
+	delete(sd.shardedDataStore, sourceCacheID)
 	sd.mutShardedDataStore.Unlock()
-}
-
-// MoveData will move all given data associated with the sourceCacheId to the destCacheId
-func (sd *shardedData) MoveData(sourceCacheId, destCacheId string, key [][]byte) {
-	sourceStore := sd.ShardDataStore(sourceCacheId)
-
-	if sourceStore != nil {
-		for _, key := range key {
-			val, ok := sourceStore.Get(key)
-			if ok {
-				sd.AddData(key, val, destCacheId)
-				sd.RemoveData(key, sourceCacheId)
-			}
-		}
-	}
 }
 
 // Clear will delete all shard stores and associated data
 func (sd *shardedData) Clear() {
 	sd.mutShardedDataStore.Lock()
-	for m := range sd.shardedDataStore {
-		delete(sd.shardedDataStore, m)
-	}
+	sd.shardedDataStore = make(map[string]*shardStore)
 	sd.mutShardedDataStore.Unlock()
 }
 
-// ClearShardStore will delete all data associated with a given destination cacheId
-func (sd *shardedData) ClearShardStore(cacheId string) {
-	mp := sd.ShardDataStore(cacheId)
-	if mp == nil {
+// ClearShardStore will delete all data associated with a given destination cacheID
+func (sd *shardedData) ClearShardStore(cacheID string) {
+	store := sd.shardStore(cacheID)
+	if store == nil {
 		return
 	}
-	mp.Clear()
+
+	store.cache.Clear()
 }
 
-// RegisterHandler registers a new handler to be called when a new data is added
-func (sd *shardedData) RegisterHandler(handler func(key []byte)) {
+// RegisterOnAdded registers a new handler to be called when a new data is added
+func (sd *shardedData) RegisterOnAdded(handler func(key []byte, value interface{})) {
 	if handler == nil {
 		log.Error("attempt to register a nil handler to a ShardedData object")
 		return
@@ -237,10 +296,97 @@ func (sd *shardedData) RegisterHandler(handler func(key []byte)) {
 	sd.mutAddedDataHandlers.Unlock()
 }
 
+// Keys returns all the keys contained in shard caches
+func (sd *shardedData) Keys() [][]byte {
+	sd.mutShardedDataStore.RLock()
+	defer sd.mutShardedDataStore.RUnlock()
+
+	keys := make([][]byte, 0)
+	for _, shard := range sd.shardedDataStore {
+		c := shard.cache
+		keys = append(keys, c.Keys()...)
+	}
+
+	return keys
+}
+
+// GetCounts returns the total number of transactions in the pool
+func (sd *shardedData) GetCounts() counting.CountsWithSize {
+	sd.mutShardedDataStore.RLock()
+	defer sd.mutShardedDataStore.RUnlock()
+
+	counts := counting.NewConcurrentShardedCountsWithSize()
+
+	for cacheID, shard := range sd.shardedDataStore {
+		c := shard.cache
+		counts.PutCounts(cacheID, int64(c.Len()), int64(c.NumBytes()))
+	}
+
+	return counts
+}
+
+// Diagnose diagnoses the internal caches
+func (sd *shardedData) Diagnose(deep bool) {
+	log.Trace("shardedData.Diagnose()", "counts", sd.GetCounts().String())
+
+	sd.mutShardedDataStore.RLock()
+	defer sd.mutShardedDataStore.RUnlock()
+
+	for _, shard := range sd.shardedDataStore {
+		shard.cache.Diagnose(deep)
+	}
+}
+
+// CleanupSelfShardTxCache does nothing (only to satisfy the interface dataRetriever.ShardedDataCacherNotifier)
+func (sd *shardedData) CleanupSelfShardTxCache(_ common.AccountNonceProvider, _ uint64, _ int, _ time.Duration) {
+	log.Warn("shardedData.CleanupSelfShardTxCache() should not have been called")
+}
+
+// GetNumTrackedBlocks returns 0 (only to satisfy the interface dataRetriever.ShardedDataCacherNotifier)
+func (sd *shardedData) GetNumTrackedBlocks() uint64 {
+	log.Warn("shardedData.GetNumTrackedBlocks() should not have been called")
+	return 0
+}
+
+// GetNumTrackedAccounts returns 0 (only to satisfy the interface dataRetriever.ShardedDataCacherNotifier)
+func (sd *shardedData) GetNumTrackedAccounts() uint64 {
+	log.Warn("shardedData.GetNumTrackedAccounts() should not have been called")
+	return 0
+}
+
+// OnExecutedBlock does nothing (only to satisfy the interface dataRetriever.ShardedDataCacherNotifier)
+func (sd *shardedData) OnExecutedBlock(_ data.HeaderHandler, _ []byte) error {
+	log.Warn("shardedData.OnExecutedBlock() should not have been called")
+	return nil
+}
+
+// OnProposedBlock does nothing (only to satisfy the interface dataRetriever.ShardedDataCacherNotifier)
+func (sd *shardedData) OnProposedBlock(
+	_ []byte,
+	_ *block.Body,
+	_ data.HeaderHandler,
+	_ common.AccountNonceAndBalanceProvider,
+	_ []byte,
+) error {
+	log.Warn("shardedData.OnProposedBlockCalled() should not have been called")
+	return nil
+}
+
+// OnBackfilledBlock does nothing (only to satisfy the interface dataRetriever.ShardedDataCacherNotifier)
+func (sd *shardedData) OnBackfilledBlock(
+	_ []byte,
+	_ *block.Body,
+	_ data.HeaderHandler,
+) error {
+	log.Warn("shardedData.OnBackfilledBlock() should not have been called")
+	return nil
+}
+
+// ResetTracker does nothing (only to satisfy the interface dataRetriever.ShardedDataCacherNotifier)
+func (sd *shardedData) ResetTracker() {
+}
+
 // IsInterfaceNil returns true if there is no value under the interface
 func (sd *shardedData) IsInterfaceNil() bool {
-	if sd == nil {
-		return true
-	}
-	return false
+	return sd == nil
 }

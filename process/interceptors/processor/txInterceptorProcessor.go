@@ -1,0 +1,108 @@
+package processor
+
+import (
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/core/check"
+	"github.com/multiversx/mx-chain-go/p2p"
+	"github.com/multiversx/mx-chain-go/process"
+	"github.com/multiversx/mx-chain-go/storage"
+	logger "github.com/multiversx/mx-chain-logger-go"
+)
+
+var _ process.InterceptorProcessor = (*TxInterceptorProcessor)(nil)
+var txLog = logger.GetOrCreate("process/interceptors/processor/txlog")
+
+// TxInterceptorProcessor is the processor used when intercepting transactions
+// (smart contract results, receipts, transaction) structs which satisfy TransactionHandler interface.
+type TxInterceptorProcessor struct {
+	shardedPool                 process.ShardedPool
+	txValidator                 process.TxValidator
+	directSentTransactionsCache storage.Cacher
+}
+
+// NewTxInterceptorProcessor creates a new TxInterceptorProcessor instance
+func NewTxInterceptorProcessor(argument *ArgTxInterceptorProcessor) (*TxInterceptorProcessor, error) {
+	if argument == nil {
+		return nil, process.ErrNilArgumentStruct
+	}
+	if check.IfNil(argument.ShardedDataCache) {
+		return nil, process.ErrNilDataPoolHolder
+	}
+	if check.IfNil(argument.TxValidator) {
+		return nil, process.ErrNilTxValidator
+	}
+	if check.IfNil(argument.DirectSentTransactionsCache) {
+		return nil, process.ErrNilDirectSentCache
+	}
+
+	return &TxInterceptorProcessor{
+		shardedPool:                 argument.ShardedDataCache,
+		txValidator:                 argument.TxValidator,
+		directSentTransactionsCache: argument.DirectSentTransactionsCache,
+	}, nil
+}
+
+// Validate checks if the intercepted data can be processed
+func (txip *TxInterceptorProcessor) Validate(data process.InterceptedData, _ core.PeerID) error {
+	interceptedTx, ok := data.(process.InterceptedTransactionHandler)
+	if !ok {
+		return process.ErrWrongTypeAssertion
+	}
+
+	return txip.txValidator.CheckTxValidity(interceptedTx)
+}
+
+// Save will save the received data into the cacher
+func (txip *TxInterceptorProcessor) Save(data process.InterceptedData, peerOriginator core.PeerID, _ string, broadcastMethod p2p.BroadcastMethod) (bool, error) {
+	interceptedTx, ok := data.(process.InterceptedTransactionHandler)
+	if !ok {
+		return false, process.ErrWrongTypeAssertion
+	}
+
+	err := txip.txValidator.CheckTxWhiteList(data)
+	if err != nil {
+		log.Trace(
+			"TxInterceptorProcessor.Save: not whitelisted cross transactions will not be added in pool",
+			"nonce", interceptedTx.Nonce(),
+			"sender address", interceptedTx.SenderAddress(),
+			"sender shard", interceptedTx.SenderShardId(),
+			"receiver shard", interceptedTx.ReceiverShardId(),
+		)
+		return false, nil
+	}
+
+	txLog.Trace("received transaction", "pid", peerOriginator.Pretty(), "hash", data.Hash())
+	cacherIdentifier := process.ShardCacherIdentifier(interceptedTx.SenderShardId(), interceptedTx.ReceiverShardId())
+	txip.shardedPool.AddData(
+		data.Hash(),
+		interceptedTx.Transaction(),
+		interceptedTx.Transaction().Size(),
+		cacherIdentifier,
+	)
+
+	isIntraShard := interceptedTx.SenderShardId() == interceptedTx.ReceiverShardId()
+	if isDirectSend(broadcastMethod) && isIntraShard {
+		txip.directSentTransactionsCache.Put(data.Hash(), struct{}{}, 0)
+	}
+
+	if isBroadcast(broadcastMethod) && isIntraShard {
+		// remove it if exists and is received via broadcast method to avoid flooding the network
+		txip.directSentTransactionsCache.Remove(data.Hash())
+	}
+
+	return true, nil
+}
+
+// RegisterHandler registers a callback function to be notified of incoming transactions
+func (txip *TxInterceptorProcessor) RegisterHandler(_ func(topic string, hash []byte, data interface{})) {
+	log.Error("txInterceptorProcessor.RegisterHandler", "error", "not implemented")
+}
+
+func isBroadcast(method p2p.BroadcastMethod) bool {
+	return method == p2p.Broadcast
+}
+
+// IsInterfaceNil returns true if there is no value under the interface
+func (txip *TxInterceptorProcessor) IsInterfaceNil() bool {
+	return txip == nil
+}
