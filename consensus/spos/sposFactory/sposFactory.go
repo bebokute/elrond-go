@@ -1,89 +1,98 @@
 package sposFactory
 
 import (
-	"github.com/ElrondNetwork/elrond-go/consensus"
-	"github.com/ElrondNetwork/elrond-go/consensus/broadcast"
-	"github.com/ElrondNetwork/elrond-go/consensus/spos"
-	"github.com/ElrondNetwork/elrond-go/consensus/spos/bls"
-	"github.com/ElrondNetwork/elrond-go/consensus/spos/bn"
-	"github.com/ElrondNetwork/elrond-go/core"
-	"github.com/ElrondNetwork/elrond-go/core/indexer"
-	"github.com/ElrondNetwork/elrond-go/crypto"
-	"github.com/ElrondNetwork/elrond-go/marshal"
-	"github.com/ElrondNetwork/elrond-go/sharding"
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/core/check"
+	"github.com/multiversx/mx-chain-core-go/hashing"
+	"github.com/multiversx/mx-chain-core-go/marshal"
+	"github.com/multiversx/mx-chain-crypto-go"
+
+	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/consensus"
+	"github.com/multiversx/mx-chain-go/consensus/broadcast"
+	"github.com/multiversx/mx-chain-go/consensus/spos"
+	"github.com/multiversx/mx-chain-go/consensus/spos/bls"
+	"github.com/multiversx/mx-chain-go/process"
+	"github.com/multiversx/mx-chain-go/sharding"
 )
 
-// GetSubroundsFactory returns a subrounds factory depending of the given parameter
-func GetSubroundsFactory(
-	consensusDataContainer spos.ConsensusCoreHandler,
-	consensusState *spos.ConsensusState,
-	worker spos.WorkerHandler,
-	consensusType string,
-	appStatusHandler core.AppStatusHandler,
-	indexer indexer.Indexer,
-) (spos.SubroundsFactory, error) {
-
-	switch consensusType {
-	case blsConsensusType:
-		subRoundFactoryBls, err := bls.NewSubroundsFactory(consensusDataContainer, consensusState, worker)
-		if err != nil {
-			return nil, err
-		}
-
-		err = subRoundFactoryBls.SetAppStatusHandler(appStatusHandler)
-		if err != nil {
-			return nil, err
-		}
-
-		subRoundFactoryBls.SetIndexer(indexer)
-
-		return subRoundFactoryBls, nil
-	case bnConsensusType:
-		subRoundFactoryBn, err := bn.NewSubroundsFactory(consensusDataContainer, consensusState, worker)
-		if err != nil {
-			return nil, err
-		}
-
-		err = subRoundFactoryBn.SetAppStatusHandler(appStatusHandler)
-		if err != nil {
-			return nil, err
-		}
-
-		subRoundFactoryBn.SetIndexer(indexer)
-
-		return subRoundFactoryBn, nil
-	}
-
-	return nil, ErrInvalidConsensusType
-}
-
-// GetConsensusCoreFactory returns a consensus service depending of the given parameter
+// GetConsensusCoreFactory returns a consensus service depending on the given parameter
 func GetConsensusCoreFactory(consensusType string) (spos.ConsensusService, error) {
 	switch consensusType {
 	case blsConsensusType:
 		return bls.NewConsensusService()
-	case bnConsensusType:
-		return bn.NewConsensusService()
+	default:
+		return nil, ErrInvalidConsensusType
 	}
-
-	return nil, ErrInvalidConsensusType
 }
 
-// GetBroadcastMessenger returns a consensus service depending of the given parameter
+// GetBroadcastMessenger returns a consensus service depending on the given parameter
 func GetBroadcastMessenger(
 	marshalizer marshal.Marshalizer,
+	hasher hashing.Hasher,
 	messenger consensus.P2PMessenger,
 	shardCoordinator sharding.Coordinator,
-	privateKey crypto.PrivateKey,
-	singleSigner crypto.SingleSigner,
+	peerSignatureHandler crypto.PeerSignatureHandler,
+	headersSubscriber consensus.HeadersPoolSubscriber,
+	proofsPool consensus.EquivalentProofsPool,
+	enableEpochsHandler common.EnableEpochsHandler,
+	processConfigsHandler common.ProcessConfigsHandler,
+	interceptorsContainer process.InterceptorsContainer,
+	alarmScheduler core.TimersScheduler,
+	keysHandler consensus.KeysHandler,
 ) (consensus.BroadcastMessenger, error) {
 
-	if shardCoordinator.SelfId() < shardCoordinator.NumberOfShards() {
-		return broadcast.NewShardChainMessenger(marshalizer, messenger, privateKey, shardCoordinator, singleSigner)
+	if check.IfNil(shardCoordinator) {
+		return nil, spos.ErrNilShardCoordinator
 	}
 
-	if shardCoordinator.SelfId() == sharding.MetachainShardId {
-		return broadcast.NewMetaChainMessenger(marshalizer, messenger, privateKey, shardCoordinator, singleSigner)
+	dbbArgs := &broadcast.ArgsDelayedBlockBroadcaster{
+		InterceptorsContainer: interceptorsContainer,
+		HeadersSubscriber:     headersSubscriber,
+		ProofsPool:            proofsPool,
+		EnableEpochsHandler:   enableEpochsHandler,
+		ProcessConfigsHandler: processConfigsHandler,
+		ShardCoordinator:      shardCoordinator,
+		LeaderCacheSize:       maxDelayCacheSize,
+		ValidatorCacheSize:    maxDelayCacheSize,
+		AlarmScheduler:        alarmScheduler,
+	}
+
+	delayedBroadcaster, err := broadcast.NewDelayedBlockBroadcaster(dbbArgs)
+	if err != nil {
+		return nil, err
+	}
+
+	commonMessengerArgs := broadcast.CommonMessengerArgs{
+		Marshalizer:                marshalizer,
+		Hasher:                     hasher,
+		Messenger:                  messenger,
+		ShardCoordinator:           shardCoordinator,
+		PeerSignatureHandler:       peerSignatureHandler,
+		HeadersSubscriber:          headersSubscriber,
+		MaxDelayCacheSize:          maxDelayCacheSize,
+		MaxValidatorDelayCacheSize: maxDelayCacheSize,
+		InterceptorsContainer:      interceptorsContainer,
+		AlarmScheduler:             alarmScheduler,
+		KeysHandler:                keysHandler,
+		DelayedBroadcaster:         delayedBroadcaster,
+		ProcessConfigsHandler:      processConfigsHandler,
+	}
+
+	if shardCoordinator.SelfId() < shardCoordinator.NumberOfShards() {
+		shardMessengerArgs := broadcast.ShardChainMessengerArgs{
+			CommonMessengerArgs: commonMessengerArgs,
+		}
+
+		return broadcast.NewShardChainMessenger(shardMessengerArgs)
+	}
+
+	if shardCoordinator.SelfId() == core.MetachainShardId {
+		metaMessengerArgs := broadcast.MetaChainMessengerArgs{
+			CommonMessengerArgs: commonMessengerArgs,
+		}
+
+		return broadcast.NewMetaChainMessenger(metaMessengerArgs)
 	}
 
 	return nil, ErrInvalidShardId

@@ -1,0 +1,1035 @@
+package groups
+
+import (
+	"encoding/hex"
+	"fmt"
+	"net/http"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/core/check"
+	"github.com/multiversx/mx-chain-core-go/data/smartContractResult"
+	"github.com/multiversx/mx-chain-core-go/data/transaction"
+	"github.com/multiversx/mx-chain-go/api/errors"
+	"github.com/multiversx/mx-chain-go/api/middleware"
+	"github.com/multiversx/mx-chain-go/api/shared"
+	"github.com/multiversx/mx-chain-go/api/shared/logging"
+	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/node/external"
+	txSimData "github.com/multiversx/mx-chain-go/process/transactionEvaluator/data"
+)
+
+const (
+	sendTransactionEndpoint          = "/transaction/send"
+	simulateTransactionEndpoint      = "/transaction/simulate"
+	simulateSCRCostEndpoint          = "/transaction/cost-scr"
+	sendMultipleTransactionsEndpoint = "/transaction/send-multiple"
+	getTransactionEndpoint           = "/transaction/:hash"
+	getScrsByTxHashEndpoint          = "/transaction/scrs-by-tx-hash/:txhash"
+	sendTransactionPath              = "/send"
+	simulateTransactionPath          = "/simulate"
+	simulateSCRCostPath              = "/cost-scr"
+	costPath                         = "/cost"
+	sendMultiplePath                 = "/send-multiple"
+	getTransactionPath               = "/:txhash"
+	getScrsByTxHashPath              = "/scrs-by-tx-hash/:txhash"
+	getTransactionsPool              = "/pool"
+	getSelectedTransactionsPath      = "/pool/simulate-selection"
+	getVirtualNoncePath              = "/pool/:address/virtual-nonce"
+
+	queryParamWithResults     = "withResults"
+	queryParamCheckSignature  = "checkSignature"
+	queryParamSender          = "by-sender"
+	queryParamFields          = "fields"
+	queryParamLastNonce       = "last-nonce"
+	queryParamNonceGaps       = "nonce-gaps"
+	queryParameterScrHash     = "scrHash"
+	queryParameterWithSender  = "withSender"
+	queryParameterWithRelayer = "withRelayer"
+	queryParameterWithNonce   = "withNonce"
+)
+
+// transactionFacadeHandler defines the methods to be implemented by a facade for transaction requests
+type transactionFacadeHandler interface {
+	CreateTransaction(txArgs *external.ArgsCreateTransaction) (*transaction.Transaction, []byte, error)
+	ValidateTransaction(tx *transaction.Transaction) error
+	ValidateTransactionForSimulation(tx *transaction.Transaction, checkSignature bool) error
+	SendBulkTransactions([]*transaction.Transaction) (uint64, error)
+	SimulateTransactionExecution(tx *transaction.Transaction) (*txSimData.SimulationResultsWithVMOutput, error)
+	SimulateSCRExecutionCost(scr *smartContractResult.SmartContractResult) (*transaction.CostResponse, error)
+	GetTransaction(hash string, withResults bool) (*transaction.ApiTransactionResult, error)
+	GetSCRsByTxHash(txHash string, scrHash string) ([]*transaction.ApiSmartContractResult, error)
+	GetTransactionsPool(fields string) (*common.TransactionsPoolAPIResponse, error)
+	GetTransactionsPoolForSender(sender, fields string) (*common.TransactionsPoolForSenderApiResponse, error)
+	GetLastPoolNonceForSender(sender string) (uint64, error)
+	GetTransactionsPoolNonceGapsForSender(sender string) (*common.TransactionsPoolNonceGapsForSenderApiResponse, error)
+	GetSelectedTransactions(requestedFields string) (*common.TransactionsSelectionSimulationResult, error)
+	GetVirtualNonce(address string) (*common.VirtualNonceOfAccountResponse, error)
+	ComputeTransactionGasLimit(tx *transaction.Transaction) (*transaction.CostResponse, error)
+	EncodeAddressPubkey(pk []byte) (string, error)
+	GetThrottlerForEndpoint(endpoint string) (core.Throttler, bool)
+	IsInterfaceNil() bool
+}
+
+type transactionGroup struct {
+	*baseGroup
+	facade    transactionFacadeHandler
+	mutFacade sync.RWMutex
+}
+
+// NewTransactionGroup returns a new instance of transactionGroup
+func NewTransactionGroup(facade transactionFacadeHandler) (*transactionGroup, error) {
+	if check.IfNil(facade) {
+		return nil, fmt.Errorf("%w for transaction group", errors.ErrNilFacadeHandler)
+	}
+
+	tg := &transactionGroup{
+		facade:    facade,
+		baseGroup: &baseGroup{},
+	}
+
+	endpoints := []*shared.EndpointHandlerData{
+		{
+			Path:    sendTransactionPath,
+			Method:  http.MethodPost,
+			Handler: tg.sendTransaction,
+			AdditionalMiddlewares: []shared.AdditionalMiddleware{
+				{
+					Middleware: middleware.CreateEndpointThrottlerFromFacade(sendTransactionEndpoint, func() interface{} {
+						return tg.getFacade()
+					}),
+					Position: shared.Before,
+				},
+			},
+		},
+		{
+			Path:    simulateTransactionPath,
+			Method:  http.MethodPost,
+			Handler: tg.simulateTransaction,
+			AdditionalMiddlewares: []shared.AdditionalMiddleware{
+				{
+					Middleware: middleware.CreateEndpointThrottlerFromFacade(simulateTransactionEndpoint, func() interface{} {
+						return tg.getFacade()
+					}),
+					Position: shared.Before,
+				},
+			},
+		},
+		{
+			Path:    simulateSCRCostPath,
+			Method:  http.MethodPost,
+			Handler: tg.simulateSCR,
+			AdditionalMiddlewares: []shared.AdditionalMiddleware{
+				{
+					Middleware: middleware.CreateEndpointThrottlerFromFacade(simulateSCRCostEndpoint, func() interface{} {
+						return tg.getFacade()
+					}),
+					Position: shared.Before,
+				},
+			},
+		},
+		{
+			Path:    costPath,
+			Method:  http.MethodPost,
+			Handler: tg.computeTransactionGasLimit,
+		},
+		{
+			Path:    getTransactionsPool,
+			Method:  http.MethodGet,
+			Handler: tg.getTransactionsPool,
+			AdditionalMiddlewares: []shared.AdditionalMiddleware{
+				{
+					Middleware: middleware.CreateEndpointThrottlerFromFacade(getTransactionPath, func() interface{} {
+						return tg.getFacade()
+					}),
+					Position: shared.Before,
+				},
+			},
+		},
+		{
+			Path:    getSelectedTransactionsPath,
+			Method:  http.MethodGet,
+			Handler: tg.simulateTransactionsSelection,
+			AdditionalMiddlewares: []shared.AdditionalMiddleware{
+				{
+					Middleware: middleware.CreateEndpointThrottlerFromFacade(getSelectedTransactionsPath, func() interface{} {
+						return tg.getFacade()
+					}),
+					Position: shared.Before,
+				},
+			},
+		},
+		{
+			Path:    getVirtualNoncePath,
+			Method:  http.MethodGet,
+			Handler: tg.getVirtualNonceByAddress,
+			AdditionalMiddlewares: []shared.AdditionalMiddleware{
+				{
+					Middleware: middleware.CreateEndpointThrottlerFromFacade(getVirtualNoncePath, func() interface{} {
+						return tg.getFacade()
+					}),
+					Position: shared.Before,
+				},
+			},
+		},
+		{
+			Path:    sendMultiplePath,
+			Method:  http.MethodPost,
+			Handler: tg.sendMultipleTransactions,
+			AdditionalMiddlewares: []shared.AdditionalMiddleware{
+				{
+					Middleware: middleware.CreateEndpointThrottlerFromFacade(sendMultipleTransactionsEndpoint, func() interface{} {
+						return tg.getFacade()
+					}),
+					Position: shared.Before,
+				},
+			},
+		},
+		{
+			Path:    getTransactionPath,
+			Method:  http.MethodGet,
+			Handler: tg.getTransaction,
+			AdditionalMiddlewares: []shared.AdditionalMiddleware{
+				{
+					Middleware: middleware.CreateEndpointThrottlerFromFacade(getTransactionEndpoint, func() interface{} {
+						return tg.getFacade()
+					}),
+					Position: shared.Before,
+				},
+			},
+		},
+		{
+			Path:    getScrsByTxHashPath,
+			Method:  http.MethodGet,
+			Handler: tg.getScrsByTxHash,
+			AdditionalMiddlewares: []shared.AdditionalMiddleware{
+				{
+					Middleware: middleware.CreateEndpointThrottlerFromFacade(getScrsByTxHashEndpoint, func() interface{} {
+						return tg.getFacade()
+					}),
+					Position: shared.Before,
+				},
+			},
+		},
+	}
+	tg.endpoints = endpoints
+
+	return tg, nil
+}
+
+// TxResponse represents the structure on which the response will be validated against
+type TxResponse struct {
+	transaction.FrontendTransaction
+	ShardID     uint32 `json:"shardId"`
+	Hash        string `json:"hash"`
+	BlockNumber uint64 `json:"blockNumber"`
+	BlockHash   string `json:"blockHash"`
+	Timestamp   uint64 `json:"timestamp"`
+}
+
+func (tg *transactionGroup) simulateSCR(c *gin.Context) {
+	var scr = smartContractResult.SmartContractResult{}
+	err := c.ShouldBindJSON(&scr)
+	if err != nil {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrValidation.Error(), err.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+
+	start := time.Now()
+	executionResults, err := tg.getFacade().SimulateSCRExecutionCost(&scr)
+	logging.LogAPIActionDurationIfNeeded(start, "API call: SimulateSCRExecution")
+	if err != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: err.Error(),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
+		return
+	}
+
+	c.JSON(
+		http.StatusOK,
+		shared.GenericAPIResponse{
+			Data:  executionResults,
+			Error: "",
+			Code:  shared.ReturnCodeSuccess,
+		},
+	)
+}
+
+// simulateTransaction will receive a transaction from the client and will simulate its execution and return the results
+func (tg *transactionGroup) simulateTransaction(c *gin.Context) {
+	var ftx = transaction.FrontendTransaction{}
+	err := c.ShouldBindJSON(&ftx)
+	if err != nil {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrValidation.Error(), err.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+
+	checkSignature, err := getQueryParameterCheckSignature(c)
+	if err != nil {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: errors.ErrValidation.Error(),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+
+	tx, txHash, err := tg.createTransaction(&ftx)
+	if err != nil {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrTxGenerationFailed.Error(), err.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+
+	start := time.Now()
+	err = tg.getFacade().ValidateTransactionForSimulation(tx, checkSignature)
+	logging.LogAPIActionDurationIfNeeded(start, "API call: ValidateTransactionForSimulation")
+	if err != nil {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrTxGenerationFailed.Error(), err.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+
+	start = time.Now()
+	executionResults, err := tg.getFacade().SimulateTransactionExecution(tx)
+	logging.LogAPIActionDurationIfNeeded(start, "API call: SimulateTransactionExecution")
+	if err != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: err.Error(),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
+		return
+	}
+
+	executionResults.Hash = hex.EncodeToString(txHash)
+	c.JSON(
+		http.StatusOK,
+		shared.GenericAPIResponse{
+			Data:  gin.H{"result": executionResults},
+			Error: "",
+			Code:  shared.ReturnCodeSuccess,
+		},
+	)
+}
+
+// sendTransaction will receive a transaction from the client and propagate it for processing
+func (tg *transactionGroup) sendTransaction(c *gin.Context) {
+	var ftx = transaction.FrontendTransaction{}
+	err := c.ShouldBindJSON(&ftx)
+	if err != nil {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrValidation.Error(), err.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+
+	tx, txHash, err := tg.createTransaction(&ftx)
+	if err != nil {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrTxGenerationFailed.Error(), err.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+
+	start := time.Now()
+	err = tg.getFacade().ValidateTransaction(tx)
+	logging.LogAPIActionDurationIfNeeded(start, "API call: ValidateTransaction")
+	if err != nil {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrTxGenerationFailed.Error(), err.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+
+	start = time.Now()
+	_, err = tg.getFacade().SendBulkTransactions([]*transaction.Transaction{tx})
+	logging.LogAPIActionDurationIfNeeded(start, "API call: SendBulkTransactions")
+	if err != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: err.Error(),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
+		return
+	}
+
+	txHexHash := hex.EncodeToString(txHash)
+	c.JSON(
+		http.StatusOK,
+		shared.GenericAPIResponse{
+			Data:  gin.H{"txHash": txHexHash},
+			Error: "",
+			Code:  shared.ReturnCodeSuccess,
+		},
+	)
+}
+
+// sendMultipleTransactions will receive a number of transactions and will propagate them for processing
+func (tg *transactionGroup) sendMultipleTransactions(c *gin.Context) {
+	var ftxs []transaction.FrontendTransaction
+	err := c.ShouldBindJSON(&ftxs)
+	if err != nil {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrValidation.Error(), err.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+
+	var (
+		txs    []*transaction.Transaction
+		tx     *transaction.Transaction
+		txHash []byte
+	)
+
+	var start time.Time
+	txsHashes := make(map[int]string)
+	for idx, receivedTx := range ftxs {
+		tx, txHash, err = tg.createTransaction(&receivedTx)
+		if err != nil {
+			continue
+		}
+
+		err = tg.getFacade().ValidateTransaction(tx)
+		if err != nil {
+			continue
+		}
+
+		txs = append(txs, tx)
+		txsHashes[idx] = hex.EncodeToString(txHash)
+	}
+
+	start = time.Now()
+	numOfSentTxs, err := tg.getFacade().SendBulkTransactions(txs)
+	logging.LogAPIActionDurationIfNeeded(start, "API call: SendBulkTransactions")
+	if err != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: err.Error(),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
+		return
+	}
+
+	c.JSON(
+		http.StatusOK,
+		shared.GenericAPIResponse{
+			Data: gin.H{
+				"txsSent":   numOfSentTxs,
+				"txsHashes": txsHashes,
+			},
+			Error: "",
+			Code:  shared.ReturnCodeSuccess,
+		},
+	)
+}
+
+func (tg *transactionGroup) getScrsByTxHash(c *gin.Context) {
+	txhash := c.Param("txhash")
+	if txhash == "" {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrValidation.Error(), errors.ErrValidationEmptyTxHash.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+	scrHashStr := c.Request.URL.Query().Get(queryParameterScrHash)
+	if scrHashStr == "" {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrValidation.Error(), errors.ErrValidationEmptySCRHash.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+
+	start := time.Now()
+	scrs, err := tg.getFacade().GetSCRsByTxHash(txhash, scrHashStr)
+	if err != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrGetSmartContractResults.Error(), err.Error()),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
+		return
+	}
+	logging.LogAPIActionDurationIfNeeded(start, "API call: GetSCRsByTxHash")
+
+	c.JSON(
+		http.StatusOK,
+		shared.GenericAPIResponse{
+			Data:  gin.H{"scrs": scrs},
+			Error: "",
+			Code:  shared.ReturnCodeSuccess,
+		},
+	)
+}
+
+func (tg *transactionGroup) getVirtualNonceByAddress(c *gin.Context) {
+	address := c.Param("address")
+	if address == "" {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrValidation.Error(), errors.ErrEmptyAddress.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+
+	start := time.Now()
+	virtualNonce, err := tg.getFacade().GetVirtualNonce(address)
+	if err != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrGetVirtualNonce.Error(), err.Error()),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
+		return
+	}
+	logging.LogAPIActionDurationIfNeeded(start, "API call: GetVirtualNonce")
+
+	c.JSON(
+		http.StatusOK,
+		shared.GenericAPIResponse{
+			Data:  gin.H{"virtualNonce": virtualNonce},
+			Error: "",
+			Code:  shared.ReturnCodeSuccess,
+		},
+	)
+}
+
+// getTransaction returns transaction details for a given txhash
+func (tg *transactionGroup) getTransaction(c *gin.Context) {
+	txhash := c.Param("txhash")
+	if txhash == "" {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrValidation.Error(), errors.ErrValidationEmptyTxHash.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+
+	withResults, err := getQueryParamWithResults(c)
+	if err != nil {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: errors.ErrValidation.Error(),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+
+	start := time.Now()
+	tx, err := tg.getFacade().GetTransaction(txhash, withResults)
+	logging.LogAPIActionDurationIfNeeded(start, "API call: GetTransaction")
+	if err != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrGetTransaction.Error(), err.Error()),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
+		return
+	}
+
+	c.JSON(
+		http.StatusOK,
+		shared.GenericAPIResponse{
+			Data:  gin.H{"transaction": tx},
+			Error: "",
+			Code:  shared.ReturnCodeSuccess,
+		},
+	)
+}
+
+// computeTransactionGasLimit returns how many gas units a transaction wil consume
+func (tg *transactionGroup) computeTransactionGasLimit(c *gin.Context) {
+	var ftx transaction.FrontendTransaction
+	err := c.ShouldBindJSON(&ftx)
+	if err != nil {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrValidation.Error(), err.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+
+	tx, _, err := tg.createTransaction(&ftx)
+	if err != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: err.Error(),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
+		return
+	}
+
+	start := time.Now()
+	cost, err := tg.getFacade().ComputeTransactionGasLimit(tx)
+	logging.LogAPIActionDurationIfNeeded(start, "API call: ComputeTransactionGasLimit")
+	if err != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: err.Error(),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
+		return
+	}
+
+	c.JSON(
+		http.StatusOK,
+		shared.GenericAPIResponse{
+			Data:  cost,
+			Error: "",
+			Code:  shared.ReturnCodeSuccess,
+		},
+	)
+}
+
+// getTransactionsPool returns the transactions details in the pool
+func (tg *transactionGroup) getTransactionsPool(c *gin.Context) {
+	// extract and validate query parameters
+	sender, fields, lastNonce, nonceGaps, err := tg.extractQueryParameters(c)
+	if err != nil {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: errors.ErrValidation.Error(),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+
+	err = validateQuery(sender, fields, lastNonce, nonceGaps)
+	if err != nil {
+		c.JSON(
+			http.StatusBadRequest,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: fmt.Sprintf("%s: %s", errors.ErrValidation.Error(), err.Error()),
+				Code:  shared.ReturnCodeRequestError,
+			},
+		)
+		return
+	}
+
+	// if no sender was provided, the fields for all transactions from pool should be returned in response
+	if sender == "" {
+		tg.getTxPool(fields, c)
+		return
+	}
+
+	if lastNonce {
+		tg.getLastPoolNonceForSender(sender, c)
+		return
+	}
+
+	if nonceGaps {
+		tg.getTransactionsPoolNonceGapsForSender(sender, c)
+		return
+	}
+
+	tg.getTxPoolForSender(sender, fields, c)
+}
+
+func (tg *transactionGroup) extractQueryParameters(c *gin.Context) (string, string, bool, bool, error) {
+	senderAddress := getQueryParameterSender(c)
+	fields := getQueryParameterFields(c)
+	lastNonce, err := getQueryParameterLastNonce(c)
+	if err != nil {
+		return "", "", false, false, err
+	}
+
+	nonceGaps, err := getQueryParameterNonceGaps(c)
+	if err != nil {
+		return "", "", false, false, err
+	}
+
+	return senderAddress, fields, lastNonce, nonceGaps, nil
+}
+
+// getTxPool returns the fields for all txs in pool
+func (tg *transactionGroup) getTxPool(fields string, c *gin.Context) {
+	start := time.Now()
+	txPool, err := tg.getFacade().GetTransactionsPool(fields)
+	logging.LogAPIActionDurationIfNeeded(start, "API call: GetTransactionsPool")
+	if err != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: err.Error(),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
+		return
+	}
+
+	c.JSON(
+		http.StatusOK,
+		shared.GenericAPIResponse{
+			Data:  gin.H{"txPool": txPool},
+			Error: "",
+			Code:  shared.ReturnCodeSuccess,
+		},
+	)
+}
+
+// getTxPoolForSender returns the fields for all txs in pool for the sender
+func (tg *transactionGroup) getTxPoolForSender(sender, fields string, c *gin.Context) {
+	start := time.Now()
+	txPool, err := tg.getFacade().GetTransactionsPoolForSender(sender, fields)
+	logging.LogAPIActionDurationIfNeeded(start, "API call: GetTransactionsPoolForSender")
+	if err != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: err.Error(),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
+		return
+	}
+
+	c.JSON(
+		http.StatusOK,
+		shared.GenericAPIResponse{
+			Data:  gin.H{"txPool": txPool},
+			Error: "",
+			Code:  shared.ReturnCodeSuccess,
+		},
+	)
+}
+
+// getLastPoolNonceForSender returns the last nonce in pool for sender
+func (tg *transactionGroup) getLastPoolNonceForSender(sender string, c *gin.Context) {
+	start := time.Now()
+	nonce, err := tg.getFacade().GetLastPoolNonceForSender(sender)
+	logging.LogAPIActionDurationIfNeeded(start, "API call: GetLastPoolNonceForSender")
+	if err != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: err.Error(),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
+		return
+	}
+
+	c.JSON(
+		http.StatusOK,
+		shared.GenericAPIResponse{
+			Data:  gin.H{"nonce": nonce},
+			Error: "",
+			Code:  shared.ReturnCodeSuccess,
+		},
+	)
+}
+
+// getTransactionsPoolNonceGapsForSender returns the nonce gaps in pool for sender
+func (tg *transactionGroup) getTransactionsPoolNonceGapsForSender(sender string, c *gin.Context) {
+	start := time.Now()
+	gaps, err := tg.getFacade().GetTransactionsPoolNonceGapsForSender(sender)
+	logging.LogAPIActionDurationIfNeeded(start, "API call: GetTransactionsPoolNonceGapsForSender")
+	if err != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: err.Error(),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
+		return
+	}
+
+	c.JSON(
+		http.StatusOK,
+		shared.GenericAPIResponse{
+			Data:  gin.H{"nonceGaps": gaps},
+			Error: "",
+			Code:  shared.ReturnCodeSuccess,
+		},
+	)
+}
+
+// simulateTransactionsSelection simulates a selection and returns the requested fields of each selected transaction
+func (tg *transactionGroup) simulateTransactionsSelection(c *gin.Context) {
+	start := time.Now()
+
+	selectionSimulationFields := getQueryParameterFields(c)
+	transactions, err := tg.getFacade().GetSelectedTransactions(selectionSimulationFields)
+	logging.LogAPIActionDurationIfNeeded(start, "API call: GetSelectedTransactions")
+	if err != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			shared.GenericAPIResponse{
+				Data:  nil,
+				Error: err.Error(),
+				Code:  shared.ReturnCodeInternalError,
+			},
+		)
+		return
+	}
+
+	c.JSON(
+		http.StatusOK,
+		shared.GenericAPIResponse{
+			Data:  gin.H{"transactions": transactions},
+			Error: "",
+			Code:  shared.ReturnCodeSuccess,
+		},
+	)
+}
+
+func (tg *transactionGroup) createTransaction(receivedTx *transaction.FrontendTransaction) (*transaction.Transaction, []byte, error) {
+	txArgs := &external.ArgsCreateTransaction{
+		Nonce:               receivedTx.Nonce,
+		Value:               receivedTx.Value,
+		Receiver:            receivedTx.Receiver,
+		ReceiverUsername:    receivedTx.ReceiverUsername,
+		Sender:              receivedTx.Sender,
+		SenderUsername:      receivedTx.SenderUsername,
+		GasPrice:            receivedTx.GasPrice,
+		GasLimit:            receivedTx.GasLimit,
+		DataField:           receivedTx.Data,
+		SignatureHex:        receivedTx.Signature,
+		ChainID:             receivedTx.ChainID,
+		Version:             receivedTx.Version,
+		Options:             receivedTx.Options,
+		Guardian:            receivedTx.GuardianAddr,
+		GuardianSigHex:      receivedTx.GuardianSignature,
+		Relayer:             receivedTx.RelayerAddr,
+		RelayerSignatureHex: receivedTx.RelayerSignature,
+	}
+	start := time.Now()
+	tx, txHash, err := tg.getFacade().CreateTransaction(txArgs)
+	logging.LogAPIActionDurationIfNeeded(start, "API call: CreateTransaction")
+
+	return tx, txHash, err
+}
+
+func validateQuery(sender, fields string, lastNonce, nonceGaps bool) error {
+	if fields != "" && lastNonce {
+		return errors.ErrFetchingLatestNonceCannotIncludeFields
+	}
+
+	if fields != "" && nonceGaps {
+		return errors.ErrFetchingNonceGapsCannotIncludeFields
+	}
+
+	if sender == "" && lastNonce {
+		return errors.ErrEmptySenderToGetLatestNonce
+	}
+
+	if sender == "" && nonceGaps {
+		return errors.ErrEmptySenderToGetNonceGaps
+	}
+
+	if fields == "*" {
+		return nil
+	}
+
+	if fields != "" {
+		return validateFields(fields)
+	}
+
+	return nil
+}
+
+func validateFields(fields string) error {
+	for _, c := range fields {
+		if c == ',' {
+			continue
+		}
+
+		isLowerLetter := c >= 'a' && c <= 'z'
+		isUpperLetter := c >= 'A' && c <= 'Z'
+		if !isLowerLetter && !isUpperLetter {
+			return errors.ErrInvalidFields
+		}
+	}
+
+	return nil
+}
+
+func getQueryParamWithResults(c *gin.Context) (bool, error) {
+	withResultsStr := c.Request.URL.Query().Get(queryParamWithResults)
+	if withResultsStr == "" {
+		return false, nil
+	}
+
+	return strconv.ParseBool(withResultsStr)
+}
+
+func getQueryParameterCheckSignature(c *gin.Context) (bool, error) {
+	bypassSignatureStr := c.Request.URL.Query().Get(queryParamCheckSignature)
+	if bypassSignatureStr == "" {
+		return true, nil
+	}
+
+	return strconv.ParseBool(bypassSignatureStr)
+}
+
+func getQueryParameterSender(c *gin.Context) string {
+	senderAddress := c.Request.URL.Query().Get(queryParamSender)
+	return senderAddress
+}
+
+func getQueryParameterFields(c *gin.Context) string {
+	fieldsStr := c.Request.URL.Query().Get(queryParamFields)
+	return fieldsStr
+}
+
+func getQueryParameterLastNonce(c *gin.Context) (bool, error) {
+	lastNonceStr := c.Request.URL.Query().Get(queryParamLastNonce)
+	if lastNonceStr == "" {
+		return false, nil
+	}
+
+	return strconv.ParseBool(lastNonceStr)
+}
+
+func getQueryParameterNonceGaps(c *gin.Context) (bool, error) {
+	nonceGapsStr := c.Request.URL.Query().Get(queryParamNonceGaps)
+	if nonceGapsStr == "" {
+		return false, nil
+	}
+
+	return strconv.ParseBool(nonceGapsStr)
+}
+
+func (tg *transactionGroup) getFacade() transactionFacadeHandler {
+	tg.mutFacade.RLock()
+	defer tg.mutFacade.RUnlock()
+
+	return tg.facade
+}
+
+// UpdateFacade will update the facade
+func (tg *transactionGroup) UpdateFacade(newFacade interface{}) error {
+	if newFacade == nil {
+		return errors.ErrNilFacadeHandler
+	}
+	castFacade, ok := newFacade.(transactionFacadeHandler)
+	if !ok {
+		return errors.ErrFacadeWrongTypeAssertion
+	}
+
+	tg.mutFacade.Lock()
+	tg.facade = castFacade
+	tg.mutFacade.Unlock()
+
+	return nil
+}
+
+// IsInterfaceNil returns true if there is no value under the interface
+func (tg *transactionGroup) IsInterfaceNil() bool {
+	return tg == nil
+}

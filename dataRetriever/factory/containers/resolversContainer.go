@@ -1,19 +1,28 @@
 package containers
 
 import (
-	"github.com/ElrondNetwork/elrond-go/dataRetriever"
-	"github.com/cornelk/hashmap"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/multiversx/mx-chain-core-go/core/check"
+	"github.com/multiversx/mx-chain-core-go/core/container"
+	"github.com/multiversx/mx-chain-go/dataRetriever"
+	logger "github.com/multiversx/mx-chain-logger-go"
 )
+
+var _ dataRetriever.ResolversContainer = (*resolversContainer)(nil)
+var log = logger.GetOrCreate("dataretriever/factory/containers")
 
 // resolversContainer is a resolvers holder organized by type
 type resolversContainer struct {
-	objects *hashmap.HashMap
+	objects *container.MutexMap
 }
 
 // NewResolversContainer will create a new instance of a container
 func NewResolversContainer() *resolversContainer {
 	return &resolversContainer{
-		objects: &hashmap.HashMap{},
+		objects: container.NewMutexMap(),
 	}
 }
 
@@ -22,7 +31,7 @@ func NewResolversContainer() *resolversContainer {
 func (rc *resolversContainer) Get(key string) (dataRetriever.Resolver, error) {
 	value, ok := rc.objects.Get(key)
 	if !ok {
-		return nil, dataRetriever.ErrInvalidContainerKey
+		return nil, fmt.Errorf("%w in resolvers container for key %v", dataRetriever.ErrInvalidContainerKey, key)
 	}
 
 	resolver, ok := value.(dataRetriever.Resolver)
@@ -36,12 +45,11 @@ func (rc *resolversContainer) Get(key string) (dataRetriever.Resolver, error) {
 // Add will add an object at a given key. Returns
 // an error if the element already exists
 func (rc *resolversContainer) Add(key string, resolver dataRetriever.Resolver) error {
-	if resolver == nil || resolver.IsInterfaceNil() {
+	if check.IfNil(resolver) {
 		return dataRetriever.ErrNilContainerElement
 	}
 
 	ok := rc.objects.Insert(key, resolver)
-
 	if !ok {
 		return dataRetriever.ErrContainerKeyAlreadyExists
 	}
@@ -68,7 +76,7 @@ func (rc *resolversContainer) AddMultiple(keys []string, resolvers []dataRetriev
 
 // Replace will add (or replace if it already exists) an object at a given key
 func (rc *resolversContainer) Replace(key string, resolver dataRetriever.Resolver) error {
-	if resolver == nil || resolver.IsInterfaceNil() {
+	if check.IfNil(resolver) {
 		return dataRetriever.ErrNilContainerElement
 	}
 
@@ -78,7 +86,7 @@ func (rc *resolversContainer) Replace(key string, resolver dataRetriever.Resolve
 
 // Remove will remove an object at a given key
 func (rc *resolversContainer) Remove(key string) {
-	rc.objects.Del(key)
+	rc.objects.Remove(key)
 }
 
 // Len returns the length of the added objects
@@ -86,10 +94,75 @@ func (rc *resolversContainer) Len() int {
 	return rc.objects.Len()
 }
 
+// ResolverKeys will return the contained resolvers keys in a concatenated string
+func (rc *resolversContainer) ResolverKeys() string {
+	keys := rc.objects.Keys()
+
+	stringKeys := make([]string, 0, len(keys))
+	for _, k := range keys {
+		key, ok := k.(string)
+		if !ok {
+			continue
+		}
+
+		stringKeys = append(stringKeys, key)
+	}
+
+	sort.Slice(stringKeys, func(i, j int) bool {
+		return strings.Compare(stringKeys[i], stringKeys[j]) < 0
+	})
+
+	return strings.Join(stringKeys, ", ")
+}
+
+// Iterate will call the provided handler for each and every key-value pair
+func (rc *resolversContainer) Iterate(handler func(key string, resolver dataRetriever.Resolver) bool) {
+	if handler == nil {
+		return
+	}
+
+	for _, keyVal := range rc.objects.Keys() {
+		key, ok := keyVal.(string)
+		if !ok {
+			continue
+		}
+
+		val, ok := rc.objects.Get(key)
+		if !ok {
+			continue
+		}
+
+		resolver, ok := val.(dataRetriever.Resolver)
+		if !ok {
+			continue
+		}
+
+		shouldContinue := handler(key, resolver)
+		if !shouldContinue {
+			return
+		}
+	}
+}
+
+// Close will try to close each containing resolver if that resolver implements the Closer interface
+func (rc *resolversContainer) Close() error {
+	var foundErr error
+	rc.Iterate(func(key string, resolver dataRetriever.Resolver) bool {
+		log.Debug("closing resolver", "key", key)
+		err := resolver.Close()
+		if err != nil {
+			log.Warn("error closing resolver", "key", key, "error", err.Error())
+			foundErr = err
+			return true
+		}
+
+		return true
+	})
+
+	return foundErr
+}
+
 // IsInterfaceNil returns true if there is no value under the interface
 func (rc *resolversContainer) IsInterfaceNil() bool {
-	if rc == nil {
-		return true
-	}
-	return false
+	return rc == nil
 }

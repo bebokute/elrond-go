@@ -32,7 +32,7 @@ func (mm *MarshalizerMock) Unmarshal(obj interface{}, buff []byte) error {
 	}
 
 	if obj == nil {
-		return errors.New("nil object to serilize to")
+		return errors.New("nil object to serialize to")
 	}
 
 	if buff == nil {
@@ -48,8 +48,5 @@ func (mm *MarshalizerMock) Unmarshal(obj interface{}, buff []byte) error {
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (mm *MarshalizerMock) IsInterfaceNil() bool {
-	if mm == nil {
-		return true
-	}
-	return false
+	return mm == nil
 }

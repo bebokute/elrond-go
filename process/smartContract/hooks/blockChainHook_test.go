@@ -1,0 +1,3247 @@
+package hooks_test
+
+import (
+	"bytes"
+	"encoding/hex"
+	"fmt"
+	"math"
+	"math/big"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/core/atomic"
+	"github.com/multiversx/mx-chain-core-go/data"
+	"github.com/multiversx/mx-chain-core-go/data/block"
+	"github.com/multiversx/mx-chain-core-go/data/esdt"
+	"github.com/multiversx/mx-chain-core-go/data/transaction"
+	vmcommon "github.com/multiversx/mx-chain-vm-common-go"
+	vmcommonBuiltInFunctions "github.com/multiversx/mx-chain-vm-common-go/builtInFunctions"
+	"github.com/multiversx/mx-chain-vm-common-go/parsers"
+	"github.com/pkg/errors"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/config"
+	"github.com/multiversx/mx-chain-go/dataRetriever"
+	"github.com/multiversx/mx-chain-go/process"
+	"github.com/multiversx/mx-chain-go/process/mock"
+	"github.com/multiversx/mx-chain-go/process/smartContract/hooks"
+	"github.com/multiversx/mx-chain-go/state"
+	"github.com/multiversx/mx-chain-go/state/accounts"
+	"github.com/multiversx/mx-chain-go/storage"
+	"github.com/multiversx/mx-chain-go/storage/storageunit"
+	"github.com/multiversx/mx-chain-go/testscommon"
+	"github.com/multiversx/mx-chain-go/testscommon/cache"
+	dataRetrieverMock "github.com/multiversx/mx-chain-go/testscommon/dataRetriever"
+	"github.com/multiversx/mx-chain-go/testscommon/enableEpochsHandlerMock"
+	"github.com/multiversx/mx-chain-go/testscommon/epochNotifier"
+	"github.com/multiversx/mx-chain-go/testscommon/marshallerMock"
+	stateMock "github.com/multiversx/mx-chain-go/testscommon/state"
+	storageStubs "github.com/multiversx/mx-chain-go/testscommon/storage"
+	"github.com/multiversx/mx-chain-go/testscommon/trie"
+)
+
+func createMockBlockChainHookArgs() hooks.ArgBlockChainHook {
+	datapool := dataRetrieverMock.NewPoolsHolderMock()
+	arguments := hooks.ArgBlockChainHook{
+		Accounts: &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(address []byte) (handler vmcommon.AccountHandler, e error) {
+				return &stateMock.AccountWrapMock{}, nil
+			},
+		},
+		PubkeyConv:            testscommon.NewPubkeyConverterMock(32),
+		StorageService:        &storageStubs.ChainStorerStub{},
+		BlockChain:            &testscommon.ChainHandlerStub{},
+		ShardCoordinator:      mock.NewOneShardCoordinatorMock(),
+		Marshalizer:           &mock.MarshalizerMock{},
+		Uint64Converter:       &mock.Uint64ByteSliceConverterMock{},
+		BuiltInFunctions:      vmcommonBuiltInFunctions.NewBuiltInFunctionContainer(),
+		NFTStorageHandler:     &testscommon.SimpleNFTStorageHandlerStub{},
+		GlobalSettingsHandler: &testscommon.ESDTGlobalSettingsHandlerStub{},
+		DataPool:              datapool,
+		CompiledSCPool:        datapool.SmartContracts(),
+		EpochNotifier:         &epochNotifier.EpochNotifierStub{},
+		EnableEpochsHandler:   enableEpochsHandlerMock.NewEnableEpochsHandlerStub(),
+		NilCompiledSCStore:    true,
+		EnableEpochs: config.EnableEpochs{
+			DoNotReturnOldBlockInBlockchainHookEnableEpoch: math.MaxUint32,
+		},
+		GasSchedule:              testscommon.NewGasScheduleNotifierMock(make(map[string]map[string]uint64)),
+		Counter:                  &testscommon.BlockChainHookCounterStub{},
+		MissingTrieNodesNotifier: &testscommon.MissingTrieNodesNotifierStub{},
+		EpochStartTrigger:        &testscommon.EpochStartTriggerStub{},
+		RoundHandler:             &testscommon.RoundHandlerMock{},
+	}
+	return arguments
+}
+
+func createContractCallInput(function string, sender, receiver []byte) *vmcommon.ContractCallInput {
+	return &vmcommon.ContractCallInput{
+		Function:      function,
+		RecipientAddr: receiver,
+		VMInput: vmcommon.VMInput{
+			CallerAddr: sender,
+		},
+	}
+}
+
+func createAccount(address []byte) state.UserAccountHandler {
+	account, _ := accounts.NewUserAccount(address, &trie.DataTrieTrackerStub{}, &trie.TrieLeafParserStub{})
+	return account
+}
+
+func TestNewBlockChainHookImpl(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		args        func() hooks.ArgBlockChainHook
+		expectedErr error
+	}{
+		{
+			args: func() hooks.ArgBlockChainHook {
+				args := createMockBlockChainHookArgs()
+				args.Accounts = nil
+				return args
+			},
+			expectedErr: process.ErrNilAccountsAdapter,
+		},
+		{
+			args: func() hooks.ArgBlockChainHook {
+				args := createMockBlockChainHookArgs()
+				args.PubkeyConv = nil
+				return args
+			},
+			expectedErr: process.ErrNilPubkeyConverter,
+		},
+		{
+			args: func() hooks.ArgBlockChainHook {
+				args := createMockBlockChainHookArgs()
+				args.StorageService = nil
+				return args
+			},
+			expectedErr: process.ErrNilStorage,
+		},
+		{
+			args: func() hooks.ArgBlockChainHook {
+				args := createMockBlockChainHookArgs()
+				args.BlockChain = nil
+				return args
+			},
+			expectedErr: process.ErrNilBlockChain,
+		},
+		{
+			args: func() hooks.ArgBlockChainHook {
+				args := createMockBlockChainHookArgs()
+				args.ShardCoordinator = nil
+				return args
+			},
+			expectedErr: process.ErrNilShardCoordinator,
+		},
+		{
+			args: func() hooks.ArgBlockChainHook {
+				args := createMockBlockChainHookArgs()
+				args.Marshalizer = nil
+				return args
+			},
+			expectedErr: process.ErrNilMarshalizer,
+		},
+		{
+			args: func() hooks.ArgBlockChainHook {
+				args := createMockBlockChainHookArgs()
+				args.Uint64Converter = nil
+				return args
+			},
+			expectedErr: process.ErrNilUint64Converter,
+		},
+		{
+			args: func() hooks.ArgBlockChainHook {
+				args := createMockBlockChainHookArgs()
+				args.BuiltInFunctions = nil
+				return args
+			},
+			expectedErr: process.ErrNilBuiltInFunction,
+		},
+		{
+			args: func() hooks.ArgBlockChainHook {
+				args := createMockBlockChainHookArgs()
+				args.CompiledSCPool = nil
+				return args
+			},
+			expectedErr: process.ErrNilCacher,
+		},
+		{
+			args: func() hooks.ArgBlockChainHook {
+				args := createMockBlockChainHookArgs()
+				args.NFTStorageHandler = nil
+				return args
+			},
+			expectedErr: process.ErrNilNFTStorageHandler,
+		},
+		{
+			args: func() hooks.ArgBlockChainHook {
+				args := createMockBlockChainHookArgs()
+				args.GlobalSettingsHandler = nil
+				return args
+			},
+			expectedErr: process.ErrNilESDTGlobalSettingsHandler,
+		},
+		{
+			args: func() hooks.ArgBlockChainHook {
+				args := createMockBlockChainHookArgs()
+				args.EpochNotifier = nil
+				return args
+			},
+			expectedErr: process.ErrNilEpochNotifier,
+		},
+		{
+			args: func() hooks.ArgBlockChainHook {
+				args := createMockBlockChainHookArgs()
+				args.EnableEpochsHandler = nil
+				return args
+			},
+			expectedErr: process.ErrNilEnableEpochsHandler,
+		},
+		{
+			args: func() hooks.ArgBlockChainHook {
+				args := createMockBlockChainHookArgs()
+				args.Counter = nil
+				return args
+			},
+			expectedErr: hooks.ErrNilBlockchainHookCounter,
+		},
+		{
+			args: func() hooks.ArgBlockChainHook {
+				args := createMockBlockChainHookArgs()
+				args.NilCompiledSCStore = false
+				args.ConfigSCStorage = config.StorageConfig{
+					Cache: config.CacheConfig{
+						Capacity: 1,
+					},
+					DB: config.DBConfig{
+						MaxBatchSize: 100,
+					},
+				}
+				return args
+			},
+			expectedErr: storage.ErrCacheSizeIsLowerThanBatchSize,
+		},
+		{
+			args: func() hooks.ArgBlockChainHook {
+				args := createMockBlockChainHookArgs()
+				args.EpochStartTrigger = nil
+				return args
+			},
+			expectedErr: hooks.ErrNilEpochStartTriggerHandler,
+		},
+		{
+			args: func() hooks.ArgBlockChainHook {
+				args := createMockBlockChainHookArgs()
+				args.RoundHandler = nil
+				return args
+			},
+			expectedErr: hooks.ErrNilRoundHandler,
+		},
+		{
+			args: func() hooks.ArgBlockChainHook {
+				args := createMockBlockChainHookArgs()
+				args.MissingTrieNodesNotifier = nil
+				return args
+			},
+			expectedErr: hooks.ErrNilMissingTrieNodesNotifier,
+		},
+		{
+			args: func() hooks.ArgBlockChainHook {
+				return createMockBlockChainHookArgs()
+			},
+			expectedErr: nil,
+		},
+	}
+
+	for _, test := range tests {
+		bh, err := hooks.NewBlockChainHookImpl(test.args())
+		require.Equal(t, test.expectedErr, err)
+
+		if test.expectedErr != nil {
+			require.Nil(t, bh)
+		} else {
+			require.NotNil(t, bh)
+			require.Equal(t, 2, len(bh.GetMapActivationEpochs()))
+		}
+	}
+}
+
+func TestNewBlockChainHookImpl_MissingFixEpochChangeProposedCurrentEpochFlag(t *testing.T) {
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+	args.EnableEpochsHandler = &enableEpochsHandlerMock.EnableEpochsHandlerStub{
+		IsFlagDefinedCalled: func(flag core.EnableEpochFlag) bool {
+			return flag != common.FixEpochChangeProposedCurrentEpochFlag
+		},
+	}
+
+	bh, err := hooks.NewBlockChainHookImpl(args)
+
+	require.Nil(t, bh)
+	require.ErrorIs(t, err, core.ErrInvalidEnableEpochsHandler)
+}
+
+func TestBlockChainHookImpl_GetCode(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil account expect nil code", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		code := bh.GetCode(nil)
+		require.Nil(t, code)
+	})
+	t.Run("expect correct returned code", func(t *testing.T) {
+		t.Parallel()
+
+		expectedCodeHash := []byte("codeHash")
+		expectedCode := []byte("code")
+
+		args := createMockBlockChainHookArgs()
+		args.Accounts = &stateMock.AccountsStub{
+			GetCodeCalled: func(codeHash []byte) []byte {
+				require.Equal(t, expectedCodeHash, codeHash)
+				return expectedCode
+			},
+		}
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		account := createAccount([]byte("address"))
+		account.SetCodeHash(expectedCodeHash)
+
+		code := bh.GetCode(account.(vmcommon.UserAccountHandler))
+		require.Equal(t, expectedCode, code)
+	})
+}
+
+func TestBlockChainHookImpl_GetUserAccountNotASystemAccountInCrossShard(t *testing.T) {
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+	args.ShardCoordinator = &mock.ShardCoordinatorStub{
+		ComputeIdCalled: func(address []byte) uint32 {
+			return 0
+		},
+		SelfIdCalled: func() uint32 {
+			return 1
+		},
+	}
+	args.Accounts = &stateMock.AccountsStub{}
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	addr := bytes.Repeat([]byte{0}, 32)
+	_, err := bh.GetUserAccount(addr)
+	assert.Equal(t, state.ErrAccNotFound, err)
+}
+
+func TestBlockChainHookImpl_GetUserAccountGetAccFromAddressErr(t *testing.T) {
+	t.Parallel()
+
+	errExpected := errors.New("expected err")
+
+	args := createMockBlockChainHookArgs()
+	args.Accounts = &stateMock.AccountsStub{
+		GetExistingAccountCalled: func(address []byte) (handler vmcommon.AccountHandler, e error) {
+			return nil, errExpected
+		},
+	}
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	_, err := bh.GetUserAccount(make([]byte, 0))
+	assert.Equal(t, errExpected, err)
+}
+
+func TestBlockChainHookImpl_GetUserAccountWrongTypeShouldErr(t *testing.T) {
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+	args.Accounts = &stateMock.AccountsStub{
+		GetExistingAccountCalled: func(address []byte) (handler vmcommon.AccountHandler, e error) {
+			return &stateMock.PeerAccountHandlerMock{}, nil
+		},
+	}
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	_, err := bh.GetUserAccount(make([]byte, 0))
+	assert.Equal(t, state.ErrWrongTypeAssertion, err)
+}
+
+func TestBlockChainHookImpl_GetUserAccount(t *testing.T) {
+	t.Parallel()
+
+	expectedAccount := createAccount([]byte("1234"))
+	args := createMockBlockChainHookArgs()
+	args.Accounts = &stateMock.AccountsStub{
+		GetExistingAccountCalled: func(address []byte) (handler vmcommon.AccountHandler, e error) {
+			return expectedAccount, nil
+		},
+	}
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	acc, err := bh.GetUserAccount(expectedAccount.AddressBytes())
+
+	assert.Nil(t, err)
+	assert.Equal(t, expectedAccount, acc)
+}
+
+func TestBlockChainHookImpl_GetStorageData(t *testing.T) {
+	t.Parallel()
+
+	t.Run("account not found should return empty storage", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		address := []byte("address")
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				require.Equal(t, address, addressContainer)
+				return nil, state.ErrAccNotFound
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		storageData, _, err := bh.GetStorageData(address, []byte("index"))
+		require.Equal(t, []byte{}, storageData)
+		require.Nil(t, err)
+	})
+	t.Run("cannot retrieve account value should return nil error", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		address := []byte("address")
+		index := []byte("i")
+		expectedErr := errors.New("error retrieving value")
+
+		dataTrieStub := &trie.DataTrieTrackerStub{
+			RetrieveValueCalled: func(key []byte) ([]byte, uint32, error) {
+				require.Equal(t, index, key)
+				return nil, 0, expectedErr
+			},
+		}
+		account := &stateMock.AccountWrapMock{
+			AccountDataHandlerCalled: func() vmcommon.AccountDataHandler {
+				return dataTrieStub
+			},
+		}
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				require.Equal(t, address, addressContainer)
+				return account, nil
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		storageData, _, err := bh.GetStorageData(address, index)
+		require.Nil(t, storageData)
+		require.Nil(t, err)
+	})
+	t.Run("get existing account errors should error", func(t *testing.T) {
+		t.Parallel()
+
+		errExpected := errors.New("expected err")
+
+		args := createMockBlockChainHookArgs()
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(address []byte) (handler vmcommon.AccountHandler, e error) {
+				return nil, errExpected
+			},
+		}
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		value, _, err := bh.GetStorageData(make([]byte, 0), make([]byte, 0))
+
+		assert.Equal(t, errExpected, err)
+		assert.Nil(t, value)
+	})
+	t.Run("processing counter errors should error", func(t *testing.T) {
+		t.Parallel()
+
+		variableIdentifier := []byte("variable")
+		variableValue := []byte("value")
+		accnt := stateMock.NewAccountWrapMock(nil)
+		_ = accnt.SaveKeyValue(variableIdentifier, variableValue)
+
+		expectedErr := errors.New("expected error")
+		args := createMockBlockChainHookArgs()
+		args.EnableEpochsHandler = enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.MaxBlockchainHookCountersFlag)
+		args.Counter = &testscommon.BlockChainHookCounterStub{
+			ProcessCrtNumberOfTrieReadsCounterCalled: func() error {
+				return expectedErr
+			},
+		}
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(address []byte) (handler vmcommon.AccountHandler, e error) {
+				return accnt, nil
+			},
+		}
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		value, _, err := bh.GetStorageData(make([]byte, 0), variableIdentifier)
+
+		assert.Equal(t, expectedErr, err)
+		assert.Nil(t, value)
+	})
+	t.Run("should work before counters activation", func(t *testing.T) {
+		t.Parallel()
+
+		variableIdentifier := []byte("variable")
+		variableValue := []byte("value")
+		accnt := stateMock.NewAccountWrapMock(nil)
+		_ = accnt.SaveKeyValue(variableIdentifier, variableValue)
+
+		args := createMockBlockChainHookArgs()
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(address []byte) (handler vmcommon.AccountHandler, e error) {
+				return accnt, nil
+			},
+		}
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		value, _, err := bh.GetStorageData(make([]byte, 0), variableIdentifier)
+
+		assert.Nil(t, err)
+		assert.Equal(t, variableValue, value)
+	})
+	t.Run("should work with counters", func(t *testing.T) {
+		t.Parallel()
+
+		variableIdentifier := []byte("variable")
+		variableValue := []byte("value")
+		accnt := stateMock.NewAccountWrapMock(nil)
+		_ = accnt.SaveKeyValue(variableIdentifier, variableValue)
+
+		counterProcessedCalled := false
+		args := createMockBlockChainHookArgs()
+		args.EnableEpochsHandler = enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.MaxBlockchainHookCountersFlag)
+		args.Counter = &testscommon.BlockChainHookCounterStub{
+			ProcessCrtNumberOfTrieReadsCounterCalled: func() error {
+				counterProcessedCalled = true
+				return nil
+			},
+		}
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(address []byte) (handler vmcommon.AccountHandler, e error) {
+				return accnt, nil
+			},
+		}
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		value, _, err := bh.GetStorageData(make([]byte, 0), variableIdentifier)
+
+		assert.Nil(t, err)
+		assert.Equal(t, variableValue, value)
+		assert.True(t, counterProcessedCalled)
+	})
+	t.Run("should work with counters and metachain", func(t *testing.T) {
+		t.Parallel()
+
+		variableIdentifier := []byte("variable")
+		variableValue := []byte("value")
+		accnt := stateMock.NewAccountWrapMock(nil)
+		_ = accnt.SaveKeyValue(variableIdentifier, variableValue)
+
+		counterProcessedCalled := false
+		args := createMockBlockChainHookArgs()
+		args.EnableEpochsHandler = enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.MaxBlockchainHookCountersFlag)
+		args.ShardCoordinator = &testscommon.ShardsCoordinatorMock{
+			CurrentShard: core.MetachainShardId,
+		}
+		args.Counter = &testscommon.BlockChainHookCounterStub{
+			ProcessCrtNumberOfTrieReadsCounterCalled: func() error {
+				counterProcessedCalled = true
+				return nil
+			},
+		}
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(address []byte) (handler vmcommon.AccountHandler, e error) {
+				return accnt, nil
+			},
+		}
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		value, _, err := bh.GetStorageData(make([]byte, 0), variableIdentifier)
+
+		assert.Nil(t, err)
+		assert.Equal(t, variableValue, value)
+		assert.False(t, counterProcessedCalled)
+	})
+	t.Run("data trie node not found should call missingTrieNodesNotifier", func(t *testing.T) {
+		t.Parallel()
+
+		missingDataTrieKey := []byte("missingDataTrieKey")
+		notifyMissingTrieNodeCalled := false
+		accnt := stateMock.NewAccountWrapMock(nil)
+		accnt.AccountDataHandlerCalled = func() (handler vmcommon.AccountDataHandler) {
+			return &trie.DataTrieTrackerStub{
+				RetrieveValueCalled: func(key []byte) ([]byte, uint32, error) {
+					trieErr := core.NewGetNodeFromDBErrWithKey(key, errors.New(core.GetNodeFromDBErrorString), "")
+					return nil, 0, fmt.Errorf("error: %w", trieErr)
+				},
+			}
+		}
+
+		args := createMockBlockChainHookArgs()
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(address []byte) (handler vmcommon.AccountHandler, e error) {
+				return accnt, nil
+			},
+		}
+		args.MissingTrieNodesNotifier = &testscommon.MissingTrieNodesNotifierStub{
+			AsyncNotifyMissingTrieNodeCalled: func(hash []byte) {
+				assert.Equal(t, missingDataTrieKey, hash)
+				notifyMissingTrieNodeCalled = true
+			},
+		}
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		_, _, _ = bh.GetStorageData([]byte("address"), missingDataTrieKey)
+		assert.True(t, notifyMissingTrieNodeCalled)
+	})
+	t.Run("random retrieve err should not call missingTrieNodesNotifier", func(t *testing.T) {
+		t.Parallel()
+
+		missingDataTrieKey := []byte("missingDataTrieKey")
+		accnt := stateMock.NewAccountWrapMock(nil)
+		accnt.AccountDataHandlerCalled = func() (handler vmcommon.AccountDataHandler) {
+			return &trie.DataTrieTrackerStub{
+				RetrieveValueCalled: func(key []byte) ([]byte, uint32, error) {
+					return nil, 0, errors.New("random error")
+				},
+			}
+		}
+
+		args := createMockBlockChainHookArgs()
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(address []byte) (handler vmcommon.AccountHandler, e error) {
+				return accnt, nil
+			},
+		}
+		args.MissingTrieNodesNotifier = &testscommon.MissingTrieNodesNotifierStub{
+			AsyncNotifyMissingTrieNodeCalled: func(hash []byte) {
+				assert.Fail(t, "should not have been called")
+			},
+		}
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		_, _, _ = bh.GetStorageData([]byte("address"), missingDataTrieKey)
+	})
+	t.Run("unwrapped err is not of wanted type, should not call missingTrieNodesNotifier", func(t *testing.T) {
+		t.Parallel()
+
+		missingDataTrieKey := []byte("missingDataTrieKey")
+		accnt := stateMock.NewAccountWrapMock(nil)
+		accnt.AccountDataHandlerCalled = func() (handler vmcommon.AccountDataHandler) {
+			return &trie.DataTrieTrackerStub{
+				RetrieveValueCalled: func(key []byte) ([]byte, uint32, error) {
+					baseErr := errors.New(core.GetNodeFromDBErrorString)
+					return nil, 0, fmt.Errorf("error: %w", baseErr)
+				},
+			}
+		}
+
+		args := createMockBlockChainHookArgs()
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(address []byte) (handler vmcommon.AccountHandler, e error) {
+				return accnt, nil
+			},
+		}
+		args.MissingTrieNodesNotifier = &testscommon.MissingTrieNodesNotifierStub{
+			AsyncNotifyMissingTrieNodeCalled: func(hash []byte) {
+				assert.Fail(t, "should not have been called")
+			},
+		}
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		_, _, _ = bh.GetStorageData([]byte("address"), missingDataTrieKey)
+	})
+}
+
+func TestBlockChainHookImpl_NewAddressLengthNoGood(t *testing.T) {
+	t.Parallel()
+
+	acnts := &stateMock.AccountsStub{}
+	acnts.GetExistingAccountCalled = func(address []byte) (vmcommon.AccountHandler, error) {
+		return createAccount(address).(vmcommon.AccountHandler), nil
+	}
+	args := createMockBlockChainHookArgs()
+	args.Accounts = acnts
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+
+	address := []byte("test")
+	nonce := uint64(10)
+
+	scAddress, err := bh.NewAddress(address, nonce, []byte("00"))
+	assert.Equal(t, hooks.ErrAddressLengthNotCorrect, err)
+	assert.Nil(t, scAddress)
+
+	address = []byte("1234567890123456789012345678901234567890")
+	scAddress, err = bh.NewAddress(address, nonce, []byte("00"))
+	assert.Equal(t, hooks.ErrAddressLengthNotCorrect, err)
+	assert.Nil(t, scAddress)
+}
+
+func TestBlockChainHookImpl_NewAddressVMTypeTooLong(t *testing.T) {
+	t.Parallel()
+
+	acnts := &stateMock.AccountsStub{}
+	acnts.GetExistingAccountCalled = func(address []byte) (vmcommon.AccountHandler, error) {
+		return createAccount(address).(vmcommon.AccountHandler), nil
+	}
+	args := createMockBlockChainHookArgs()
+	args.Accounts = acnts
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+
+	address := []byte("01234567890123456789012345678900")
+	nonce := uint64(10)
+
+	vmType := []byte("010")
+	scAddress, err := bh.NewAddress(address, nonce, vmType)
+	assert.Equal(t, hooks.ErrVMTypeLengthIsNotCorrect, err)
+	assert.Nil(t, scAddress)
+}
+
+func TestBlockChainHookImpl_NewAddress(t *testing.T) {
+	t.Parallel()
+
+	acnts := &stateMock.AccountsStub{}
+	acnts.GetExistingAccountCalled = func(address []byte) (vmcommon.AccountHandler, error) {
+		return createAccount(address).(vmcommon.AccountHandler), nil
+	}
+	args := createMockBlockChainHookArgs()
+	args.Accounts = acnts
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+
+	address := []byte("01234567890123456789012345678900")
+	nonce := uint64(10)
+
+	vmType := []byte("11")
+	scAddress1, err := bh.NewAddress(address, nonce, vmType)
+	assert.Nil(t, err)
+
+	for i := 0; i < 8; i++ {
+		assert.Equal(t, scAddress1[i], uint8(0))
+	}
+	assert.True(t, bytes.Equal(vmType, scAddress1[8:10]))
+
+	nonce++
+	scAddress2, err := bh.NewAddress(address, nonce, []byte("00"))
+	assert.Nil(t, err)
+
+	assert.False(t, bytes.Equal(scAddress1, scAddress2))
+
+	fmt.Printf("%s \n%s \n", hex.EncodeToString(scAddress1), hex.EncodeToString(scAddress2))
+}
+
+func TestBlockChainHookImpl_GetBlockhashNilBlockHeaderExpectError(t *testing.T) {
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+	args.BlockChain = &testscommon.ChainHandlerStub{
+		GetLastExecutedBlockHeaderCalled: func() data.HeaderHandler {
+			return nil
+		},
+	}
+
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	hash, err := bh.GetBlockhash(0)
+	require.Nil(t, hash)
+	require.Equal(t, process.ErrNilBlockHeader, err)
+}
+
+func TestBlockChainHookImpl_GetBlockhashInvalidNonceExpectError(t *testing.T) {
+	t.Parallel()
+
+	lastExecHdr := &block.Header{Nonce: 1}
+	args := createMockBlockChainHookArgs()
+	args.BlockChain = &testscommon.ChainHandlerStub{
+		GetLastExecutedBlockHeaderCalled: func() data.HeaderHandler {
+			return lastExecHdr
+		},
+		GetLastExecutedBlockInfoCalled: func() (uint64, []byte, []byte) {
+			return 1, []byte("hash"), []byte("rootHash")
+		},
+	}
+
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	hash, err := bh.GetBlockhash(2)
+	require.Nil(t, hash)
+	require.Equal(t, process.ErrInvalidNonceRequest, err)
+}
+
+func TestBlockChainHookImpl_GetBlockhashShouldReturnCurrentBlockHeaderHash(t *testing.T) {
+	t.Parallel()
+
+	lastExecHdr := &block.Header{Nonce: 2}
+	hashToRet := []byte("hash")
+	args := createMockBlockChainHookArgs()
+	args.BlockChain = &testscommon.ChainHandlerStub{
+		GetLastExecutedBlockHeaderCalled: func() data.HeaderHandler {
+			return lastExecHdr
+		},
+		GetLastExecutedBlockInfoCalled: func() (uint64, []byte, []byte) {
+			return 2, hashToRet, []byte("rootHash")
+		},
+	}
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+
+	hash, err := bh.GetBlockhash(2)
+	assert.Nil(t, err)
+	assert.Equal(t, hashToRet, hash)
+}
+
+func TestBlockChainHookImpl_GetBlockhashFromStorerErrorReadingFromStorage(t *testing.T) {
+	t.Parallel()
+
+	lastExecHdr := &block.Header{Nonce: 10}
+	args := createMockBlockChainHookArgs()
+	args.BlockChain = &testscommon.ChainHandlerStub{
+		GetLastExecutedBlockHeaderCalled: func() data.HeaderHandler {
+			return lastExecHdr
+		},
+		GetLastExecutedBlockInfoCalled: func() (uint64, []byte, []byte) {
+			return 10, []byte("hash"), []byte("rootHash")
+		},
+	}
+	storer := &storageStubs.StorerStub{
+		GetCalled: func(key []byte) ([]byte, error) {
+			return nil, errors.New("local error")
+		},
+	}
+	args.StorageService = &storageStubs.ChainStorerStub{
+		GetStorerCalled: func(unitType dataRetriever.UnitType) (storage.Storer, error) {
+			return storer, nil
+		},
+	}
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+
+	hash, err := bh.GetBlockhash(2)
+	require.Nil(t, hash)
+	require.Equal(t, process.ErrMissingHashForHeaderNonce, err)
+}
+
+func TestBlockChainHookImpl_GetBlockhashFromStorerInSameEpoch(t *testing.T) {
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+	hash := []byte("hash")
+	nonce := uint64(10)
+	header := &block.Header{Nonce: nonce}
+	shardID := args.ShardCoordinator.SelfId()
+	nonceToByteSlice := args.Uint64Converter.ToByteSlice(nonce)
+	marshalledHeader, _ := args.Marshalizer.Marshal(header)
+
+	args.BlockChain = &testscommon.ChainHandlerStub{
+		GetLastExecutedBlockHeaderCalled: func() data.HeaderHandler {
+			return header
+		},
+		GetLastExecutedBlockInfoCalled: func() (uint64, []byte, []byte) {
+			return nonce, []byte("execHash"), []byte("rootHash")
+		},
+	}
+
+	storerBlockHeader := &storageStubs.StorerStub{
+		GetCalled: func(key []byte) ([]byte, error) {
+			require.Equal(t, hash, key)
+			return marshalledHeader, nil
+		},
+	}
+	storerShardHdrNonceHash := &storageStubs.StorerStub{
+		GetCalled: func(key []byte) ([]byte, error) {
+			require.Equal(t, nonceToByteSlice, key)
+			return hash, nil
+		},
+	}
+	args.StorageService = &storageStubs.ChainStorerStub{
+		GetStorerCalled: func(unitType dataRetriever.UnitType) (storage.Storer, error) {
+			switch unitType {
+			case dataRetriever.ShardHdrNonceHashDataUnit + dataRetriever.UnitType(shardID):
+				return storerShardHdrNonceHash, nil
+			case dataRetriever.BlockHeaderUnit:
+				return storerBlockHeader, nil
+			default:
+				require.Fail(t, "should not search in another storer")
+				return nil, errors.New("key not found")
+			}
+		},
+	}
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+
+	actualHash, err := bh.GetBlockhash(nonce - 1)
+	require.Nil(t, err)
+	require.Equal(t, hash, actualHash)
+}
+
+func TestBlockChainHookImpl_GetBlockhashFromStorerInSameEpochWithFlagEnabled(t *testing.T) {
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+	args.EnableEpochsHandler = enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.DoNotReturnOldBlockInBlockchainHookFlag)
+	nonce := uint64(10)
+	header := &block.Header{Nonce: nonce}
+	shardID := args.ShardCoordinator.SelfId()
+
+	args.BlockChain = &testscommon.ChainHandlerStub{
+		GetLastExecutedBlockHeaderCalled: func() data.HeaderHandler {
+			return header
+		},
+		GetLastExecutedBlockInfoCalled: func() (uint64, []byte, []byte) {
+			return nonce, []byte("hash"), []byte("rootHash")
+		},
+	}
+
+	storerBlockHeader := &storageStubs.StorerStub{
+		GetCalled: func(key []byte) ([]byte, error) {
+			require.Fail(t, "should have not called Get operation")
+			return nil, nil
+		},
+	}
+	storerShardHdrNonceHash := &storageStubs.StorerStub{
+		GetCalled: func(key []byte) ([]byte, error) {
+			require.Fail(t, "should have not called Get operation")
+			return nil, nil
+		},
+	}
+	args.StorageService = &storageStubs.ChainStorerStub{
+		GetStorerCalled: func(unitType dataRetriever.UnitType) (storage.Storer, error) {
+			switch unitType {
+			case dataRetriever.ShardHdrNonceHashDataUnit + dataRetriever.UnitType(shardID):
+				return storerShardHdrNonceHash, nil
+			case dataRetriever.BlockHeaderUnit:
+				return storerBlockHeader, nil
+			default:
+				require.Fail(t, "should not search in another storer")
+				return nil, errors.New("key not found")
+			}
+		},
+	}
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+
+	hash, err := bh.GetBlockhash(nonce - 1)
+	require.Equal(t, process.ErrInvalidNonceRequest, err)
+	require.Nil(t, hash)
+}
+
+func TestBlockChainHookImpl_GetBlockhashFromOldEpochExpectError(t *testing.T) {
+	t.Parallel()
+
+	hdrToRet := &block.Header{Nonce: 2, Epoch: 2}
+	hashToRet := []byte("hash")
+	lastExecHdr := &block.Header{Nonce: 10, Epoch: 10}
+	args := createMockBlockChainHookArgs()
+
+	marshaledData, _ := args.Marshalizer.Marshal(hdrToRet)
+
+	args.BlockChain = &testscommon.ChainHandlerStub{
+		GetLastExecutedBlockHeaderCalled: func() data.HeaderHandler {
+			return lastExecHdr
+		},
+		GetLastExecutedBlockInfoCalled: func() (uint64, []byte, []byte) {
+			return 10, []byte("execHash"), []byte("rootHash")
+		},
+	}
+	args.StorageService = &storageStubs.ChainStorerStub{
+		GetStorerCalled: func(unitType dataRetriever.UnitType) (storage.Storer, error) {
+			if uint8(unitType) >= uint8(dataRetriever.ShardHdrNonceHashDataUnit) {
+				return &storageStubs.StorerStub{
+					GetCalled: func(key []byte) ([]byte, error) {
+						return hashToRet, nil
+					},
+				}, nil
+			}
+
+			return &storageStubs.StorerStub{
+				GetCalled: func(key []byte) ([]byte, error) {
+					return marshaledData, nil
+				},
+			}, nil
+		},
+	}
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+
+	_, err := bh.GetBlockhash(2)
+	assert.Equal(t, err, process.ErrInvalidBlockRequestOldEpoch)
+}
+
+func TestBlockChainHookImpl_GettersFromBlockchainCurrentHeader(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil header, expect default values", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		args.BlockChain = &testscommon.ChainHandlerStub{
+			GetLastExecutedBlockHeaderCalled: func() data.HeaderHandler {
+				return nil
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		assert.Equal(t, uint64(0), bh.LastNonce())
+		assert.Equal(t, uint64(0), bh.LastRound())
+		assert.Equal(t, uint64(0), bh.LastTimeStamp())
+		assert.Equal(t, uint32(0), bh.LastEpoch())
+		assert.Equal(t, []byte{}, bh.LastRandomSeed())
+		assert.Equal(t, []byte{}, bh.GetStateRootHash())
+	})
+
+	t.Run("custom header, expect correct values are returned", func(t *testing.T) {
+		t.Parallel()
+
+		nonce := uint64(37)
+		round := uint64(5)
+		timestamp := uint64(1234)
+		timestampMs := timestamp * 1000
+		randSeed := []byte("a")
+		rootHash := []byte("b")
+		epoch := uint32(7)
+		lastExecutedHdr := &block.Header{
+			Nonce:     nonce,
+			Round:     round,
+			TimeStamp: timestamp,
+			RandSeed:  randSeed,
+			RootHash:  rootHash,
+			Epoch:     epoch,
+		}
+
+		args := createMockBlockChainHookArgs()
+		args.BlockChain = &testscommon.ChainHandlerStub{
+			GetLastExecutedBlockHeaderCalled: func() data.HeaderHandler {
+				return lastExecutedHdr
+			},
+			GetLastExecutedBlockInfoCalled: func() (uint64, []byte, []byte) {
+				return nonce, []byte("hash"), rootHash
+			},
+		}
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		assert.Equal(t, nonce, bh.LastNonce())
+		assert.Equal(t, round, bh.LastRound())
+		assert.Equal(t, timestamp, bh.LastTimeStamp())
+		assert.Equal(t, timestampMs, bh.LastTimeStampMs())
+		assert.Equal(t, epoch, bh.LastEpoch())
+		assert.Equal(t, randSeed, bh.LastRandomSeed())
+		assert.Equal(t, rootHash, bh.GetStateRootHash())
+	})
+
+	t.Run("custom header, do not return old block is set, expect default values", func(t *testing.T) {
+		t.Parallel()
+
+		nonce := uint64(37)
+		round := uint64(5)
+		timestamp := uint64(1234)
+		timestampMs := timestamp * 1000
+		randSeed := []byte("a")
+		rootHash := []byte("b")
+		epoch := uint32(7)
+
+		lastExecutedHdr := &block.Header{
+			Nonce:     nonce,
+			Round:     round,
+			TimeStamp: timestamp,
+			RandSeed:  randSeed,
+			RootHash:  rootHash,
+			Epoch:     epoch,
+		}
+
+		args := createMockBlockChainHookArgs()
+		args.EnableEpochsHandler = enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.DoNotReturnOldBlockInBlockchainHookFlag)
+		args.BlockChain = &testscommon.ChainHandlerStub{
+			GetLastExecutedBlockHeaderCalled: func() data.HeaderHandler {
+				return lastExecutedHdr
+			},
+			GetLastExecutedBlockInfoCalled: func() (uint64, []byte, []byte) {
+				return nonce, []byte("hash"), rootHash
+			},
+		}
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		assert.Equal(t, nonce, bh.LastNonce())
+		assert.Equal(t, round, bh.LastRound())
+		assert.Equal(t, timestamp, bh.LastTimeStamp())
+		assert.Equal(t, timestampMs, bh.LastTimeStampMs())
+		assert.Equal(t, randSeed, bh.LastRandomSeed())
+		assert.Equal(t, epoch, bh.LastEpoch())
+		assert.Equal(t, rootHash, bh.GetStateRootHash())
+	})
+
+	t.Run("header v2, expect correct values are returned", func(t *testing.T) {
+		t.Parallel()
+
+		nonce := uint64(37)
+		round := uint64(5)
+		timestamp := uint64(1234)
+		timestampMs := timestamp * 1000
+		randSeed := []byte("a")
+		rootHash := []byte("b")
+		epoch := uint32(7)
+		lastExecutedHdr := &block.HeaderV2{
+			Header: &block.Header{
+				Nonce:     nonce,
+				Round:     round,
+				TimeStamp: timestamp,
+				RandSeed:  randSeed,
+				RootHash:  rootHash,
+				Epoch:     epoch,
+			},
+		}
+
+		args := createMockBlockChainHookArgs()
+		args.BlockChain = &testscommon.ChainHandlerStub{
+			GetLastExecutedBlockHeaderCalled: func() data.HeaderHandler {
+				return lastExecutedHdr
+			},
+			GetLastExecutedBlockInfoCalled: func() (uint64, []byte, []byte) {
+				return nonce, []byte("hash"), rootHash
+			},
+		}
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		assert.Equal(t, nonce, bh.LastNonce())
+		assert.Equal(t, round, bh.LastRound())
+		assert.Equal(t, timestamp, bh.LastTimeStamp())
+		assert.Equal(t, timestampMs, bh.LastTimeStampMs())
+		assert.Equal(t, epoch, bh.LastEpoch())
+		assert.Equal(t, randSeed, bh.LastRandomSeed())
+		assert.Equal(t, rootHash, bh.GetStateRootHash())
+	})
+
+	t.Run("custom header v3, expect correct values are returned", func(t *testing.T) {
+		t.Parallel()
+
+		nonce := uint64(37)
+		round := uint64(5)
+		timestampS := uint64(1234)
+		timestampMs := uint64(1234000)
+		randSeed := []byte("a")
+		rootHash1 := []byte("c")
+		epoch := uint32(7)
+
+		lastExecutedHdr := &block.HeaderV3{
+			Nonce:       nonce,
+			Round:       round,
+			TimestampMs: timestampMs,
+			RandSeed:    randSeed,
+			Epoch:       epoch,
+		}
+
+		args := createMockBlockChainHookArgs()
+
+		enableEpochsHandlerMock := enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.SupernovaFlag)
+		enableEpochsHandlerMock.IsFlagEnabledInEpochCalled = func(flag core.EnableEpochFlag, epoch uint32) bool {
+			return flag == common.SupernovaFlag
+		}
+		args.EnableEpochsHandler = enableEpochsHandlerMock
+
+		args.BlockChain = &testscommon.ChainHandlerStub{
+			GetLastExecutedBlockHeaderCalled: func() data.HeaderHandler {
+				return lastExecutedHdr
+			},
+			GetLastExecutedBlockInfoCalled: func() (uint64, []byte, []byte) {
+				return nonce, []byte("hash"), rootHash1
+			},
+		}
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		assert.Equal(t, nonce, bh.LastNonce())
+		assert.Equal(t, round, bh.LastRound())
+		assert.Equal(t, timestampS, bh.LastTimeStamp())
+		assert.Equal(t, timestampMs, bh.LastTimeStampMs())
+		assert.Equal(t, epoch, bh.LastEpoch())
+		assert.Equal(t, randSeed, bh.LastRandomSeed())
+		assert.Equal(t, rootHash1, bh.GetStateRootHash())
+	})
+}
+
+func TestBlockChainHookImpl_GettersFromCurrentHeader(t *testing.T) {
+	t.Parallel()
+
+	epoch := uint32(7)
+	randSeed := []byte("a")
+
+	epochStartNonce := uint64(30)
+	epochStartRound := uint64(3)
+	epochStartTimestamp := uint64(1000)
+
+	epochStartHdr := &block.Header{
+		Nonce:              epochStartNonce,
+		Round:              epochStartRound,
+		TimeStamp:          epochStartTimestamp,
+		RandSeed:           randSeed,
+		Epoch:              epoch,
+		EpochStartMetaHash: []byte("meta"),
+	}
+
+	nonce := uint64(37)
+	round := uint64(5)
+	timestamp := uint64(1234)
+
+	hdr := &block.Header{
+		Nonce:     nonce,
+		Round:     round,
+		TimeStamp: timestamp,
+		RandSeed:  randSeed,
+		Epoch:     epoch,
+	}
+
+	args := createMockBlockChainHookArgs()
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+
+	err := bh.SetCurrentHeader(epochStartHdr)
+	require.Nil(t, err)
+
+	err = bh.SetCurrentHeader(hdr)
+	require.Nil(t, err)
+	assert.Equal(t, nonce, bh.CurrentNonce())
+	assert.Equal(t, round, bh.CurrentRound())
+	assert.Equal(t, timestamp, bh.CurrentTimeStamp())
+	assert.Equal(t, epoch, bh.CurrentEpoch())
+	assert.Equal(t, randSeed, bh.CurrentRandomSeed())
+
+	assert.Equal(t, epochStartNonce, bh.EpochStartBlockNonce())
+	assert.Equal(t, epochStartRound, bh.EpochStartBlockRound())
+
+	expEpochStartTimestamp := common.ConvertTimeStampSecToMs(epochStartTimestamp)
+	assert.Equal(t, expEpochStartTimestamp, bh.EpochStartBlockTimeStampMs())
+
+	err = bh.SetCurrentHeader(nil)
+	require.Equal(t, hooks.ErrNilCurrentHeader, err)
+}
+
+func TestBlockChainHookImpl_UpdateEpochStartHeaderFromCurrentHeader(t *testing.T) {
+	t.Parallel()
+
+	t.Run("if current header is epoch start, expect to be set", func(t *testing.T) {
+		t.Parallel()
+
+		epoch := uint32(7)
+		randSeed := []byte("a")
+
+		epochStartNonce := uint64(30)
+		epochStartRound := uint64(3)
+		epochStartTimestamp := uint64(1000)
+
+		epochStartHdr := &block.Header{
+			Nonce:              epochStartNonce,
+			Round:              epochStartRound,
+			TimeStamp:          epochStartTimestamp,
+			RandSeed:           randSeed,
+			Epoch:              epoch,
+			EpochStartMetaHash: []byte("meta"),
+		}
+
+		args := createMockBlockChainHookArgs()
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		err := bh.SetCurrentHeader(epochStartHdr)
+		require.Nil(t, err)
+
+		assert.Equal(t, epochStartNonce, bh.CurrentNonce())
+		assert.Equal(t, epochStartRound, bh.CurrentRound())
+		assert.Equal(t, epochStartTimestamp, bh.CurrentTimeStamp())
+
+		assert.Equal(t, epochStartNonce, bh.EpochStartBlockNonce())
+		assert.Equal(t, epochStartRound, bh.EpochStartBlockRound())
+
+		expEpochStartTimestamp := common.ConvertTimeStampSecToMs(epochStartTimestamp)
+		assert.Equal(t, expEpochStartTimestamp, bh.EpochStartBlockTimeStampMs())
+	})
+
+	t.Run("epoch start header should remain set even if a new non-epoch-start block is set", func(t *testing.T) {
+		t.Parallel()
+
+		epoch := uint32(7)
+		randSeed := []byte("a")
+
+		epochStartNonce := uint64(30)
+		epochStartRound := uint64(3)
+		epochStartTimestamp := uint64(1000)
+
+		epochStartHdr := &block.Header{
+			Nonce:              epochStartNonce,
+			Round:              epochStartRound,
+			TimeStamp:          epochStartTimestamp,
+			RandSeed:           randSeed,
+			Epoch:              epoch,
+			EpochStartMetaHash: []byte("meta"),
+		}
+
+		nonce := uint64(37)
+		round := uint64(5)
+		timestamp := uint64(1234)
+
+		hdr := &block.Header{
+			Nonce:     nonce,
+			Round:     round,
+			TimeStamp: timestamp,
+			RandSeed:  randSeed,
+			Epoch:     epoch,
+		}
+
+		args := createMockBlockChainHookArgs()
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		err := bh.SetCurrentHeader(epochStartHdr)
+		require.Nil(t, err)
+
+		err = bh.SetCurrentHeader(hdr)
+		require.Nil(t, err)
+
+		assert.Equal(t, nonce, bh.CurrentNonce())
+		assert.Equal(t, round, bh.CurrentRound())
+		assert.Equal(t, timestamp, bh.CurrentTimeStamp())
+
+		assert.Equal(t, epochStartNonce, bh.EpochStartBlockNonce())
+		assert.Equal(t, epochStartRound, bh.EpochStartBlockRound())
+
+		expEpochStartTimestamp := common.ConvertTimeStampSecToMs(epochStartTimestamp)
+		assert.Equal(t, expEpochStartTimestamp, bh.EpochStartBlockTimeStampMs())
+	})
+
+	t.Run("if current header epoch is 0, expect the genesis epoch start block to be set", func(t *testing.T) {
+		t.Parallel()
+
+		epoch := uint32(0)
+		randSeed := []byte("a")
+
+		nonce := uint64(37)
+		round := uint64(5)
+		timestamp := uint64(1234)
+
+		hdr := &block.Header{
+			Nonce:     nonce,
+			Round:     round,
+			TimeStamp: timestamp,
+			RandSeed:  randSeed,
+			Epoch:     epoch,
+		}
+
+		args := createMockBlockChainHookArgs()
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		err := bh.SetCurrentHeader(hdr)
+		require.Nil(t, err)
+
+		assert.Equal(t, nonce, bh.CurrentNonce())
+		assert.Equal(t, round, bh.CurrentRound())
+		assert.Equal(t, timestamp, bh.CurrentTimeStamp())
+
+		genesisBlock := args.BlockChain.GetGenesisHeader()
+
+		assert.Equal(t, genesisBlock.GetNonce(), bh.EpochStartBlockNonce())
+		assert.Equal(t, genesisBlock.GetRound(), bh.EpochStartBlockRound())
+		assert.Equal(t, genesisBlock.GetTimeStamp(), bh.EpochStartBlockTimeStampMs())
+	})
+
+	t.Run("get last commited epoch start block if not set", func(t *testing.T) {
+		t.Parallel()
+
+		epoch := uint32(7)
+		randSeed := []byte("a")
+
+		epochStartNonce := uint64(30)
+		epochStartRound := uint64(3)
+		epochStartTimestamp := uint64(1000)
+
+		epochStartHdr := &block.Header{
+			Nonce:              epochStartNonce,
+			Round:              epochStartRound,
+			TimeStamp:          epochStartTimestamp,
+			RandSeed:           randSeed,
+			Epoch:              epoch,
+			EpochStartMetaHash: []byte("meta"),
+		}
+
+		nonce := uint64(37)
+		round := uint64(5)
+		timestamp := uint64(1234)
+
+		hdr := &block.Header{
+			Nonce:     nonce,
+			Round:     round,
+			TimeStamp: timestamp,
+			RandSeed:  randSeed,
+			Epoch:     epoch,
+		}
+
+		args := createMockBlockChainHookArgs()
+		args.EpochStartTrigger = &testscommon.EpochStartTriggerStub{
+			LastCommitedEpochStartHdrCalled: func() (data.HeaderHandler, error) {
+				return epochStartHdr, nil
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		err := bh.SetCurrentHeader(hdr)
+		require.Nil(t, err)
+
+		assert.Equal(t, nonce, bh.CurrentNonce())
+		assert.Equal(t, round, bh.CurrentRound())
+		assert.Equal(t, timestamp, bh.CurrentTimeStamp())
+
+		assert.Equal(t, epochStartNonce, bh.EpochStartBlockNonce())
+		assert.Equal(t, epochStartRound, bh.EpochStartBlockRound())
+
+		expEpochStartTimestamp := common.ConvertTimeStampSecToMs(epochStartTimestamp)
+		assert.Equal(t, expEpochStartTimestamp, bh.EpochStartBlockTimeStampMs())
+	})
+
+	t.Run("get epoch start header from storage if not found in last commited", func(t *testing.T) {
+		t.Parallel()
+
+		epoch := uint32(7)
+		randSeed := []byte("a")
+
+		epochStartNonce := uint64(30)
+		epochStartRound := uint64(3)
+		epochStartTimestamp := uint64(1000)
+
+		olderEpochStartHdr := &block.Header{
+			Nonce:              epochStartNonce,
+			Round:              epochStartRound,
+			TimeStamp:          epochStartTimestamp,
+			RandSeed:           randSeed,
+			Epoch:              epoch - 1,
+			EpochStartMetaHash: []byte("meta"),
+		}
+
+		currentEpochStartHdr := &block.Header{
+			Nonce:              epochStartNonce,
+			Round:              epochStartRound,
+			TimeStamp:          epochStartTimestamp,
+			RandSeed:           randSeed,
+			Epoch:              epoch,
+			EpochStartMetaHash: []byte("meta"),
+		}
+
+		nonce := uint64(37)
+		round := uint64(5)
+		timestamp := uint64(1234)
+
+		hdr := &block.Header{
+			Nonce:     nonce,
+			Round:     round,
+			TimeStamp: timestamp,
+			RandSeed:  randSeed,
+			Epoch:     epoch,
+		}
+
+		args := createMockBlockChainHookArgs()
+		args.EpochStartTrigger = &testscommon.EpochStartTriggerStub{
+			LastCommitedEpochStartHdrCalled: func() (data.HeaderHandler, error) {
+				return olderEpochStartHdr, nil
+			},
+			GetEpochStartHdrFromStorageCalled: func(epoch uint32) (data.HeaderHandler, error) {
+				return currentEpochStartHdr, nil
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		err := bh.SetCurrentHeader(hdr)
+		require.Nil(t, err)
+
+		assert.Equal(t, nonce, bh.CurrentNonce())
+		assert.Equal(t, round, bh.CurrentRound())
+		assert.Equal(t, timestamp, bh.CurrentTimeStamp())
+
+		assert.Equal(t, epochStartNonce, bh.EpochStartBlockNonce())
+		assert.Equal(t, epochStartRound, bh.EpochStartBlockRound())
+
+		expEpochStartTimestamp := common.ConvertTimeStampSecToMs(epochStartTimestamp)
+		assert.Equal(t, expEpochStartTimestamp, bh.EpochStartBlockTimeStampMs())
+	})
+}
+
+func TestBlockChainHookImpl_CurrentEpoch(t *testing.T) {
+	t.Parallel()
+
+	const activationEpoch = uint32(2235)
+	tests := []struct {
+		name                 string
+		header               data.HeaderHandler
+		expectedEpoch        uint32
+		expectedCheckedEpoch uint32
+	}{
+		{
+			name: "legacy header returns header epoch",
+			header: &block.MetaBlock{
+				Epoch: 2234,
+			},
+			expectedEpoch: 2234,
+		},
+		{
+			name: "regular V3 header returns header epoch",
+			header: &block.MetaBlockV3{
+				Epoch: 2234,
+			},
+			expectedEpoch: 2234,
+		},
+		{
+			name: "shard V3 header returns header epoch",
+			header: &block.HeaderV3{
+				Epoch: 2234,
+			},
+			expectedEpoch: 2234,
+		},
+		{
+			name: "epoch change proposed before activation returns header epoch",
+			header: &block.MetaBlockV3{
+				Epoch:               2233,
+				EpochChangeProposed: true,
+			},
+			expectedEpoch:        2233,
+			expectedCheckedEpoch: 2234,
+		},
+		{
+			name: "epoch change proposed at activation returns prepared epoch",
+			header: &block.MetaBlockV3{
+				Epoch:               2234,
+				EpochChangeProposed: true,
+			},
+			expectedEpoch:        2235,
+			expectedCheckedEpoch: 2235,
+		},
+		{
+			name: "epoch change proposed after activation returns prepared epoch",
+			header: &block.MetaBlockV3{
+				Epoch:               2235,
+				EpochChangeProposed: true,
+			},
+			expectedEpoch:        2236,
+			expectedCheckedEpoch: 2236,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			args := createMockBlockChainHookArgs()
+			args.EnableEpochsHandler = &enableEpochsHandlerMock.EnableEpochsHandlerStub{
+				IsFlagEnabledInEpochCalled: func(flag core.EnableEpochFlag, epoch uint32) bool {
+					require.Equal(t, common.FixEpochChangeProposedCurrentEpochFlag, flag)
+					require.Equal(t, test.expectedCheckedEpoch, epoch)
+
+					return epoch >= activationEpoch
+				},
+			}
+
+			bh, err := hooks.NewBlockChainHookImpl(args)
+			require.NoError(t, err)
+
+			err = bh.SetEpochStartHeader(&block.MetaBlock{Epoch: test.header.GetEpoch()})
+			require.NoError(t, err)
+			err = bh.SetCurrentHeader(test.header)
+			require.NoError(t, err)
+
+			assert.Equal(t, test.expectedEpoch, bh.CurrentEpoch())
+		})
+	}
+}
+
+func TestBlockChainHookImpl_GettersFromEpochStartHeader(t *testing.T) {
+	t.Parallel()
+
+	epoch := uint32(7)
+	randSeed := []byte("a")
+
+	epochStartNonce := uint64(30)
+	epochStartRound := uint64(3)
+	epochStartTimestamp := uint64(1000)
+	expEpochStartTimestamp := common.ConvertTimeStampSecToMs(epochStartTimestamp)
+
+	epochStartHdr := &block.Header{
+		Nonce:              epochStartNonce,
+		Round:              epochStartRound,
+		TimeStamp:          epochStartTimestamp,
+		RandSeed:           randSeed,
+		Epoch:              epoch,
+		EpochStartMetaHash: []byte("meta"),
+	}
+
+	args := createMockBlockChainHookArgs()
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+
+	err := bh.SetCurrentHeader(epochStartHdr)
+	require.Nil(t, err)
+
+	assert.Equal(t, epochStartNonce, bh.EpochStartBlockNonce())
+	assert.Equal(t, epochStartRound, bh.EpochStartBlockRound())
+	assert.Equal(t, expEpochStartTimestamp, bh.EpochStartBlockTimeStampMs())
+}
+
+func TestBlockChainHookImpl_GettersFromRoundHandler(t *testing.T) {
+	t.Parallel()
+
+	expectedTime := time.Second * 15
+
+	args := createMockBlockChainHookArgs()
+	args.RoundHandler = &testscommon.RoundHandlerMock{
+		TimeDurationCalled: func() time.Duration {
+			return expectedTime
+		},
+	}
+
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+
+	assert.Equal(t, uint64(expectedTime.Milliseconds()), bh.RoundTime())
+}
+
+func TestBlockChainHookImpl_RoundTime_UsesCurrentBlockRound(t *testing.T) {
+	t.Parallel()
+
+	supernovaRound := uint64(32170000)
+	preSupernovaDuration := 6000 * time.Millisecond
+	postSupernovaDuration := 600 * time.Millisecond
+
+	args := createMockBlockChainHookArgs()
+	args.RoundHandler = &testscommon.RoundHandlerMock{
+		TimeDurationForRoundCalled: func(round uint64) time.Duration {
+			if round >= supernovaRound {
+				return postSupernovaDuration
+			}
+			return preSupernovaDuration
+		},
+	}
+
+	bh, err := hooks.NewBlockChainHookImpl(args)
+	require.Nil(t, err)
+
+	// Block header at pre-Supernova round (e.g. 32055029 in epoch 2225)
+	err = bh.SetCurrentHeader(&block.Header{
+		Round: 32055029,
+		Epoch: 2225,
+	})
+	require.Nil(t, err)
+	require.Equal(t, uint64(preSupernovaDuration.Milliseconds()), bh.RoundTime())
+
+	// Block header at post-Supernova round (e.g. 33000000)
+	err = bh.SetCurrentHeader(&block.Header{
+		Round: 33000000,
+		Epoch: 2235,
+	})
+	require.Nil(t, err)
+	require.Equal(t, uint64(postSupernovaDuration.Milliseconds()), bh.RoundTime())
+}
+
+func TestBlockChainHookImpl_SaveNFTMetaDataToSystemAccount(t *testing.T) {
+	t.Parallel()
+
+	expectedTx := &transaction.Transaction{Nonce: 1}
+
+	args := createMockBlockChainHookArgs()
+	args.NFTStorageHandler = &testscommon.SimpleNFTStorageHandlerStub{
+		SaveNFTMetaDataToSystemAccountCalled: func(tx data.TransactionHandler) error {
+			require.Equal(t, expectedTx, tx)
+			return nil
+		},
+	}
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	err := bh.SaveNFTMetaDataToSystemAccount(expectedTx)
+	require.Nil(t, err)
+}
+
+func TestBlockChainHookImpl_GetShardOfAddress(t *testing.T) {
+	t.Parallel()
+
+	expectedAddr := []byte("address")
+	expectedShardID := uint32(444)
+
+	args := createMockBlockChainHookArgs()
+	args.ShardCoordinator = &testscommon.ShardsCoordinatorMock{
+		ComputeIdCalled: func(address []byte) uint32 {
+			require.Equal(t, expectedAddr, address)
+			return expectedShardID
+		},
+	}
+
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	shardID := bh.GetShardOfAddress(expectedAddr)
+	require.Equal(t, expectedShardID, shardID)
+}
+
+func TestBlockChainHookImpl_IsPayableNormalAccount(t *testing.T) {
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	isPayable, err := bh.IsPayable([]byte("address"), []byte("address"))
+	assert.True(t, isPayable)
+	assert.Nil(t, err)
+}
+
+func TestBlockChainHookImpl_IsPayableSCNonPayable(t *testing.T) {
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+	args.Accounts = &stateMock.AccountsStub{
+		GetExistingAccountCalled: func(address []byte) (vmcommon.AccountHandler, error) {
+			acc := &stateMock.AccountWrapMock{}
+			acc.SetCodeMetadata([]byte{0, 0})
+			return acc, nil
+		},
+	}
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	isPayable, err := bh.IsPayable([]byte("address"), make([]byte, 32))
+	assert.False(t, isPayable)
+	assert.Nil(t, err)
+}
+
+func TestBlockChainHookImpl_IsPayablePayable(t *testing.T) {
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+	args.Accounts = &stateMock.AccountsStub{
+		GetExistingAccountCalled: func(address []byte) (handler vmcommon.AccountHandler, e error) {
+			acc := &stateMock.AccountWrapMock{}
+			acc.SetCodeMetadata([]byte{0, vmcommon.MetadataPayable})
+			return acc, nil
+		},
+	}
+
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	isPayable, err := bh.IsPayable([]byte("address"), make([]byte, 32))
+	assert.True(t, isPayable)
+	assert.Nil(t, err)
+
+	isPayable, err = bh.IsPayable(make([]byte, 32), make([]byte, 32))
+	assert.True(t, isPayable)
+	assert.Nil(t, err)
+}
+
+func TestBlockChainHookImpl_IsPayablePayableBySC(t *testing.T) {
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+	args.Accounts = &stateMock.AccountsStub{
+		GetExistingAccountCalled: func(address []byte) (handler vmcommon.AccountHandler, e error) {
+			acc := &stateMock.AccountWrapMock{}
+			acc.SetCodeMetadata([]byte{0, vmcommon.MetadataPayableBySC})
+			return acc, nil
+		},
+	}
+	args.EnableEpochsHandler = enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.PayableBySCFlag)
+
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	isPayable, err := bh.IsPayable(make([]byte, 32), make([]byte, 32))
+	assert.True(t, isPayable)
+	assert.Nil(t, err)
+}
+
+func TestBlockChainHookImpl_IsPayableReceiverIsSystemAccountNotPayable(t *testing.T) {
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+
+	receiver := make([]byte, 32)
+	copy(receiver, core.SystemAccountAddress)
+
+	isPayable, err := bh.IsPayable(make([]byte, 32), receiver)
+	require.False(t, isPayable)
+	require.Nil(t, err)
+}
+
+func TestTestBlockChainHookImpl_IsPayableReceiverIsCrossShardNotPayable(t *testing.T) {
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+	receiver := make([]byte, 32)
+	args.ShardCoordinator = &testscommon.ShardsCoordinatorMock{
+		ComputeIdCalled: func(address []byte) uint32 {
+			require.Equal(t, receiver, address)
+			return 1
+		},
+		SelfIDCalled: func() uint32 {
+			return 0
+		},
+	}
+
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	isPayable, err := bh.IsPayable([]byte("sender"), receiver)
+	require.True(t, isPayable)
+	require.Nil(t, err)
+}
+
+func TestTestBlockChainHookImpl_IsPayableReceiverNotFoundNotPayable(t *testing.T) {
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+	receiver := make([]byte, 32)
+	args.Accounts = &stateMock.AccountsStub{
+		GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+			require.Equal(t, addressContainer, receiver)
+			return nil, state.ErrAccNotFound
+		},
+	}
+
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	isPayable, err := bh.IsPayable([]byte("sender"), receiver)
+	require.False(t, isPayable)
+	require.Nil(t, err)
+}
+
+func TestTestBlockChainHookImpl_IsPayableErrorGettingReceiverNotPayable(t *testing.T) {
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+	receiver := make([]byte, 32)
+	errGetAccount := errors.New("error getting account")
+	args.Accounts = &stateMock.AccountsStub{
+		GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+			require.Equal(t, addressContainer, receiver)
+			return nil, errGetAccount
+		},
+	}
+
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	isPayable, err := bh.IsPayable([]byte("sender"), receiver)
+	require.False(t, isPayable)
+	require.Equal(t, errGetAccount, err)
+}
+
+func TestBlockChainHookImpl_GetBuiltinFunctionNamesAndContainer(t *testing.T) {
+	t.Parallel()
+
+	builtInFunctionContainer := vmcommonBuiltInFunctions.NewBuiltInFunctionContainer()
+	_ = builtInFunctionContainer.Add("func1", &mock.BuiltInFunctionStub{})
+	_ = builtInFunctionContainer.Add("func2", &mock.BuiltInFunctionStub{})
+
+	args := createMockBlockChainHookArgs()
+	args.BuiltInFunctions = builtInFunctionContainer
+
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	funcNames := bh.GetBuiltinFunctionNames()
+	expectedFuncNames := vmcommon.FunctionNames{
+		"func1": {},
+		"func2": {},
+	}
+	require.Equal(t, expectedFuncNames, funcNames)
+	require.Equal(t, builtInFunctionContainer, bh.GetBuiltinFunctionsContainer())
+}
+
+func TestBlockChainHookImpl_NumberOfShards(t *testing.T) {
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+	args.ShardCoordinator = &testscommon.ShardsCoordinatorMock{NoShards: 4}
+
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	require.Equal(t, uint32(4), bh.NumberOfShards())
+}
+
+func TestBlockChainHookImpl_SaveCompiledCode(t *testing.T) {
+	t.Parallel()
+
+	code := []byte("code")
+	codeHash := []byte("codeHash")
+
+	t.Run("get compiled code from compiled sc pool", func(t *testing.T) {
+		args := createMockBlockChainHookArgs()
+
+		wasCodeSavedInPool := &atomic.Flag{}
+		args.CompiledSCPool = &cache.CacherStub{
+			GetCalled: func(key []byte) (value interface{}, ok bool) {
+				require.Equal(t, codeHash, key)
+				return code, true
+			},
+			PutCalled: func(key []byte, value interface{}, sizeInBytes int) (evicted bool) {
+				wasCodeSavedInPool.SetValue(true)
+				return false
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		found, actualCode := bh.GetCompiledCode(codeHash)
+		require.True(t, found)
+		require.Equal(t, code, actualCode)
+		require.False(t, wasCodeSavedInPool.IsSet())
+	})
+	t.Run("compiled code found in compiled sc pool, but not as byte slice, error getting it from storage", func(t *testing.T) {
+		args := createMockBlockChainHookArgs()
+		args.NilCompiledSCStore = true
+
+		wasCodeSavedInPool := &atomic.Flag{}
+		args.CompiledSCPool = &cache.CacherStub{
+			GetCalled: func(key []byte) (value interface{}, ok bool) {
+				require.Equal(t, codeHash, key)
+				return struct{}{}, true
+			},
+			PutCalled: func(key []byte, value interface{}, sizeInBytes int) (evicted bool) {
+				wasCodeSavedInPool.SetValue(true)
+				return false
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		found, actualCode := bh.GetCompiledCode(codeHash)
+		require.False(t, found)
+		require.Nil(t, actualCode)
+		require.False(t, wasCodeSavedInPool.IsSet())
+	})
+	t.Run("compiled code found in storage, but nil", func(t *testing.T) {
+		args := createMockBlockChainHookArgs()
+		args.NilCompiledSCStore = false
+		args.ConfigSCStorage = config.StorageConfig{
+			Cache: config.CacheConfig{
+				Capacity: 10,
+				Type:     string(storageunit.LRUCache),
+			},
+			DB: config.DBConfig{
+				FilePath:     "test1",
+				Type:         string(storageunit.MemoryDB),
+				MaxBatchSize: 1,
+				MaxOpenFiles: 10,
+			},
+		}
+		wasCodeSavedInPool := &atomic.Flag{}
+		args.CompiledSCPool = &cache.CacherStub{
+			GetCalled: func(key []byte) (value interface{}, ok bool) {
+				require.Equal(t, codeHash, key)
+				return nil, false
+			},
+			PutCalled: func(key []byte, value interface{}, sizeInBytes int) (evicted bool) {
+				wasCodeSavedInPool.SetValue(true)
+				return false
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		bh.SaveCompiledCode(codeHash, nil)
+
+		wasCodeSavedInPool.Reset()
+		found, actualCode := bh.GetCompiledCode(codeHash)
+		require.False(t, found)
+		require.Nil(t, actualCode)
+		require.False(t, wasCodeSavedInPool.IsSet())
+
+		_ = bh.Close()
+	})
+	t.Run("compiled code not found in compiled sc pool, get it from storage", func(t *testing.T) {
+		args := createMockBlockChainHookArgs()
+		args.ConfigSCStorage = config.StorageConfig{
+			Cache: config.CacheConfig{
+				Capacity: 10,
+				Type:     string(storageunit.LRUCache),
+			},
+			DB: config.DBConfig{
+				FilePath:     "test2",
+				Type:         string(storageunit.MemoryDB),
+				MaxBatchSize: 1,
+				MaxOpenFiles: 10,
+			},
+		}
+		args.NilCompiledSCStore = false
+		args.CompiledSCPool = &cache.CacherStub{
+			GetCalled: func(key []byte) (value interface{}, ok bool) {
+				require.Equal(t, codeHash, key)
+				return nil, false
+			},
+			PutCalled: func(key []byte, value interface{}, sizeInBytes int) (evicted bool) {
+				require.Equal(t, codeHash, key)
+				require.Equal(t, code, value)
+				require.Equal(t, len(code), sizeInBytes)
+				return false
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		bh.SaveCompiledCode(codeHash, code)
+		found, actualCode := bh.GetCompiledCode(codeHash)
+		require.True(t, found)
+		require.Equal(t, code, actualCode)
+
+		bh.DeleteCompiledCode(codeHash)
+		found, actualCode = bh.GetCompiledCode(codeHash)
+		require.False(t, found)
+		require.Nil(t, actualCode)
+
+		_ = bh.Close()
+	})
+}
+
+func TestBlockChainHookImpl_CompiledCodeConcurrency(t *testing.T) {
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+	args.NilCompiledSCStore = false
+	args.ConfigSCStorage = config.StorageConfig{
+		Cache: config.CacheConfig{
+			Capacity: 100,
+			Type:     string(storageunit.LRUCache),
+		},
+		DB: config.DBConfig{
+			FilePath:     t.TempDir(),
+			Type:         string(storageunit.MemoryDB),
+			MaxBatchSize: 10,
+		},
+	}
+
+	bh, err := hooks.NewBlockChainHookImpl(args)
+	require.NoError(t, err)
+
+	numGoroutines := 10
+	iterations := 50
+	wg := sync.WaitGroup{}
+	wg.Add(numGoroutines * 4)
+
+	for i := 0; i < numGoroutines; i++ {
+		key := []byte(fmt.Sprintf("codeHash-%d", i))
+		val := []byte(fmt.Sprintf("compiledCode-%d", i))
+
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				bh.SaveCompiledCode(key, val)
+			}
+		}()
+
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				_, _ = bh.GetCompiledCode(key)
+			}
+		}()
+
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				bh.DeleteCompiledCode(key)
+			}
+		}()
+
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				bh.ClearCompiledCodes()
+			}
+		}()
+	}
+
+	wg.Wait()
+	_ = bh.Close()
+}
+
+func TestBlockChainHookImpl_GetSnapshot(t *testing.T) {
+
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+	args.Accounts = &stateMock.AccountsStub{
+		JournalLenCalled: func() int {
+			return 444
+		},
+	}
+
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	require.Equal(t, 444, bh.GetSnapshot())
+}
+
+func TestBlockChainHookImpl_RevertToSnapshot(t *testing.T) {
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+	args.Accounts = &stateMock.AccountsStub{
+		RevertToSnapshotCalled: func(snapshot int) error {
+			require.Equal(t, 444, snapshot)
+			return nil
+		},
+	}
+
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	require.Nil(t, bh.RevertToSnapshot(444))
+}
+
+func TestBlockChainHookImpl_ProcessBuiltInFunction(t *testing.T) {
+	t.Parallel()
+
+	funcName := "func"
+	builtInFunctionsContainer := vmcommonBuiltInFunctions.NewBuiltInFunctionContainer()
+	_ = builtInFunctionsContainer.Add(funcName, &mock.BuiltInFunctionStub{})
+
+	addrSender := []byte("addr sender")
+	addrReceiver := []byte("addr receiver")
+
+	errGetAccount := errors.New("cannot get account")
+	errSaveAccount := errors.New("error saving account")
+
+	t.Run("nil input, expect error", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		output, err := bh.ProcessBuiltInFunction(nil)
+		require.Nil(t, output)
+		require.Equal(t, process.ErrNilVmInput, err)
+	})
+	t.Run("no function set in built in function container, expect error", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		output, err := bh.ProcessBuiltInFunction(&vmcommon.ContractCallInput{})
+		require.Nil(t, output)
+		require.Error(t, err)
+		require.True(t, strings.Contains(err.Error(), vmcommonBuiltInFunctions.ErrInvalidContainerKey.Error()))
+	})
+	t.Run("cannot get sender account, expect error", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		args.BuiltInFunctions = builtInFunctionsContainer
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				require.Equal(t, addrSender, addressContainer)
+				return nil, errGetAccount
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		input := createContractCallInput(funcName, addrSender, addrReceiver)
+		output, err := bh.ProcessBuiltInFunction(input)
+
+		require.Nil(t, output)
+		require.Equal(t, errGetAccount, err)
+	})
+	t.Run("cannot convert sender account to user account, expect error", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		args.BuiltInFunctions = builtInFunctionsContainer
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				require.Equal(t, addrSender, addressContainer)
+				return &stateMock.StateUserAccountHandlerStub{}, nil
+			},
+		}
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		input := createContractCallInput(funcName, addrSender, addrReceiver)
+		output, err := bh.ProcessBuiltInFunction(input)
+
+		require.Nil(t, output)
+		require.Equal(t, process.ErrWrongTypeAssertion, err)
+	})
+	t.Run("cannot load destination account, expect error", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		args.BuiltInFunctions = builtInFunctionsContainer
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				require.Equal(t, addrSender, addressContainer)
+				return stateMock.NewAccountWrapMock(addrSender), nil
+			},
+
+			LoadAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				require.Equal(t, addrReceiver, addressContainer)
+				return nil, errGetAccount
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		input := createContractCallInput(funcName, addrSender, addrReceiver)
+		output, err := bh.ProcessBuiltInFunction(input)
+
+		require.Nil(t, output)
+		require.Equal(t, errGetAccount, err)
+	})
+	t.Run("cannot convert destination account to user account, expect error", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		args.BuiltInFunctions = builtInFunctionsContainer
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				require.Equal(t, addrSender, addressContainer)
+				return stateMock.NewAccountWrapMock(addrSender), nil
+			},
+
+			LoadAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				require.Equal(t, addrReceiver, addressContainer)
+				return &stateMock.StateUserAccountHandlerStub{}, nil
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		input := createContractCallInput(funcName, addrSender, addrReceiver)
+		output, err := bh.ProcessBuiltInFunction(input)
+
+		require.Nil(t, output)
+		require.Equal(t, process.ErrWrongTypeAssertion, err)
+	})
+	t.Run("cannot process new built in function, expect error", func(t *testing.T) {
+		t.Parallel()
+
+		newFunc := "newFunc"
+		input := createContractCallInput(newFunc, addrSender, addrReceiver)
+
+		errProcessBuiltInFunc := errors.New("error processing builtin func")
+		newBuiltInFunc := &mock.BuiltInFunctionStub{
+			ProcessBuiltinFunctionCalled: func(acntSnd, acntDst vmcommon.UserAccountHandler, vmInput *vmcommon.ContractCallInput) (*vmcommon.VMOutput, error) {
+				require.Equal(t, addrSender, acntSnd.AddressBytes())
+				require.Equal(t, addrReceiver, acntDst.AddressBytes())
+				require.Equal(t, input, vmInput)
+
+				return nil, errProcessBuiltInFunc
+			},
+		}
+		newBuiltInFuncContainer := vmcommonBuiltInFunctions.NewBuiltInFunctionContainer()
+		_ = newBuiltInFuncContainer.Add(newFunc, newBuiltInFunc)
+
+		args := createMockBlockChainHookArgs()
+		args.BuiltInFunctions = newBuiltInFuncContainer
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				require.Equal(t, addrSender, addressContainer)
+				return stateMock.NewAccountWrapMock(addrSender), nil
+			},
+
+			LoadAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				require.Equal(t, addrReceiver, addressContainer)
+				return stateMock.NewAccountWrapMock(addrReceiver), nil
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		output, err := bh.ProcessBuiltInFunction(input)
+		require.Nil(t, output)
+		require.Equal(t, errProcessBuiltInFunc, err)
+	})
+	t.Run("sender and receiver not in same shard, expect they are not saved", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		args.BuiltInFunctions = builtInFunctionsContainer
+
+		args.ShardCoordinator = &testscommon.ShardsCoordinatorMock{
+			ComputeIdCalled: func(address []byte) uint32 {
+				isSender := bytes.Equal(addrSender, address)
+				isReceiver := bytes.Equal(addrReceiver, address)
+				require.True(t, isSender || isReceiver)
+
+				return 0
+			},
+			SelfIDCalled: func() uint32 {
+				return 1
+			},
+		}
+
+		getSenderAccountCalled := &atomic.Flag{}
+		getReceiverAccountCalled := &atomic.Flag{}
+		saveAccountCalled := &atomic.Flag{}
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				getSenderAccountCalled.SetValue(true)
+				return nil, nil
+			},
+
+			LoadAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				getReceiverAccountCalled.SetValue(true)
+				return nil, nil
+			},
+			SaveAccountCalled: func(account vmcommon.AccountHandler) error {
+				saveAccountCalled.SetValue(true)
+				return nil
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		input := createContractCallInput(funcName, addrSender, addrReceiver)
+		output, err := bh.ProcessBuiltInFunction(input)
+
+		require.Nil(t, err)
+		require.Equal(t, &vmcommon.VMOutput{}, output)
+		require.False(t, getSenderAccountCalled.IsSet())
+		require.False(t, getReceiverAccountCalled.IsSet())
+		require.False(t, saveAccountCalled.IsSet())
+	})
+	t.Run("sender and receiver same shard, expect accounts saved", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		args.BuiltInFunctions = builtInFunctionsContainer
+
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				require.Equal(t, addrSender, addressContainer)
+				return stateMock.NewAccountWrapMock(addrSender), nil
+			},
+
+			LoadAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				require.Equal(t, addrReceiver, addressContainer)
+				return stateMock.NewAccountWrapMock(addrReceiver), nil
+			},
+			SaveAccountCalled: func(account vmcommon.AccountHandler) error {
+				isSender := bytes.Equal(addrSender, account.AddressBytes())
+				isReceiver := bytes.Equal(addrReceiver, account.AddressBytes())
+
+				require.True(t, isSender || isReceiver)
+				return nil
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		input := createContractCallInput(funcName, addrSender, addrReceiver)
+		output, err := bh.ProcessBuiltInFunction(input)
+
+		require.Nil(t, err)
+		require.Equal(t, &vmcommon.VMOutput{}, output)
+	})
+	t.Run("sender and receiver same shard, sender = receiver, expect only one account is saved", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		args.BuiltInFunctions = builtInFunctionsContainer
+
+		getReceiverAccountCalled := &atomic.Flag{}
+		ctSaveAccount := &atomic.Counter{}
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				require.Equal(t, addrSender, addressContainer)
+				return stateMock.NewAccountWrapMock(addrSender), nil
+			},
+
+			LoadAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				getReceiverAccountCalled.SetValue(true)
+				return nil, nil
+			},
+			SaveAccountCalled: func(account vmcommon.AccountHandler) error {
+				require.Equal(t, addrSender, account.AddressBytes())
+				ctSaveAccount.Increment()
+				return nil
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		input := createContractCallInput(funcName, addrSender, addrSender)
+		output, err := bh.ProcessBuiltInFunction(input)
+
+		require.Nil(t, err)
+		require.Equal(t, &vmcommon.VMOutput{}, output)
+		require.Equal(t, int64(1), ctSaveAccount.Get())
+		require.False(t, getReceiverAccountCalled.IsSet())
+	})
+	t.Run("cannot save sender account, expect error", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		args.BuiltInFunctions = builtInFunctionsContainer
+
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				require.Equal(t, addrSender, addressContainer)
+				return stateMock.NewAccountWrapMock(addrSender), nil
+			},
+			SaveAccountCalled: func(account vmcommon.AccountHandler) error {
+				require.Equal(t, addrSender, account.AddressBytes())
+				return errSaveAccount
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		input := createContractCallInput(funcName, addrSender, addrSender)
+		output, err := bh.ProcessBuiltInFunction(input)
+
+		require.Nil(t, output)
+		require.Equal(t, errSaveAccount, err)
+	})
+	t.Run("cannot save receiver account, expect error", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		args.BuiltInFunctions = builtInFunctionsContainer
+
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				require.Equal(t, addrSender, addressContainer)
+				return stateMock.NewAccountWrapMock(addrSender), nil
+			},
+
+			LoadAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				require.Equal(t, addrReceiver, addressContainer)
+				return stateMock.NewAccountWrapMock(addrReceiver), nil
+			},
+			SaveAccountCalled: func(account vmcommon.AccountHandler) error {
+				isSender := bytes.Equal(addrSender, account.AddressBytes())
+				isReceiver := bytes.Equal(addrReceiver, account.AddressBytes())
+				require.True(t, isSender || isReceiver)
+
+				if isSender {
+					return nil
+				}
+				return errSaveAccount
+
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		input := createContractCallInput(funcName, addrSender, addrReceiver)
+		output, err := bh.ProcessBuiltInFunction(input)
+
+		require.Nil(t, output)
+		require.Equal(t, errSaveAccount, err)
+	})
+	t.Run("processing counter errors should error", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		args.EnableEpochsHandler = enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.MaxBlockchainHookCountersFlag)
+		args.BuiltInFunctions = builtInFunctionsContainer
+
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				return stateMock.NewAccountWrapMock(addrSender), nil
+			},
+			LoadAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				return nil, nil
+			},
+			SaveAccountCalled: func(account vmcommon.AccountHandler) error {
+				return nil
+			},
+		}
+		expectedErr := errors.New("expected error")
+		args.Counter = &testscommon.BlockChainHookCounterStub{
+			ProcessMaxBuiltInCountersCalled: func(input *vmcommon.ContractCallInput) error {
+				return expectedErr
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		input := createContractCallInput(funcName, addrSender, addrSender)
+		output, err := bh.ProcessBuiltInFunction(input)
+
+		require.Equal(t, expectedErr, err)
+		require.Nil(t, output)
+	})
+	t.Run("should work with counters", func(t *testing.T) {
+		t.Parallel()
+
+		counterProcessedCalled := false
+		args := createMockBlockChainHookArgs()
+		args.EnableEpochsHandler = enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.MaxBlockchainHookCountersFlag)
+		args.BuiltInFunctions = builtInFunctionsContainer
+
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				return stateMock.NewAccountWrapMock(addrSender), nil
+			},
+			LoadAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				return nil, nil
+			},
+			SaveAccountCalled: func(account vmcommon.AccountHandler) error {
+				return nil
+			},
+		}
+		args.Counter = &testscommon.BlockChainHookCounterStub{
+			ProcessMaxBuiltInCountersCalled: func(input *vmcommon.ContractCallInput) error {
+				counterProcessedCalled = true
+				return nil
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		input := createContractCallInput(funcName, addrSender, addrSender)
+		output, err := bh.ProcessBuiltInFunction(input)
+
+		require.Nil(t, err)
+		require.Equal(t, &vmcommon.VMOutput{}, output)
+		assert.True(t, counterProcessedCalled)
+	})
+	t.Run("should work with counters and metachain", func(t *testing.T) {
+		t.Parallel()
+
+		counterProcessedCalled := false
+		args := createMockBlockChainHookArgs()
+		args.EnableEpochsHandler = enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.MaxBlockchainHookCountersFlag)
+		args.BuiltInFunctions = builtInFunctionsContainer
+		args.ShardCoordinator = &testscommon.ShardsCoordinatorMock{
+			CurrentShard: core.MetachainShardId,
+		}
+
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				return stateMock.NewAccountWrapMock(addrSender), nil
+			},
+			LoadAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				return nil, nil
+			},
+			SaveAccountCalled: func(account vmcommon.AccountHandler) error {
+				return nil
+			},
+		}
+		args.Counter = &testscommon.BlockChainHookCounterStub{
+			ProcessMaxBuiltInCountersCalled: func(input *vmcommon.ContractCallInput) error {
+				counterProcessedCalled = true
+				return nil
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		input := createContractCallInput(funcName, addrSender, addrSender)
+		output, err := bh.ProcessBuiltInFunction(input)
+
+		require.Nil(t, err)
+		require.Equal(t, &vmcommon.VMOutput{}, output)
+		assert.False(t, counterProcessedCalled)
+	})
+}
+
+func TestBlockChainHookImpl_GetESDTToken(t *testing.T) {
+	t.Parallel()
+
+	address := []byte("address")
+	token := []byte("tkn")
+	nonce := uint64(0)
+	emptyESDTData := &esdt.ESDigitalToken{Value: big.NewInt(0)}
+	expectedErr := errors.New("expected error")
+	completeEsdtTokenKey := []byte(core.ProtectedKeyPrefix + core.ESDTKeyIdentifier + string(token))
+	testESDTData := &esdt.ESDigitalToken{
+		Type:       uint32(core.Fungible),
+		Value:      big.NewInt(1),
+		Properties: []byte("properties"),
+		TokenMetaData: &esdt.MetaData{
+			Nonce:      1,
+			Name:       []byte("name"),
+			Creator:    []byte("creator"),
+			Royalties:  2,
+			Hash:       []byte("hash"),
+			URIs:       [][]byte{[]byte("uri1"), []byte("uri2")},
+			Attributes: []byte("attributes"),
+		},
+		Reserved: []byte("reserved"),
+	}
+
+	t.Run("account not found returns an empty esdt data", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(_ []byte) (vmcommon.AccountHandler, error) {
+				return nil, state.ErrAccNotFound
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		esdtData, err := bh.GetESDTToken(address, token, nonce)
+		assert.Nil(t, err)
+		require.NotNil(t, esdtData)
+		assert.Equal(t, emptyESDTData, esdtData)
+	})
+	t.Run("error unmarshal", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		invalidUnmarshalledData := []byte("invalid data")
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				require.Equal(t, address, addressContainer)
+				account := stateMock.NewAccountWrapMock(address)
+				_ = account.SaveKeyValue(completeEsdtTokenKey, invalidUnmarshalledData)
+
+				return account, nil
+			},
+		}
+		errMarshaller := errors.New("error marshaller")
+		args.Marshalizer = &marshallerMock.MarshalizerStub{
+			UnmarshalCalled: func(obj interface{}, buff []byte) error {
+				require.Equal(t, emptyESDTData, obj)
+				require.Equal(t, invalidUnmarshalledData, buff)
+				return errMarshaller
+			},
+		}
+		enableEpochsHandlerStub := enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.OptimizeNFTStoreFlag)
+		args.EnableEpochsHandler = enableEpochsHandlerStub
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		enableEpochsHandlerStub.RemoveActiveFlags(common.OptimizeNFTStoreFlag)
+		esdtData, err := bh.GetESDTToken(address, token, nonce)
+		require.Nil(t, esdtData)
+		require.Equal(t, errMarshaller, err)
+	})
+	t.Run("accountsDB errors returns error", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(_ []byte) (vmcommon.AccountHandler, error) {
+				return nil, expectedErr
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		esdtData, err := bh.GetESDTToken(address, token, nonce)
+		assert.Nil(t, esdtData)
+		assert.Equal(t, expectedErr, err)
+	})
+	t.Run("backwards compatibility - retrieve value errors, should return error", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				addressHandler := stateMock.NewAccountWrapMock(address)
+				addressHandler.SetDataTrie(nil)
+
+				return addressHandler, nil
+			},
+		}
+		enableEpochsHandlerStub := enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.OptimizeNFTStoreFlag)
+		args.EnableEpochsHandler = enableEpochsHandlerStub
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		enableEpochsHandlerStub.RemoveActiveFlags(common.OptimizeNFTStoreFlag)
+		esdtData, err := bh.GetESDTToken(address, token, nonce)
+		assert.Nil(t, esdtData)
+		assert.Equal(t, state.ErrNilTrie, err)
+	})
+	t.Run("backwards compatibility - empty byte slice should return empty esdt token", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				addressHandler := stateMock.NewAccountWrapMock(address)
+				addressHandler.SetDataTrie(&trie.TrieStub{
+					GetCalled: func(_ []byte) ([]byte, uint32, error) {
+						return make([]byte, 0), 0, nil
+					},
+				})
+
+				return addressHandler, nil
+			},
+		}
+		enableEpochsHandlerStub := enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.OptimizeNFTStoreFlag)
+		args.EnableEpochsHandler = enableEpochsHandlerStub
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		enableEpochsHandlerStub.RemoveActiveFlags(common.OptimizeNFTStoreFlag)
+		esdtData, err := bh.GetESDTToken(address, token, nonce)
+		assert.Equal(t, emptyESDTData, esdtData)
+		assert.Nil(t, err)
+	})
+	t.Run("backwards compatibility - should load the esdt data in case of an NFT", func(t *testing.T) {
+		t.Parallel()
+
+		nftNonce := uint64(44)
+		args := createMockBlockChainHookArgs()
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				addressHandler := stateMock.NewAccountWrapMock(address)
+				buffToken, _ := args.Marshalizer.Marshal(testESDTData)
+				key := append(completeEsdtTokenKey, big.NewInt(0).SetUint64(nftNonce).Bytes()...)
+				_ = addressHandler.SaveKeyValue(key, buffToken)
+
+				return addressHandler, nil
+			},
+		}
+		enableEpochsHandlerStub := enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.OptimizeNFTStoreFlag)
+		args.EnableEpochsHandler = enableEpochsHandlerStub
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		enableEpochsHandlerStub.RemoveActiveFlags(common.OptimizeNFTStoreFlag)
+		esdtData, err := bh.GetESDTToken(address, token, nftNonce)
+		assert.Equal(t, testESDTData, esdtData)
+		assert.Nil(t, err)
+	})
+	t.Run("backwards compatibility - should load the esdt data", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				addressHandler := stateMock.NewAccountWrapMock(address)
+				buffToken, _ := args.Marshalizer.Marshal(testESDTData)
+				_ = addressHandler.SaveKeyValue(completeEsdtTokenKey, buffToken)
+
+				return addressHandler, nil
+			},
+		}
+		enableEpochsHandlerStub := enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.OptimizeNFTStoreFlag)
+		args.EnableEpochsHandler = enableEpochsHandlerStub
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		enableEpochsHandlerStub.RemoveActiveFlags(common.OptimizeNFTStoreFlag)
+		esdtData, err := bh.GetESDTToken(address, token, nonce)
+		assert.Equal(t, testESDTData, esdtData)
+		assert.Nil(t, err)
+	})
+	t.Run("new optimized implementation - NFTStorageHandler errors", func(t *testing.T) {
+		t.Parallel()
+
+		nftNonce := uint64(44)
+		args := createMockBlockChainHookArgs()
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				return stateMock.NewAccountWrapMock(address), nil
+			},
+		}
+		args.NFTStorageHandler = &testscommon.SimpleNFTStorageHandlerStub{
+			GetESDTNFTTokenOnDestinationCalled: func(accnt vmcommon.UserAccountHandler, esdtTokenKey []byte, nonce uint64) (*esdt.ESDigitalToken, bool, error) {
+				assert.Equal(t, completeEsdtTokenKey, esdtTokenKey)
+				assert.Equal(t, nftNonce, nonce)
+
+				return nil, false, expectedErr
+			},
+		}
+		args.EnableEpochsHandler = enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.OptimizeNFTStoreFlag)
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		esdtData, err := bh.GetESDTToken(address, token, nftNonce)
+		assert.Nil(t, esdtData)
+		assert.Equal(t, expectedErr, err)
+	})
+	t.Run("new optimized implementation - should return the esdt by calling NFTStorageHandler", func(t *testing.T) {
+		t.Parallel()
+
+		nftNonce := uint64(44)
+		args := createMockBlockChainHookArgs()
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				return stateMock.NewAccountWrapMock(address), nil
+			},
+		}
+		args.NFTStorageHandler = &testscommon.SimpleNFTStorageHandlerStub{
+			GetESDTNFTTokenOnDestinationCalled: func(accnt vmcommon.UserAccountHandler, esdtTokenKey []byte, nonce uint64) (*esdt.ESDigitalToken, bool, error) {
+				assert.Equal(t, completeEsdtTokenKey, esdtTokenKey)
+				assert.Equal(t, nftNonce, nonce)
+				copyToken := *testESDTData
+
+				return &copyToken, false, nil
+			},
+		}
+		args.EnableEpochsHandler = enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.OptimizeNFTStoreFlag)
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		esdtData, err := bh.GetESDTToken(address, token, nftNonce)
+		assert.Equal(t, testESDTData, esdtData)
+		assert.Nil(t, err)
+	})
+	t.Run("empty or oversized tokenID should return error when flag enabled", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		args.EnableEpochsHandler = enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.FixCorrectSmallIntAndGasLimitsFlag)
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+		address := []byte("address_123456789012345678901234")
+
+		esdtData, err := bh.GetESDTToken(address, []byte{}, 0)
+		assert.Nil(t, esdtData)
+		assert.Equal(t, hooks.ErrInvalidTokenIdentifier, err)
+
+		oversizedToken := bytes.Repeat([]byte("A"), 33)
+		esdtData, err = bh.GetESDTToken(address, oversizedToken, 0)
+		assert.Nil(t, esdtData)
+		assert.Equal(t, hooks.ErrInvalidTokenIdentifier, err)
+
+		assert.False(t, bh.IsPaused([]byte{}))
+		assert.False(t, bh.IsPaused(oversizedToken))
+		assert.False(t, bh.IsLimitedTransfer([]byte{}))
+		assert.False(t, bh.IsLimitedTransfer(oversizedToken))
+	})
+	t.Run("legacy mode when flag disabled does not error on empty tokenID", func(t *testing.T) {
+		t.Parallel()
+
+		address := []byte("address_123456789012345678901234")
+		args := createMockBlockChainHookArgs()
+		args.Accounts = &stateMock.AccountsStub{
+			GetExistingAccountCalled: func(addressContainer []byte) (vmcommon.AccountHandler, error) {
+				return stateMock.NewAccountWrapMock(address), nil
+			},
+		}
+		args.EnableEpochsHandler = enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.OptimizeNFTStoreFlag)
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		esdtData, err := bh.GetESDTToken(address, []byte{}, 0)
+		assert.Nil(t, err)
+		assert.NotNil(t, esdtData)
+	})
+}
+
+func TestBlockChainHookImpl_ApplyFiltersOnCodeMetadata(t *testing.T) {
+	t.Parallel()
+
+	t.Run("PayableBySC flag is not set; should reset the flag", func(t *testing.T) {
+		t.Parallel()
+
+		bh, _ := hooks.NewBlockChainHookImpl(createMockBlockChainHookArgs())
+
+		provided := vmcommon.CodeMetadata{
+			Payable:     true,
+			PayableBySC: true,
+			Upgradeable: true,
+			Readable:    true,
+		}
+
+		resulted := bh.ApplyFiltersOnSCCodeMetadata(provided)
+
+		expected := vmcommon.CodeMetadata{
+			Payable:     true,
+			PayableBySC: false,
+			Upgradeable: true,
+			Readable:    true,
+		}
+		assert.Equal(t, expected.ToBytes(), resulted.ToBytes())
+	})
+	t.Run("PayableBySC flag is set; should not reset the flag", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		args.EnableEpochsHandler = enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.PayableBySCFlag)
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		provided := vmcommon.CodeMetadata{
+			Payable:     true,
+			PayableBySC: true,
+			Upgradeable: true,
+			Readable:    true,
+		}
+
+		resulted := bh.ApplyFiltersOnSCCodeMetadata(provided)
+		expected := vmcommon.CodeMetadata{
+			Payable:     true,
+			PayableBySC: true,
+			Upgradeable: true,
+			Readable:    true,
+		}
+		assert.Equal(t, expected.ToBytes(), resulted.ToBytes())
+
+		provided = vmcommon.CodeMetadata{
+			Payable:     true,
+			PayableBySC: false,
+			Upgradeable: true,
+			Readable:    true,
+		}
+		resulted = bh.ApplyFiltersOnSCCodeMetadata(provided)
+		expected = vmcommon.CodeMetadata{
+			Payable:     true,
+			PayableBySC: false,
+			Upgradeable: true,
+			Readable:    true,
+		}
+		assert.Equal(t, expected.ToBytes(), resulted.ToBytes())
+	})
+}
+
+func TestBlockChainHookImpl_FilterCodeMetadataForUpgrade(t *testing.T) {
+	t.Parallel()
+
+	t.Run("flag not set should not filter", func(t *testing.T) {
+		t.Parallel()
+
+		bh, _ := hooks.NewBlockChainHookImpl(createMockBlockChainHookArgs())
+
+		providedBytes := []byte{0xFF, 0xFF, 0xFF}
+		resultBytes, err := bh.FilterCodeMetadataForUpgrade(providedBytes)
+		assert.Equal(t, providedBytes, resultBytes)
+		assert.Nil(t, err)
+	})
+	t.Run("correct bytes and flag set should filter correctly", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		providedBytes := []byte{0x05, 0x06}
+		expected := vmcommon.CodeMetadata{
+			Payable:     true,
+			PayableBySC: true,
+			Upgradeable: true,
+			Readable:    true,
+		}
+		resultBytes, err := bh.FilterCodeMetadataForUpgrade(providedBytes)
+		assert.Equal(t, expected.ToBytes(), resultBytes)
+		assert.Nil(t, err)
+	})
+	t.Run("incorrect number of bytes and flag set should return nil and error", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		args.EnableEpochsHandler = enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.PayableBySCFlag)
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		providedBytes := []byte{0xFF, 0xFF, 0xFF}
+		resultBytes, err := bh.FilterCodeMetadataForUpgrade(providedBytes)
+		assert.Nil(t, resultBytes)
+		assert.Equal(t, parsers.ErrInvalidCodeMetadata, err)
+	})
+	t.Run("incorrect bytes and flag set should return nil and error", func(t *testing.T) {
+		t.Parallel()
+
+		args := createMockBlockChainHookArgs()
+		args.EnableEpochsHandler = enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.PayableBySCFlag)
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		providedBytes := []byte{0xFF, 0xFF}
+		resultBytes, err := bh.FilterCodeMetadataForUpgrade(providedBytes)
+		assert.Nil(t, resultBytes)
+		assert.Equal(t, parsers.ErrInvalidCodeMetadata, err)
+	})
+}
+
+func TestBlockChainHookImpl_ClearCompiledCodes(t *testing.T) {
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+	args.EnableEpochs.DoNotReturnOldBlockInBlockchainHookEnableEpoch = 0
+	args.EnableEpochs.ESDTEnableEpoch = 10
+	args.EnableEpochs.IsPayableBySCEnableEpoch = 11
+
+	clearCalled := 0
+	args.CompiledSCPool = &cache.CacherStub{ClearCalled: func() {
+		clearCalled++
+	}}
+
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	assert.Equal(t, len(bh.GetMapActivationEpochs()), 3)
+	assert.Equal(t, clearCalled, 2)
+
+	bh.EpochConfirmed(100, 0)
+	assert.Equal(t, clearCalled, 2)
+
+	bh.EpochConfirmed(10, 0)
+	assert.Equal(t, clearCalled, 3)
+
+	bh.EpochConfirmed(11, 0)
+	assert.Equal(t, clearCalled, 4)
+}
+
+func TestBlockChainHookImpl_ResetCounters(t *testing.T) {
+	t.Parallel()
+
+	resetCalled := false
+	args := createMockBlockChainHookArgs()
+	args.Counter = &testscommon.BlockChainHookCounterStub{
+		ResetCountersCalled: func() {
+			resetCalled = true
+		},
+	}
+
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	bh.ResetCounters()
+
+	assert.True(t, resetCalled)
+}
+
+func TestBlockChainHookImpl_GetCounterValues(t *testing.T) {
+	t.Parallel()
+
+	countersMap := map[string]uint64{
+		"value": 37,
+	}
+	args := createMockBlockChainHookArgs()
+	args.Counter = &testscommon.BlockChainHookCounterStub{
+		GetCounterValuesCalled: func() map[string]uint64 {
+			return countersMap
+		},
+	}
+
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	m := bh.GetCounterValues()
+
+	assert.Equal(t, fmt.Sprintf("%p", m), fmt.Sprintf("%p", countersMap)) // pointer testing
+}
+
+func TestBlockChainHookImpl_GasScheduleChange(t *testing.T) {
+	t.Parallel()
+
+	maxPerTx := map[string]uint64{
+		"MaxBuiltInCallsPerTx":      1,
+		"MaxNumberOfTransfersPerTx": 2,
+		"MaxNumberOfTrieReadsPerTx": 3,
+	}
+
+	gasSchedule := map[string]map[string]uint64{
+		common.MaxPerTransaction: maxPerTx,
+	}
+
+	setCalled := false
+	args := createMockBlockChainHookArgs()
+	args.Counter = &testscommon.BlockChainHookCounterStub{
+		SetMaximumValuesCalled: func(mapsOfValues map[string]uint64) {
+			setCalled = true
+			assert.Equal(t, mapsOfValues, maxPerTx)
+			assert.NotEqual(t, fmt.Sprintf("%p", mapsOfValues), fmt.Sprintf("%p", maxPerTx)) // different pointers
+		},
+	}
+
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+	bh.GasScheduleChange(gasSchedule)
+
+	assert.True(t, setCalled)
+}
+
+func TestBlockChainHookImpl_IsPaused(t *testing.T) {
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+	isPausedCalled := false
+	expectedTokenKey := []byte(core.ProtectedKeyPrefix + core.ESDTKeyIdentifier + "token ID")
+	args.GlobalSettingsHandler = &testscommon.ESDTGlobalSettingsHandlerStub{
+		IsPausedCalled: func(esdtTokenKey []byte) bool {
+			isPausedCalled = true
+			assert.Equal(t, expectedTokenKey, esdtTokenKey)
+			return true
+		},
+	}
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+
+	assert.True(t, bh.IsPaused([]byte("token ID")))
+	assert.True(t, isPausedCalled)
+}
+
+func TestBlockChainHookImpl_IsLimitedTransfer(t *testing.T) {
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+	isLimitedTransferCalled := false
+	expectedTokenKey := []byte(core.ProtectedKeyPrefix + core.ESDTKeyIdentifier + "token ID")
+	args.GlobalSettingsHandler = &testscommon.ESDTGlobalSettingsHandlerStub{
+		IsLimitedTransferCalled: func(esdtTokenKey []byte) bool {
+			isLimitedTransferCalled = true
+			assert.Equal(t, expectedTokenKey, esdtTokenKey)
+			return true
+		},
+	}
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+
+	assert.True(t, bh.IsLimitedTransfer([]byte("token ID")))
+	assert.True(t, isLimitedTransferCalled)
+}
+
+func TestBlockChainHookImpl_CurrentTimeStampMs(t *testing.T) {
+	t.Parallel()
+
+	t.Run("before supernova", func(t *testing.T) {
+		t.Parallel()
+
+		timestamp := uint64(1234)
+		timestampMs := common.ConvertTimeStampSecToMs(timestamp)
+
+		hdr := &block.Header{
+			TimeStamp: timestamp,
+		}
+
+		args := createMockBlockChainHookArgs()
+		args.EnableEpochsHandler = &enableEpochsHandlerMock.EnableEpochsHandlerStub{
+			IsFlagEnabledInEpochCalled: func(flag core.EnableEpochFlag, epoch uint32) bool {
+				return flag != common.SupernovaFlag
+			},
+		}
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		err := bh.SetCurrentHeader(hdr)
+		require.Nil(t, err)
+
+		assert.Equal(t, timestamp, bh.CurrentTimeStamp())
+		assert.Equal(t, timestampMs, bh.CurrentTimeStampMs())
+	})
+
+	t.Run("after supernova", func(t *testing.T) {
+		t.Parallel()
+
+		timestampS := uint64(1234)
+		timestampMs := uint64(1234567)
+
+		hdr := &block.HeaderV3{
+			TimestampMs: timestampMs,
+		}
+
+		args := createMockBlockChainHookArgs()
+		args.EnableEpochsHandler = &enableEpochsHandlerMock.EnableEpochsHandlerStub{
+			IsFlagEnabledInEpochCalled: func(flag core.EnableEpochFlag, epoch uint32) bool {
+				return flag == common.SupernovaFlag
+			},
+		}
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		err := bh.SetCurrentHeader(hdr)
+		require.Nil(t, err)
+
+		assert.Equal(t, timestampS, bh.CurrentTimeStamp())
+		assert.Equal(t, timestampMs, bh.CurrentTimeStampMs())
+	})
+}
+
+func TestBlockChainHookImpl_LastTimeStampMs(t *testing.T) {
+	t.Parallel()
+
+	t.Run("before supernova activated", func(t *testing.T) {
+		t.Parallel()
+
+		timestamp := uint64(1234)
+
+		lastExecHdr := &block.Header{
+			TimeStamp: timestamp,
+		}
+
+		args := createMockBlockChainHookArgs()
+		args.BlockChain = &testscommon.ChainHandlerStub{
+			GetLastExecutedBlockHeaderCalled: func() data.HeaderHandler {
+				return lastExecHdr
+			},
+		}
+		args.EnableEpochsHandler = &enableEpochsHandlerMock.EnableEpochsHandlerStub{
+			IsFlagEnabledCalled: func(flag core.EnableEpochFlag) bool {
+				return flag != common.SupernovaFlag
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		lastTimeStampMs := bh.LastTimeStampMs()
+
+		expLastTimeStamp := common.ConvertTimeStampSecToMs(timestamp)
+		require.Equal(t, expLastTimeStamp, lastTimeStampMs)
+	})
+
+	t.Run("after supernova activated", func(t *testing.T) {
+		t.Parallel()
+
+		timestampMs := uint64(1234567)
+		lastExecHdr := &block.Header{
+			TimeStamp: timestampMs,
+		}
+
+		args := createMockBlockChainHookArgs()
+		args.BlockChain = &testscommon.ChainHandlerStub{
+			GetLastExecutedBlockHeaderCalled: func() data.HeaderHandler {
+				return lastExecHdr
+			},
+		}
+		args.EnableEpochsHandler = &enableEpochsHandlerMock.EnableEpochsHandlerStub{
+			IsFlagEnabledInEpochCalled: func(flag core.EnableEpochFlag, epoch uint32) bool {
+				return flag == common.SupernovaFlag
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		lastTimeStampMs := bh.LastTimeStampMs()
+		require.Equal(t, timestampMs, lastTimeStampMs)
+	})
+}
+
+func TestBlockChainHookImpl_EpochStartBlockTimeStampMs(t *testing.T) {
+	t.Parallel()
+
+	t.Run("before supernova activated", func(t *testing.T) {
+		t.Parallel()
+
+		epoch := uint32(7)
+
+		epochStartTimestamp := uint64(1234)
+
+		epochStartHdr := &block.Header{
+			TimeStamp:          epochStartTimestamp,
+			Epoch:              epoch,
+			EpochStartMetaHash: []byte("meta"),
+		}
+
+		hdr := &block.Header{
+			Epoch: epoch,
+		}
+
+		args := createMockBlockChainHookArgs()
+		args.EnableEpochsHandler = &enableEpochsHandlerMock.EnableEpochsHandlerStub{
+			IsFlagEnabledInEpochCalled: func(flag core.EnableEpochFlag, epoch uint32) bool {
+				return flag != common.SupernovaFlag
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		err := bh.SetCurrentHeader(epochStartHdr)
+		require.Nil(t, err)
+
+		err = bh.SetCurrentHeader(hdr)
+		require.Nil(t, err)
+
+		expLastTimeStamp := common.ConvertTimeStampSecToMs(epochStartTimestamp)
+		require.Equal(t, expLastTimeStamp, bh.EpochStartBlockTimeStampMs())
+	})
+
+	t.Run("after supernova activated", func(t *testing.T) {
+		t.Parallel()
+
+		epoch := uint32(7)
+
+		epochStartTimestamp := uint64(1234567)
+
+		epochStartHdr := &block.Header{
+			TimeStamp:          epochStartTimestamp,
+			Epoch:              epoch,
+			EpochStartMetaHash: []byte("meta"),
+		}
+
+		hdr := &block.Header{
+			Epoch: epoch,
+		}
+
+		args := createMockBlockChainHookArgs()
+		args.EnableEpochsHandler = &enableEpochsHandlerMock.EnableEpochsHandlerStub{
+			IsFlagEnabledInEpochCalled: func(flag core.EnableEpochFlag, epoch uint32) bool {
+				return flag == common.SupernovaFlag
+			},
+		}
+
+		bh, _ := hooks.NewBlockChainHookImpl(args)
+
+		err := bh.SetCurrentHeader(epochStartHdr)
+		require.Nil(t, err)
+
+		err = bh.SetCurrentHeader(hdr)
+		require.Nil(t, err)
+
+		require.Equal(t, epochStartTimestamp, bh.EpochStartBlockTimeStampMs())
+	})
+}
+
+func TestBlockChainHookImpl_ConcurrencyTimeOperations(t *testing.T) {
+	t.Parallel()
+
+	args := createMockBlockChainHookArgs()
+
+	bh, _ := hooks.NewBlockChainHookImpl(args)
+
+	numOperations := 500
+	wg := sync.WaitGroup{}
+	wg.Add(numOperations)
+	for i := 0; i < numOperations; i++ {
+		go func(idx int) {
+			switch idx {
+			case 0:
+				_ = bh.LastTimeStamp()
+			case 1:
+				_ = bh.LastTimeStampMs()
+			case 2:
+				_ = bh.CurrentTimeStamp()
+			case 3:
+				_ = bh.CurrentTimeStampMs()
+			case 4:
+				_ = bh.RoundTime()
+			case 5:
+				_ = bh.EpochStartBlockTimeStampMs()
+			}
+
+			wg.Done()
+		}(i % 6)
+	}
+
+	wg.Wait()
+
+}

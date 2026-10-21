@@ -3,23 +3,33 @@ package dataRetriever_test
 import (
 	"errors"
 	"testing"
+	"time"
 
-	"github.com/ElrondNetwork/elrond-go/data/mock"
-	"github.com/ElrondNetwork/elrond-go/dataRetriever"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/multiversx/mx-chain-go/dataRetriever"
+	"github.com/multiversx/mx-chain-go/storage"
+	storageStubs "github.com/multiversx/mx-chain-go/testscommon/storage"
 )
 
 func TestHas_ErrorWhenStorerIsMissing(t *testing.T) {
-	s := &mock.StorerStub{}
+	t.Parallel()
+
+	s := &storageStubs.StorerStub{}
 
 	b := dataRetriever.NewChainStorer()
+	assert.False(t, b.IsInterfaceNil())
+
 	b.AddStorer(1, s)
 	err := b.Has(2, []byte("whatever"))
 	assert.Equal(t, dataRetriever.ErrNoSuchStorageUnit, err)
 }
 
 func TestHas_ReturnsCorrectly(t *testing.T) {
-	s := &mock.StorerStub{}
+	t.Parallel()
+
+	s := &storageStubs.StorerStub{}
 	s.HasCalled = func(key []byte) error {
 		return nil
 	}
@@ -31,7 +41,9 @@ func TestHas_ReturnsCorrectly(t *testing.T) {
 }
 
 func TestGet_ErrorWhenStorerIsMissing(t *testing.T) {
-	s := &mock.StorerStub{}
+	t.Parallel()
+
+	s := &storageStubs.StorerStub{}
 
 	b := dataRetriever.NewChainStorer()
 	b.AddStorer(1, s)
@@ -41,7 +53,9 @@ func TestGet_ErrorWhenStorerIsMissing(t *testing.T) {
 }
 
 func TestGet_ReturnsCorrectly(t *testing.T) {
-	s := &mock.StorerStub{}
+	t.Parallel()
+
+	s := &storageStubs.StorerStub{}
 	getResult := []byte("get called")
 	s.GetCalled = func(key []byte) (b []byte, e error) {
 		return getResult, nil
@@ -55,17 +69,21 @@ func TestGet_ReturnsCorrectly(t *testing.T) {
 }
 
 func TestPut_ErrorWhenStorerIsMissing(t *testing.T) {
-	s := &mock.StorerStub{}
+	t.Parallel()
+
+	s := &storageStubs.StorerStub{}
 
 	b := dataRetriever.NewChainStorer()
 	b.AddStorer(1, s)
 	err := b.Put(2, []byte("whatever"), []byte("whatever value"))
 
-	assert.Equal(t, dataRetriever.ErrNoSuchStorageUnit, err)
+	assert.True(t, errors.Is(err, dataRetriever.ErrNoSuchStorageUnit))
 }
 
 func TestPut_ReturnsCorrectly(t *testing.T) {
-	s := &mock.StorerStub{}
+	t.Parallel()
+
+	s := &storageStubs.StorerStub{}
 	putErr := errors.New("error")
 	s.PutCalled = func(key, data []byte) error {
 		return putErr
@@ -78,7 +96,9 @@ func TestPut_ReturnsCorrectly(t *testing.T) {
 }
 
 func TestGetAll_ErrorWhenStorerIsMissing(t *testing.T) {
-	s := &mock.StorerStub{}
+	t.Parallel()
+
+	s := &storageStubs.StorerStub{}
 
 	b := dataRetriever.NewChainStorer()
 	b.AddStorer(1, s)
@@ -89,7 +109,9 @@ func TestGetAll_ErrorWhenStorerIsMissing(t *testing.T) {
 }
 
 func TestGetAll_ErrorWhenStorersGetErrors(t *testing.T) {
-	s := &mock.StorerStub{}
+	t.Parallel()
+
+	s := &storageStubs.StorerStub{}
 	getErr := errors.New("error")
 	s.GetCalled = func(key []byte) (bytes []byte, e error) {
 		return nil, getErr
@@ -104,6 +126,8 @@ func TestGetAll_ErrorWhenStorersGetErrors(t *testing.T) {
 }
 
 func TestGetAll_ReturnsCorrectly(t *testing.T) {
+	t.Parallel()
+
 	key1 := "key1"
 	key2 := "key2"
 	val1 := []byte("val1")
@@ -114,7 +138,7 @@ func TestGetAll_ReturnsCorrectly(t *testing.T) {
 		key2: val2,
 	}
 
-	s := &mock.StorerStub{}
+	s := &storageStubs.StorerStub{}
 	s.GetCalled = func(key []byte) (bytes []byte, e error) {
 		return m[string(key)], nil
 	}
@@ -126,11 +150,14 @@ func TestGetAll_ReturnsCorrectly(t *testing.T) {
 	assert.Equal(t, map[string][]byte{key1: val1}, t1)
 
 	t2, err := b.GetAll(1, [][]byte{[]byte(key1), []byte(key2)})
+	assert.Nil(t, err)
 	assert.Equal(t, map[string][]byte{key1: val1, key2: val2}, t2)
 }
 
-func TestDestroy_ErrrorsWhenStorerDestroyErrors(t *testing.T) {
-	s := &mock.StorerStub{}
+func TestDestroy_ErrorsWhenStorerDestroyErrors(t *testing.T) {
+	t.Parallel()
+
+	s := &storageStubs.StorerStub{}
 	destroyError := errors.New("error")
 	s.DestroyUnitCalled = func() error {
 		return destroyError
@@ -142,7 +169,9 @@ func TestDestroy_ErrrorsWhenStorerDestroyErrors(t *testing.T) {
 }
 
 func TestDestroy_ReturnsCorrectly(t *testing.T) {
-	s := &mock.StorerStub{}
+	t.Parallel()
+
+	s := &storageStubs.StorerStub{}
 	destroyCalled := false
 	s.DestroyUnitCalled = func() error {
 		destroyCalled = true
@@ -157,14 +186,43 @@ func TestDestroy_ReturnsCorrectly(t *testing.T) {
 	assert.True(t, destroyCalled)
 }
 
+type extendedStub struct {
+	*storageStubs.StorerStub
+	SetEpochForPutOperationCalled func(epoch uint32)
+}
+
+func (es *extendedStub) SetEpochForPutOperation(epoch uint32) {
+	es.SetEpochForPutOperationCalled(epoch)
+}
+
+func TestBlockChain_SetEpochForPutOperation(t *testing.T) {
+	t.Parallel()
+
+	expectedEpoch := uint32(37)
+	setEpochWasCalled := false
+	headerUnit := &extendedStub{}
+	headerUnit.SetEpochForPutOperationCalled = func(epoch uint32) {
+		assert.Equal(t, expectedEpoch, epoch)
+		setEpochWasCalled = true
+	}
+	txUnit := &storageStubs.StorerStub{}
+
+	b := dataRetriever.NewChainStorer()
+	b.AddStorer(0, headerUnit)
+	b.AddStorer(1, txUnit)
+
+	b.SetEpochForPutOperation(expectedEpoch)
+	assert.True(t, setEpochWasCalled)
+}
+
 func TestBlockChain_GetStorer(t *testing.T) {
 	t.Parallel()
 
-	txUnit := &mock.StorerStub{}
-	txBlockUnit := &mock.StorerStub{}
-	stateBlockUnit := &mock.StorerStub{}
-	peerBlockUnit := &mock.StorerStub{}
-	headerUnit := &mock.StorerStub{}
+	txUnit := &storageStubs.StorerStub{}
+	txBlockUnit := &storageStubs.StorerStub{}
+	stateBlockUnit := &storageStubs.StorerStub{}
+	peerBlockUnit := &storageStubs.StorerStub{}
+	headerUnit := &storageStubs.StorerStub{}
 
 	b := dataRetriever.NewChainStorer()
 	b.AddStorer(0, txUnit)
@@ -173,9 +231,113 @@ func TestBlockChain_GetStorer(t *testing.T) {
 	b.AddStorer(3, peerBlockUnit)
 	b.AddStorer(4, headerUnit)
 
-	assert.True(t, txUnit == b.GetStorer(0))
-	assert.True(t, txBlockUnit == b.GetStorer(1))
-	assert.True(t, stateBlockUnit == b.GetStorer(2))
-	assert.True(t, peerBlockUnit == b.GetStorer(3))
-	assert.True(t, headerUnit == b.GetStorer(4))
+	storer, _ := b.GetStorer(0)
+	assert.True(t, txUnit == storer)
+	storer, _ = b.GetStorer(1)
+	assert.True(t, txBlockUnit == storer)
+	storer, _ = b.GetStorer(2)
+	assert.True(t, stateBlockUnit == storer)
+	storer, _ = b.GetStorer(3)
+	assert.True(t, peerBlockUnit == storer)
+	storer, _ = b.GetStorer(4)
+	assert.True(t, headerUnit == storer)
+	storer, err := b.GetStorer(5)
+	assert.True(t, errors.Is(err, dataRetriever.ErrStorerNotFound))
+	assert.Nil(t, storer)
+}
+
+func TestBlockChain_GetAllStorers(t *testing.T) {
+	t.Parallel()
+
+	txUnit := &storageStubs.StorerStub{}
+	txBlockUnit := &storageStubs.StorerStub{}
+
+	b := dataRetriever.NewChainStorer()
+	b.AddStorer(0, txUnit)
+	b.AddStorer(1, txBlockUnit)
+
+	allStorers := b.GetAllStorers()
+	assert.Equal(t, txUnit, allStorers[0])
+	assert.Equal(t, txBlockUnit, allStorers[1])
+	assert.Len(t, allStorers, 2)
+}
+
+func TestCloseAll_Error(t *testing.T) {
+	t.Parallel()
+
+	closeErr := errors.New("error")
+	s := &storageStubs.StorerStub{
+		CloseCalled: func() error {
+			return closeErr
+		},
+	}
+
+	b := dataRetriever.NewChainStorer()
+	b.AddStorer(1, s)
+
+	err := b.CloseAll()
+	require.Equal(t, storage.ErrClosingPersisters, err)
+}
+
+func TestCloseAll_Ok(t *testing.T) {
+	t.Parallel()
+
+	s := &storageStubs.StorerStub{}
+
+	b := dataRetriever.NewChainStorer()
+	b.AddStorer(1, s)
+
+	err := b.CloseAll()
+	require.Nil(t, err)
+}
+
+type storerWithPutInEpochStub struct {
+	storage.Storer
+	setEpochForPutOperationCalled func(epoch uint32)
+}
+
+func (s *storerWithPutInEpochStub) SetEpochForPutOperation(epoch uint32) {
+	s.setEpochForPutOperationCalled(epoch)
+}
+
+func TestChainStorer_SetEpochForPutOperationDoesNotBlockConcurrentReads(t *testing.T) {
+	t.Parallel()
+
+	// this runs on every committed block while a storer can hold its own lock for a long time during
+	// an epoch change; taking a write lock here would park every concurrent read behind it
+	epochSetEntered := make(chan struct{})
+	releaseEpochSet := make(chan struct{})
+
+	slowStorer := &storerWithPutInEpochStub{
+		Storer: &storageStubs.StorerStub{
+			GetCalled: func(key []byte) ([]byte, error) {
+				return []byte("value"), nil
+			},
+		},
+		setEpochForPutOperationCalled: func(epoch uint32) {
+			close(epochSetEntered)
+			<-releaseEpochSet
+		},
+	}
+
+	chainStorer := dataRetriever.NewChainStorer()
+	chainStorer.AddStorer(dataRetriever.BlockHeaderUnit, slowStorer)
+
+	go chainStorer.SetEpochForPutOperation(5)
+	<-epochSetEntered
+
+	readDone := make(chan struct{})
+	go func() {
+		_, _ = chainStorer.Get(dataRetriever.BlockHeaderUnit, []byte("key"))
+		close(readDone)
+	}()
+
+	select {
+	case <-readDone:
+	case <-time.After(time.Second):
+		close(releaseEpochSet)
+		require.Fail(t, "a read was blocked while the epoch for put operation was being set")
+	}
+
+	close(releaseEpochSet)
 }

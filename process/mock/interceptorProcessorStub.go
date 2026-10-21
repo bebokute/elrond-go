@@ -1,23 +1,36 @@
 package mock
 
-import "github.com/ElrondNetwork/elrond-go/process"
+import (
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-go/p2p"
+	"github.com/multiversx/mx-chain-go/process"
+)
 
+// InterceptorProcessorStub -
 type InterceptorProcessorStub struct {
-	ValidateCalled func(data process.InterceptedData) error
-	SaveCalled     func(data process.InterceptedData) error
+	ValidateCalled        func(data process.InterceptedData) error
+	SaveCalled            func(data process.InterceptedData) (bool, error)
+	RegisterHandlerCalled func(handler func(topic string, hash []byte, data interface{}))
 }
 
-func (ips *InterceptorProcessorStub) Validate(data process.InterceptedData) error {
+// Validate -
+func (ips *InterceptorProcessorStub) Validate(data process.InterceptedData, _ core.PeerID) error {
 	return ips.ValidateCalled(data)
 }
 
-func (ips *InterceptorProcessorStub) Save(data process.InterceptedData) error {
+// Save -
+func (ips *InterceptorProcessorStub) Save(data process.InterceptedData, _ core.PeerID, _ string, _ p2p.BroadcastMethod) (bool, error) {
 	return ips.SaveCalled(data)
 }
 
-func (ips *InterceptorProcessorStub) IsInterfaceNil() bool {
-	if ips == nil {
-		return true
+// RegisterHandler -
+func (ips *InterceptorProcessorStub) RegisterHandler(handler func(topic string, hash []byte, data interface{})) {
+	if ips.RegisterHandlerCalled != nil {
+		ips.RegisterHandlerCalled(handler)
 	}
-	return false
+}
+
+// IsInterfaceNil -
+func (ips *InterceptorProcessorStub) IsInterfaceNil() bool {
+	return ips == nil
 }

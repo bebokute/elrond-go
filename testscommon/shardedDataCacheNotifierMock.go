@@ -1,0 +1,210 @@
+package testscommon
+
+import (
+	"sync"
+	"time"
+
+	"github.com/multiversx/mx-chain-core-go/core/counting"
+	"github.com/multiversx/mx-chain-core-go/data"
+	"github.com/multiversx/mx-chain-core-go/data/block"
+
+	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/storage"
+	cacheMocks "github.com/multiversx/mx-chain-go/testscommon/cache"
+)
+
+// ShardedDataCacheNotifierMock -
+type ShardedDataCacheNotifierMock struct {
+	mutCaches sync.RWMutex
+	caches    map[string]storage.Cacher
+
+	CleanupSelfShardTxCacheCalled func(session interface{}, randomness uint64, maxNum int, cleanupLoopMaximumDuration time.Duration)
+	OnExecutedBlockCalled         func(blockHeader data.HeaderHandler, rootHash []byte) error
+	OnProposedBlockCalled         func(
+		blockHash []byte,
+		blockBody *block.Body,
+		blockHeader data.HeaderHandler,
+		accountsProvider common.AccountNonceAndBalanceProvider,
+		latestExecutedHash []byte,
+	) error
+	ResetTrackerCalled func()
+}
+
+// NewShardedDataCacheNotifierMock -
+func NewShardedDataCacheNotifierMock() *ShardedDataCacheNotifierMock {
+	return &ShardedDataCacheNotifierMock{
+		caches: make(map[string]storage.Cacher),
+	}
+}
+
+// RegisterOnAdded -
+func (mock *ShardedDataCacheNotifierMock) RegisterOnAdded(_ func(key []byte, value interface{})) {
+}
+
+// ShardDataStore -
+func (mock *ShardedDataCacheNotifierMock) ShardDataStore(cacheId string) (c storage.Cacher) {
+	mock.mutCaches.Lock()
+	defer mock.mutCaches.Unlock()
+
+	cache, found := mock.caches[cacheId]
+	if !found {
+		cache = cacheMocks.NewCacherMock()
+		mock.caches[cacheId] = cache
+	}
+
+	return cache
+}
+
+// AddData -
+func (mock *ShardedDataCacheNotifierMock) AddData(key []byte, data interface{}, sizeInBytes int, cacheId string) {
+	cache := mock.ShardDataStore(cacheId)
+	cache.HasOrAdd(key, data, sizeInBytes)
+}
+
+// SearchFirstData -
+func (mock *ShardedDataCacheNotifierMock) SearchFirstData(key []byte) (interface{}, bool) {
+	mock.mutCaches.RLock()
+	defer mock.mutCaches.RUnlock()
+
+	for _, cache := range mock.caches {
+		buff, ok := cache.Get(key)
+		if ok {
+			return buff, true
+		}
+	}
+
+	return nil, false
+}
+
+// RemoveData -
+func (mock *ShardedDataCacheNotifierMock) RemoveData(key []byte, cacheId string) {
+	cache := mock.ShardDataStore(cacheId)
+	cache.Remove(key)
+}
+
+// RemoveSetOfDataFromPool -
+func (mock *ShardedDataCacheNotifierMock) RemoveSetOfDataFromPool(keys [][]byte, cacheId string) {
+	cache := mock.ShardDataStore(cacheId)
+	for _, key := range keys {
+		cache.Remove(key)
+	}
+}
+
+// ImmunizeSetOfDataAgainstEviction -
+func (mock *ShardedDataCacheNotifierMock) ImmunizeSetOfDataAgainstEviction(_ [][]byte, _ string, _ uint64) {
+}
+
+// SetOldestImmuneNonce -
+func (mock *ShardedDataCacheNotifierMock) SetOldestImmuneNonce(_ string, _ uint64) {
+}
+
+// SetOldestImmuneNonceForAllCaches -
+func (mock *ShardedDataCacheNotifierMock) SetOldestImmuneNonceForAllCaches(_ uint64) {
+}
+
+// RemoveDataFromAllShards -
+func (mock *ShardedDataCacheNotifierMock) RemoveDataFromAllShards(key []byte) {
+	mock.mutCaches.RLock()
+	defer mock.mutCaches.RUnlock()
+
+	for _, cache := range mock.caches {
+		cache.Remove(key)
+	}
+}
+
+// MergeShardStores -
+func (mock *ShardedDataCacheNotifierMock) MergeShardStores(_, _ string) {
+}
+
+// Clear -
+func (mock *ShardedDataCacheNotifierMock) Clear() {
+	mock.mutCaches.Lock()
+	defer mock.mutCaches.Unlock()
+
+	mock.caches = make(map[string]storage.Cacher)
+}
+
+// ClearShardStore -
+func (mock *ShardedDataCacheNotifierMock) ClearShardStore(cacheId string) {
+	cache := mock.ShardDataStore(cacheId)
+	cache.Clear()
+}
+
+// GetCounts -
+func (mock *ShardedDataCacheNotifierMock) GetCounts() counting.CountsWithSize {
+	return &counting.NullCounts{}
+}
+
+// Keys -
+func (mock *ShardedDataCacheNotifierMock) Keys() [][]byte {
+	mock.mutCaches.Lock()
+	defer mock.mutCaches.Unlock()
+
+	keys := make([][]byte, 0)
+	for _, cache := range mock.caches {
+		keys = append(keys, cache.Keys()...)
+	}
+
+	return keys
+}
+
+// CleanupSelfShardTxCache -
+func (mock *ShardedDataCacheNotifierMock) CleanupSelfShardTxCache(accountsProvider common.AccountNonceProvider, randomness uint64, maxNum int, cleanupLoopMaximumDuration time.Duration) {
+	if mock.CleanupSelfShardTxCacheCalled != nil {
+		mock.CleanupSelfShardTxCacheCalled(accountsProvider, randomness, maxNum, cleanupLoopMaximumDuration)
+	}
+}
+
+// OnExecutedBlock -
+func (mock *ShardedDataCacheNotifierMock) OnExecutedBlock(blockHeader data.HeaderHandler, rootHash []byte) error {
+	if mock.OnExecutedBlockCalled != nil {
+		return mock.OnExecutedBlockCalled(blockHeader, rootHash)
+	}
+
+	return nil
+}
+
+// OnProposedBlock -
+func (mock *ShardedDataCacheNotifierMock) OnProposedBlock(
+	blockHash []byte,
+	blockBody *block.Body,
+	blockHeader data.HeaderHandler,
+	accountsProvider common.AccountNonceAndBalanceProvider,
+	latestExecutedHash []byte,
+) error {
+	if mock.OnProposedBlockCalled != nil {
+		return mock.OnProposedBlockCalled(blockHash, blockBody, blockHeader, accountsProvider, latestExecutedHash)
+	}
+	return nil
+}
+
+// OnBackfilledBlock -
+func (mock *ShardedDataCacheNotifierMock) OnBackfilledBlock(
+	_ []byte,
+	_ *block.Body,
+	_ data.HeaderHandler,
+) error {
+	return nil
+}
+
+// ResetTracker -
+func (mock *ShardedDataCacheNotifierMock) ResetTracker() {
+	if mock.ResetTrackerCalled != nil {
+		mock.ResetTrackerCalled()
+	}
+}
+
+// IsInterfaceNil -
+func (mock *ShardedDataCacheNotifierMock) IsInterfaceNil() bool {
+	return mock == nil
+}
+
+// GetNumTrackedBlocks -
+func (sd *ShardedDataCacheNotifierMock) GetNumTrackedBlocks() uint64 {
+	return 0
+}
+
+// GetNumTrackedAccounts -
+func (sd *ShardedDataCacheNotifierMock) GetNumTrackedAccounts() uint64 {
+	return 0
+}

@@ -3,27 +3,81 @@ package shard_test
 import (
 	"testing"
 
-	"github.com/ElrondNetwork/elrond-go/process"
-	"github.com/ElrondNetwork/elrond-go/process/economics"
-	"github.com/ElrondNetwork/elrond-go/process/factory/shard"
-	"github.com/ElrondNetwork/elrond-go/process/mock"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/dataRetriever"
+	"github.com/multiversx/mx-chain-go/process"
+	"github.com/multiversx/mx-chain-go/process/factory/shard"
+	"github.com/multiversx/mx-chain-go/process/mock"
+	"github.com/multiversx/mx-chain-go/storage"
+	"github.com/multiversx/mx-chain-go/testscommon"
+	"github.com/multiversx/mx-chain-go/testscommon/cache"
+	txExecOrderStub "github.com/multiversx/mx-chain-go/testscommon/common"
+	dataRetrieverMock "github.com/multiversx/mx-chain-go/testscommon/dataRetriever"
+	"github.com/multiversx/mx-chain-go/testscommon/economicsmocks"
+	"github.com/multiversx/mx-chain-go/testscommon/enableEpochsHandlerMock"
+	"github.com/multiversx/mx-chain-go/testscommon/hashingMocks"
+	storageStubs "github.com/multiversx/mx-chain-go/testscommon/storage"
 )
+
+func createDataPools() dataRetriever.PoolsHolder {
+	pools := dataRetrieverMock.NewPoolsHolderStub()
+	pools.TransactionsCalled = func() dataRetriever.ShardedDataCacherNotifier {
+		return testscommon.NewShardedDataStub()
+	}
+	pools.HeadersCalled = func() dataRetriever.HeadersPool {
+		return &mock.HeadersCacherStub{}
+	}
+	pools.MiniBlocksCalled = func() storage.Cacher {
+		return cache.NewCacherStub()
+	}
+	pools.PeerChangesBlocksCalled = func() storage.Cacher {
+		return cache.NewCacherStub()
+	}
+	pools.MetaBlocksCalled = func() storage.Cacher {
+		return cache.NewCacherStub()
+	}
+	pools.UnsignedTransactionsCalled = func() dataRetriever.ShardedDataCacherNotifier {
+		return testscommon.NewShardedDataStub()
+	}
+	pools.RewardTransactionsCalled = func() dataRetriever.ShardedDataCacherNotifier {
+		return testscommon.NewShardedDataStub()
+	}
+	pools.TrieNodesCalled = func() storage.Cacher {
+		return cache.NewCacherStub()
+	}
+	pools.CurrBlockTxsCalled = func() dataRetriever.TransactionCacher {
+		return &mock.TxForCurrentBlockStub{}
+	}
+	return pools
+}
+
+func createMockPubkeyConverter() *testscommon.PubkeyConverterMock {
+	return testscommon.NewPubkeyConverterMock(32)
+}
+
+func createMockArgsNewIntermediateProcessorsFactory() shard.ArgsNewIntermediateProcessorsContainerFactory {
+	args := shard.ArgsNewIntermediateProcessorsContainerFactory{
+		Hasher:                  &hashingMocks.HasherMock{},
+		Marshalizer:             &mock.MarshalizerMock{},
+		ShardCoordinator:        mock.NewMultiShardsCoordinatorMock(5),
+		PubkeyConverter:         createMockPubkeyConverter(),
+		Store:                   &storageStubs.ChainStorerStub{},
+		PoolsHolder:             createDataPools(),
+		EconomicsFee:            &economicsmocks.EconomicsHandlerMock{},
+		EnableEpochsHandler:     enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.KeepExecOrderOnCreatedSCRsFlag),
+		TxExecutionOrderHandler: &txExecOrderStub.TxExecutionOrderHandlerStub{},
+	}
+	return args
+}
 
 func TestNewIntermediateProcessorsContainerFactory_NilShardCoord(t *testing.T) {
 	t.Parallel()
 
-	dPool := createDataPools()
-	ipcf, err := shard.NewIntermediateProcessorsContainerFactory(
-		nil,
-		&mock.MarshalizerMock{},
-		&mock.HasherMock{},
-		&mock.AddressConverterMock{},
-		&mock.SpecialAddressHandlerMock{},
-		&mock.ChainStorerMock{},
-		dPool,
-		&economics.EconomicsData{},
-	)
+	args := createMockArgsNewIntermediateProcessorsFactory()
+	args.ShardCoordinator = nil
+	ipcf, err := shard.NewIntermediateProcessorsContainerFactory(args)
 
 	assert.Nil(t, ipcf)
 	assert.Equal(t, process.ErrNilShardCoordinator, err)
@@ -32,17 +86,9 @@ func TestNewIntermediateProcessorsContainerFactory_NilShardCoord(t *testing.T) {
 func TestNewIntermediateProcessorsContainerFactory_NilMarshalizer(t *testing.T) {
 	t.Parallel()
 
-	dPool := createDataPools()
-	ipcf, err := shard.NewIntermediateProcessorsContainerFactory(
-		mock.NewMultiShardsCoordinatorMock(3),
-		nil,
-		&mock.HasherMock{},
-		&mock.AddressConverterMock{},
-		&mock.SpecialAddressHandlerMock{},
-		&mock.ChainStorerMock{},
-		dPool,
-		&economics.EconomicsData{},
-	)
+	args := createMockArgsNewIntermediateProcessorsFactory()
+	args.Marshalizer = nil
+	ipcf, err := shard.NewIntermediateProcessorsContainerFactory(args)
 
 	assert.Nil(t, ipcf)
 	assert.Equal(t, process.ErrNilMarshalizer, err)
@@ -51,17 +97,9 @@ func TestNewIntermediateProcessorsContainerFactory_NilMarshalizer(t *testing.T) 
 func TestNewIntermediateProcessorsContainerFactory_NilHasher(t *testing.T) {
 	t.Parallel()
 
-	dPool := createDataPools()
-	ipcf, err := shard.NewIntermediateProcessorsContainerFactory(
-		mock.NewMultiShardsCoordinatorMock(3),
-		&mock.MarshalizerMock{},
-		nil,
-		&mock.AddressConverterMock{},
-		&mock.SpecialAddressHandlerMock{},
-		&mock.ChainStorerMock{},
-		dPool,
-		&economics.EconomicsData{},
-	)
+	args := createMockArgsNewIntermediateProcessorsFactory()
+	args.Hasher = nil
+	ipcf, err := shard.NewIntermediateProcessorsContainerFactory(args)
 
 	assert.Nil(t, ipcf)
 	assert.Equal(t, process.ErrNilHasher, err)
@@ -70,79 +108,78 @@ func TestNewIntermediateProcessorsContainerFactory_NilHasher(t *testing.T) {
 func TestNewIntermediateProcessorsContainerFactory_NilAdrConv(t *testing.T) {
 	t.Parallel()
 
-	dPool := createDataPools()
-	ipcf, err := shard.NewIntermediateProcessorsContainerFactory(
-		mock.NewMultiShardsCoordinatorMock(3),
-		&mock.MarshalizerMock{},
-		&mock.HasherMock{},
-		nil,
-		&mock.SpecialAddressHandlerMock{},
-		&mock.ChainStorerMock{},
-		dPool,
-		&economics.EconomicsData{},
-	)
+	args := createMockArgsNewIntermediateProcessorsFactory()
+	args.PubkeyConverter = nil
+	ipcf, err := shard.NewIntermediateProcessorsContainerFactory(args)
 
 	assert.Nil(t, ipcf)
-	assert.Equal(t, process.ErrNilAddressConverter, err)
+	assert.Equal(t, process.ErrNilPubkeyConverter, err)
 }
 
 func TestNewIntermediateProcessorsContainerFactory_NilStorer(t *testing.T) {
 	t.Parallel()
 
-	dPool := createDataPools()
-	ipcf, err := shard.NewIntermediateProcessorsContainerFactory(
-		mock.NewMultiShardsCoordinatorMock(3),
-		&mock.MarshalizerMock{},
-		&mock.HasherMock{},
-		&mock.AddressConverterMock{},
-		&mock.SpecialAddressHandlerMock{},
-		nil,
-		dPool,
-		&economics.EconomicsData{},
-	)
+	args := createMockArgsNewIntermediateProcessorsFactory()
+	args.Store = nil
+	ipcf, err := shard.NewIntermediateProcessorsContainerFactory(args)
 
 	assert.Nil(t, ipcf)
 	assert.Equal(t, process.ErrNilStorage, err)
 }
 
+func TestNewIntermediateProcessorsContainerFactory_NilPoolsHolder(t *testing.T) {
+	t.Parallel()
+
+	args := createMockArgsNewIntermediateProcessorsFactory()
+	args.PoolsHolder = nil
+	ipcf, err := shard.NewIntermediateProcessorsContainerFactory(args)
+
+	assert.Nil(t, ipcf)
+	assert.Equal(t, process.ErrNilPoolsHolder, err)
+}
+
+func TestNewIntermediateProcessorsContainerFactory_NilEconomicsFeeHandler(t *testing.T) {
+	t.Parallel()
+
+	args := createMockArgsNewIntermediateProcessorsFactory()
+	args.EconomicsFee = nil
+	ipcf, err := shard.NewIntermediateProcessorsContainerFactory(args)
+
+	assert.Nil(t, ipcf)
+	assert.Equal(t, process.ErrNilEconomicsFeeHandler, err)
+}
+
+func TestNewIntermediateProcessorsContainerFactory_NilEnableEpochsHandler(t *testing.T) {
+	t.Parallel()
+
+	args := createMockArgsNewIntermediateProcessorsFactory()
+	args.EnableEpochsHandler = nil
+	ipcf, err := shard.NewIntermediateProcessorsContainerFactory(args)
+
+	assert.Nil(t, ipcf)
+	assert.Equal(t, process.ErrNilEnableEpochsHandler, err)
+}
+
 func TestNewIntermediateProcessorsContainerFactory(t *testing.T) {
 	t.Parallel()
 
-	dPool := createDataPools()
-	ipcf, err := shard.NewIntermediateProcessorsContainerFactory(
-		mock.NewMultiShardsCoordinatorMock(3),
-		&mock.MarshalizerMock{},
-		&mock.HasherMock{},
-		&mock.AddressConverterMock{},
-		&mock.SpecialAddressHandlerMock{},
-		&mock.ChainStorerMock{},
-		dPool,
-		&economics.EconomicsData{},
-	)
+	args := createMockArgsNewIntermediateProcessorsFactory()
+	ipcf, err := shard.NewIntermediateProcessorsContainerFactory(args)
 
 	assert.Nil(t, err)
 	assert.NotNil(t, ipcf)
+	assert.False(t, ipcf.IsInterfaceNil())
 }
 
 func TestIntermediateProcessorsContainerFactory_Create(t *testing.T) {
 	t.Parallel()
 
-	dPool := createDataPools()
-	ipcf, err := shard.NewIntermediateProcessorsContainerFactory(
-		mock.NewMultiShardsCoordinatorMock(3),
-		&mock.MarshalizerMock{},
-		&mock.HasherMock{},
-		&mock.AddressConverterMock{},
-		&mock.SpecialAddressHandlerMock{},
-		&mock.ChainStorerMock{},
-		dPool,
-		&economics.EconomicsData{},
-	)
-
+	args := createMockArgsNewIntermediateProcessorsFactory()
+	ipcf, err := shard.NewIntermediateProcessorsContainerFactory(args)
 	assert.Nil(t, err)
 	assert.NotNil(t, ipcf)
 
 	container, err := ipcf.Create()
 	assert.Nil(t, err)
-	assert.Equal(t, 2, container.Len())
+	assert.Equal(t, 3, container.Len())
 }

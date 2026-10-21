@@ -1,124 +1,299 @@
 package ntp
 
 import (
+	"context"
+	"crypto/rand"
 	"fmt"
+	"math"
+	"math/big"
+	"sort"
 	"sync"
 	"time"
 
-	"github.com/ElrondNetwork/elrond-go/config"
-	"github.com/ElrondNetwork/elrond-go/core/logger"
 	"github.com/beevik/ntp"
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/core/closing"
+	logger "github.com/multiversx/mx-chain-logger-go"
+	"golang.org/x/sync/singleflight"
+
+	"github.com/multiversx/mx-chain-go/config"
 )
 
-// totalRequests defines the number of requests made to determine an accurate clock offset
-const totalRequests = 10
+var _ SyncTimer = (*syncTime)(nil)
+var _ closing.Closer = (*syncTime)(nil)
 
-var log = logger.DefaultLogger()
+var log = logger.GetOrCreate("ntp")
 
-// NTPOptions defines configuration options for an NTP query
+// numRequestsFromHost represents the number of requests to be done from each host
+const numRequestsFromHost = 10
+
+// minResponsesPercent (0, 1] represents the minimum percent of responses, from all requests done, needed to set a new
+// clock offset
+const minResponsesPercent = 0.25
+
+// maxOffsetPercent [0, 1) represents the maximum percent, from the initial sync period given, which could be added or
+// subtracted from it
+const maxOffsetPercent = 0.2
+
+// minTimeout represents the minimum time in milliseconds to wait for a response from a host after a NTP request
+const minTimeout = 100
+
+// maxAllowedNTPQueryResponseTimeMS specifies the maximum duration (in milliseconds)
+// allowed for an NTP query. If a query takes longer than this limit, its response will be disregarded.
+const maxAllowedNTPQueryResponseTimeMS = 200
+
+const syncKey = "ntp-sync"
+
+// syncCooldown represents the minimum time between two consecutive syncs.
+// This prevents excessive NTP queries when ForceSync is called frequently.
+const syncCooldown = 10 * time.Minute
+
+// NTPOptions defines configuration options for a NTP query
 type NTPOptions struct {
-	Host         string
+	Hosts        []string
 	Version      int
 	LocalAddress string
 	Timeout      time.Duration
 	Port         int
 }
 
-// NewNTPGoogleConfig creates an NTPConfig object that configures NTP to use
-// time.google.com. This is a useful default for tests, for example, to avoid
-// loading a configuration file just to have an NTPConfig.
-func NewNTPGoogleConfig() config.NTPConfig {
-	return config.NTPConfig{
-		Host:    "time.google.com",
-		Port:    123,
-		Version: 0,
-		Timeout: 0}
-}
-
-// NewNTPOptions creates a new NTPOptions object.
+// NewNTPOptions creates a new NTPOptions object
 func NewNTPOptions(ntpConfig config.NTPConfig) NTPOptions {
+	ntpConfig.TimeoutMilliseconds = core.MaxInt(minTimeout, ntpConfig.TimeoutMilliseconds)
+	timeout := time.Duration(ntpConfig.TimeoutMilliseconds) * time.Millisecond
+
 	return NTPOptions{
-		Host:         ntpConfig.Host,
+		Hosts:        ntpConfig.Hosts,
 		Port:         ntpConfig.Port,
 		Version:      ntpConfig.Version,
 		LocalAddress: "",
-		Timeout:      ntpConfig.Timeout}
+		Timeout:      timeout,
+	}
 }
 
-// queryNTP wraps beevikntp.QueryWithOptions, in order to use NTPOptions, which
-// contains both Host and Port, unlike beevikntp.QueryOptions.
-func queryNTP(options NTPOptions) (*ntp.Response, error) {
+// queryNTP wraps beevikntp.QueryWithOptions, in order to use NTPOptions, which contains both Host and Port, unlike
+// beevikntp.QueryOptions
+func queryNTP(options NTPOptions, hostIndex int) (*ntp.Response, error) {
+	if hostIndex >= len(options.Hosts) {
+		return nil, ErrIndexOutOfBounds
+	}
+
 	queryOptions := ntp.QueryOptions{
 		Timeout:      options.Timeout,
 		Version:      options.Version,
 		LocalAddress: options.LocalAddress,
-		Port:         options.Port}
-	log.Debug(fmt.Sprintf("NTP Request to %s:%d", options.Host, options.Port))
-	return ntp.QueryWithOptions(options.Host, queryOptions)
+		Port:         options.Port,
+	}
+
+	return ntp.QueryWithOptions(options.Hosts[hostIndex], queryOptions)
 }
 
 // syncTime defines an object for time synchronization
 type syncTime struct {
-	mut         sync.RWMutex
-	clockOffset time.Duration
-	syncPeriod  time.Duration
-	ntpOptions  NTPOptions
-	query       func(options NTPOptions) (*ntp.Response, error)
+	mut                  sync.RWMutex
+	clockOffset          time.Duration
+	syncPeriod           time.Duration
+	ntpOptions           NTPOptions
+	query                func(options NTPOptions, hostIndex int) (*ntp.Response, error)
+	cancelFunc           func()
+	outOfBoundsThreshold time.Duration
+	lastSyncTime         time.Time
+
+	sf singleflight.Group
 }
 
-// NewSyncTime creates a syncTime object. The customQueryFunc argument allows
-// the caller to set a different NTP-querying callback, if desired. If set to
-// nil, then the default queryNTP is used.
-func NewSyncTime(ntpConfig config.NTPConfig, syncPeriod time.Duration, customQueryFunc func(options NTPOptions) (*ntp.Response, error)) *syncTime {
-	var queryFunc func(options NTPOptions) (*ntp.Response, error)
-	if customQueryFunc == nil {
+// NewSyncTime creates a syncTime object. The customQueryFunc argument allows the caller to set a different NTP-querying
+// callback, if desired. If set to nil, then the default queryNTP is used
+func NewSyncTime(
+	ntpConfig config.NTPConfig,
+	customQueryFunc func(options NTPOptions, hostIndex int) (*ntp.Response, error),
+) *syncTime {
+	queryFunc := customQueryFunc
+	if queryFunc == nil {
 		queryFunc = queryNTP
-	} else {
-		queryFunc = customQueryFunc
 	}
+
 	s := syncTime{
-		clockOffset: 0,
-		syncPeriod:  syncPeriod,
-		query:       queryFunc,
-		ntpOptions:  NewNTPOptions(ntpConfig)}
+		clockOffset:          0,
+		syncPeriod:           time.Duration(ntpConfig.SyncPeriodSeconds) * time.Second,
+		query:                queryFunc,
+		ntpOptions:           NewNTPOptions(ntpConfig),
+		outOfBoundsThreshold: time.Duration(ntpConfig.OutOfBoundsThreshold) * time.Millisecond,
+	}
+
 	return &s
 }
 
-// StartSync method does the time synchronization at every syncPeriod time elapsed. This should be started
-// as a go routine
-func (s *syncTime) StartSync() {
+// StartSyncingTime method does the time synchronization at every syncPeriod time elapsed. This method should be started on go
+// routine
+func (s *syncTime) StartSyncingTime() {
+	var ctx context.Context
+	ctx, s.cancelFunc = context.WithCancel(context.Background())
+	go s.startSync(ctx)
+}
+
+func (s *syncTime) startSync(ctx context.Context) {
 	for {
-		s.sync()
-		time.Sleep(s.syncPeriod)
+		s.triggerSync()
+
+		select {
+		case <-ctx.Done():
+			log.Debug("syncTime's go routine is stopping...")
+			return
+		case <-time.After(s.getSleepTime()):
+		}
 	}
 }
 
-// sync method does the time synchronization and sets the current offset difference between local time
-// and server time with which it has done the synchronization
+func (s *syncTime) getSleepTime() time.Duration {
+	maxOffset := int64(float64(s.syncPeriod) * maxOffsetPercent)
+	maxRandValueToGenerate := maxOffset * 2
+	randBigInt, err := rand.Int(rand.Reader, big.NewInt(maxRandValueToGenerate+1))
+	if err != nil {
+		return s.syncPeriod
+	}
+
+	offset := randBigInt.Int64() - maxOffset
+	return s.syncPeriod + time.Duration(offset)
+}
+
+// ForceSync will trigger ntp sync and does not wait for completion
+// it will not trigger if sync already in progress or if the cooldown period has not elapsed
+func (s *syncTime) ForceSync() {
+	if s.isCooldown() {
+		return
+	}
+
+	ch := s.sf.DoChan(syncKey, func() (any, error) {
+		s.sync()
+		return nil, nil
+	})
+
+	select {
+	case <-ch:
+	default:
+		log.Debug("ForceSync ignored: sync already in progress")
+	}
+}
+
+// triggerSync will trigger sync and waits for completion
+// this is called periodically in the ntp sync loop
+func (s *syncTime) triggerSync() {
+	if s.isCooldown() {
+		return
+	}
+
+	ch := s.sf.DoChan(syncKey, func() (any, error) {
+		s.sync()
+		return nil, nil
+	})
+
+	<-ch
+}
+
+func (s *syncTime) isCooldown() bool {
+	s.mut.RLock()
+	elapsed := time.Since(s.lastSyncTime)
+	s.mut.RUnlock()
+
+	if elapsed < syncCooldown {
+		log.Debug("sync trigger ignored: cooldown active", "remaining", syncCooldown-elapsed)
+		return true
+	}
+
+	return false
+}
+
+// sync method does the time synchronization and sets the median offset difference between local time
+// and servers time which have been used in synchronization
 func (s *syncTime) sync() {
-	if s.query != nil {
-		clockOffsetSum := time.Duration(0)
-		succeededRequests := 0
+	clockOffsets := make([]time.Duration, 0)
 
-		for i := 0; i < totalRequests; i++ {
-			r, err := s.query(s.ntpOptions)
-
+	for hostIndex := 0; hostIndex < len(s.ntpOptions.Hosts); hostIndex++ {
+		for requests := 0; requests < numRequestsFromHost; requests++ {
+			startTime := time.Now()
+			response, err := s.query(s.ntpOptions, hostIndex)
+			duration := time.Since(startTime)
 			if err != nil {
-				log.Error(fmt.Sprintf("NTP Error: %s", err))
+				log.Debug("sync.query",
+					"host", s.ntpOptions.Hosts[hostIndex],
+					"port", s.ntpOptions.Port,
+					"error", err.Error())
+
 				continue
 			}
 
-			log.Debug(fmt.Sprintf("NTP reading: %s", r.Time.Format("Mon Jan 2 15:04:05 MST 2006")))
+			if duration.Milliseconds() > maxAllowedNTPQueryResponseTimeMS {
+				log.Debug("sync.query exceeds maximum allowed response time",
+					"host", s.ntpOptions.Hosts[hostIndex],
+					"port", s.ntpOptions.Port,
+					"duration", duration,
+					"maxAllowedNTPQueryResponseTimeMS", maxAllowedNTPQueryResponseTimeMS)
+				continue
+			}
 
-			succeededRequests++
-			clockOffsetSum += r.ClockOffset
-		}
+			log.Debug("sync.query",
+				"host", s.ntpOptions.Hosts[hostIndex],
+				"reference time", response.ReferenceTime.Format("Mon Jan 2 15:04:05 MST 2006"),
+				"time", response.Time.Format("Mon Jan 2 15:04:05 MST 2006"),
+				"precision", response.Precision,
+				"clock offset", response.ClockOffset,
+			)
 
-		if succeededRequests > 0 {
-			averageClockOffset := time.Duration(int64(clockOffsetSum) / int64(succeededRequests))
-			s.setClockOffset(averageClockOffset)
+			clockOffsets = append(clockOffsets, response.ClockOffset)
 		}
 	}
+
+	numTotalRequests := len(s.ntpOptions.Hosts) * numRequestsFromHost
+	minClockOffsetsToAllowUpdate := math.Ceil(float64(numTotalRequests) * minResponsesPercent)
+	if len(clockOffsets) < int(minClockOffsetsToAllowUpdate) {
+		log.Debug("sync.setClockOffset NOT done",
+			"clock offsets", len(clockOffsets),
+			"min clock offsets to allow update", int(minClockOffsetsToAllowUpdate))
+
+		return
+	}
+
+	clockOffset, err := s.getMedianOffset(clockOffsets)
+	if err != nil {
+		log.Debug("sync.getMedianOffset", "error", err.Error())
+		return
+	}
+
+	isClockOffsetOutOfBounds := core.AbsDuration(clockOffset) > s.outOfBoundsThreshold
+
+	if isClockOffsetOutOfBounds {
+		log.Warn("syncTime.sync: clock offset is out of expected bounds",
+			"clock offset median", clockOffset,
+			"outOfBoundsThreshold", s.outOfBoundsThreshold,
+		)
+	}
+
+	s.setClockOffset(clockOffset)
+
+	s.mut.Lock()
+	s.lastSyncTime = time.Now()
+	s.mut.Unlock()
+
+	log.Debug("sync.setClockOffset done",
+		"num clock offsets", len(clockOffsets),
+		"clock offset median", clockOffset)
+}
+
+func (s *syncTime) getMedianOffset(clockOffsets []time.Duration) (time.Duration, error) {
+	if len(clockOffsets) == 0 {
+		return time.Duration(0), ErrNoClockOffsets
+	}
+	sort.Slice(clockOffsets, func(i, j int) bool {
+		return clockOffsets[i] < clockOffsets[j]
+	})
+
+	n := len(clockOffsets)
+	middleIndex := n / 2
+	if n%2 == 0 {
+		return (clockOffsets[middleIndex-1] + clockOffsets[middleIndex]) / 2, nil
+	}
+	return clockOffsets[middleIndex], nil
 }
 
 // ClockOffset method gets the current time offset
@@ -136,29 +311,37 @@ func (s *syncTime) setClockOffset(clockOffset time.Duration) {
 	s.mut.Unlock()
 }
 
-// FormattedCurrentTime method gets the formatted current time on which is added a given offset
+// FormattedCurrentTime method gets the formatted current time on which is added the current offset
 func (s *syncTime) FormattedCurrentTime() string {
 	return s.formatTime(s.CurrentTime())
 }
 
-// formatTime method gets the formatted time from a given time
+// formatTime method gets the formatted time for a given time
 func (s *syncTime) formatTime(time time.Time) string {
-	str := fmt.Sprintf("%.4d-%.2d-%.2d %.2d:%.2d:%.2d.%.9d ", time.Year(), time.Month(), time.Day(), time.Hour(),
-		time.Minute(), time.Second(), time.Nanosecond())
+	str := fmt.Sprintf("%.4d-%.2d-%.2d %.2d:%.2d:%.2d.%.9d ",
+		time.Year(), time.Month(), time.Day(), time.Hour(), time.Minute(), time.Second(), time.Nanosecond())
 	return str
 }
 
 // CurrentTime method gets the current time on which is added the current offset
 func (s *syncTime) CurrentTime() time.Time {
 	s.mut.RLock()
-	defer s.mut.RUnlock()
-	return time.Now().Add(s.clockOffset)
+	currentTime := time.Now().Add(s.clockOffset)
+	s.mut.RUnlock()
+
+	return currentTime
+}
+
+// Close will close the endless running go routine
+func (s *syncTime) Close() error {
+	if s.cancelFunc != nil {
+		s.cancelFunc()
+	}
+
+	return nil
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (s *syncTime) IsInterfaceNil() bool {
-	if s == nil {
-		return true
-	}
-	return false
+	return s == nil
 }

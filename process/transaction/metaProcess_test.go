@@ -2,73 +2,86 @@ package transaction_test
 
 import (
 	"bytes"
+	"errors"
 	"math/big"
 	"testing"
 
-	"github.com/ElrondNetwork/elrond-go/data"
-	"github.com/ElrondNetwork/elrond-go/data/state"
-	"github.com/ElrondNetwork/elrond-go/data/transaction"
-	"github.com/ElrondNetwork/elrond-go/process"
-	"github.com/ElrondNetwork/elrond-go/process/coordinator"
-	"github.com/ElrondNetwork/elrond-go/process/mock"
-	txproc "github.com/ElrondNetwork/elrond-go/process/transaction"
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/data"
+	"github.com/multiversx/mx-chain-core-go/data/transaction"
+	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/process"
+	"github.com/multiversx/mx-chain-go/process/coordinator"
+	"github.com/multiversx/mx-chain-go/process/mock"
+	txproc "github.com/multiversx/mx-chain-go/process/transaction"
+	"github.com/multiversx/mx-chain-go/sharding"
+	"github.com/multiversx/mx-chain-go/state"
+	"github.com/multiversx/mx-chain-go/state/accounts"
+	"github.com/multiversx/mx-chain-go/testscommon"
+	"github.com/multiversx/mx-chain-go/testscommon/enableEpochsHandlerMock"
+	"github.com/multiversx/mx-chain-go/testscommon/guardianMocks"
+	"github.com/multiversx/mx-chain-go/testscommon/hashingMocks"
+	stateMock "github.com/multiversx/mx-chain-go/testscommon/state"
+	"github.com/multiversx/mx-chain-go/testscommon/trie"
+	"github.com/multiversx/mx-chain-go/vm"
+	vmcommon "github.com/multiversx/mx-chain-vm-common-go"
+	"github.com/multiversx/mx-chain-vm-common-go/builtInFunctions"
+	"github.com/multiversx/mx-chain-vm-common-go/parsers"
 	"github.com/stretchr/testify/assert"
 )
 
-func createMetaTxProcessor() process.TransactionProcessor {
-	txProc, _ := txproc.NewMetaTxProcessor(
-		&mock.AccountsStub{},
-		&mock.AddressConverterMock{},
-		mock.NewOneShardCoordinatorMock(),
-		&mock.SCProcessorMock{},
-		&mock.TxTypeHandlerMock{},
-	)
-
-	return txProc
+func createMockNewMetaTxArgs() txproc.ArgsNewMetaTxProcessor {
+	args := txproc.ArgsNewMetaTxProcessor{
+		Hasher:              &hashingMocks.HasherMock{},
+		Marshalizer:         &mock.MarshalizerMock{},
+		Accounts:            &stateMock.AccountsStub{},
+		PubkeyConv:          createMockPubKeyConverter(),
+		ShardCoordinator:    mock.NewOneShardCoordinatorMock(),
+		ScProcessor:         &testscommon.SCProcessorMock{},
+		TxTypeHandler:       &testscommon.TxTypeHandlerMock{},
+		EconomicsFee:        createFreeTxFeeHandler(),
+		EnableEpochsHandler: enableEpochsHandlerMock.NewEnableEpochsHandlerStub(),
+		GuardianChecker:     &guardianMocks.GuardedAccountHandlerStub{},
+		TxVersionChecker:    &testscommon.TxVersionCheckerStub{},
+	}
+	return args
 }
 
-//------- NewMetaTxProcessor
+func createUserAcc(address []byte) state.UserAccountHandler {
+	acc, _ := accounts.NewUserAccount(address, &trie.DataTrieTrackerStub{}, &trie.TrieLeafParserStub{})
+	return acc
+}
+
+// ------- NewMetaTxProcessor
 
 func TestNewMetaTxProcessor_NilAccountsShouldErr(t *testing.T) {
 	t.Parallel()
 
-	txProc, err := txproc.NewMetaTxProcessor(
-		nil,
-		&mock.AddressConverterMock{},
-		mock.NewOneShardCoordinatorMock(),
-		&mock.SCProcessorMock{},
-		&mock.TxTypeHandlerMock{},
-	)
+	args := createMockNewMetaTxArgs()
+	args.Accounts = nil
+	txProc, err := txproc.NewMetaTxProcessor(args)
 
 	assert.Equal(t, process.ErrNilAccountsAdapter, err)
 	assert.Nil(t, txProc)
 }
 
-func TestNewMetaTxProcessor_NilAddressConverterMockShouldErr(t *testing.T) {
+func TestNewMetaTxProcessor_NilPubkeyConverterMockShouldErr(t *testing.T) {
 	t.Parallel()
 
-	txProc, err := txproc.NewMetaTxProcessor(
-		&mock.AccountsStub{},
-		nil,
-		mock.NewOneShardCoordinatorMock(),
-		&mock.SCProcessorMock{},
-		&mock.TxTypeHandlerMock{},
-	)
+	args := createMockNewMetaTxArgs()
+	args.PubkeyConv = nil
+	txProc, err := txproc.NewMetaTxProcessor(args)
 
-	assert.Equal(t, process.ErrNilAddressConverter, err)
+	assert.Equal(t, process.ErrNilPubkeyConverter, err)
 	assert.Nil(t, txProc)
 }
 
 func TestNewMetaTxProcessor_NilShardCoordinatorMockShouldErr(t *testing.T) {
 	t.Parallel()
 
-	txProc, err := txproc.NewMetaTxProcessor(
-		&mock.AccountsStub{},
-		&mock.AddressConverterMock{},
-		nil,
-		&mock.SCProcessorMock{},
-		&mock.TxTypeHandlerMock{},
-	)
+	args := createMockNewMetaTxArgs()
+	args.ShardCoordinator = nil
+	txProc, err := txproc.NewMetaTxProcessor(args)
 
 	assert.Equal(t, process.ErrNilShardCoordinator, err)
 	assert.Nil(t, txProc)
@@ -77,13 +90,9 @@ func TestNewMetaTxProcessor_NilShardCoordinatorMockShouldErr(t *testing.T) {
 func TestNewMetaTxProcessor_NilSCProcessorShouldErr(t *testing.T) {
 	t.Parallel()
 
-	txProc, err := txproc.NewMetaTxProcessor(
-		&mock.AccountsStub{},
-		&mock.AddressConverterMock{},
-		mock.NewOneShardCoordinatorMock(),
-		nil,
-		&mock.TxTypeHandlerMock{},
-	)
+	args := createMockNewMetaTxArgs()
+	args.ScProcessor = nil
+	txProc, err := txproc.NewMetaTxProcessor(args)
 
 	assert.Equal(t, process.ErrNilSmartContractProcessor, err)
 	assert.Nil(t, txProc)
@@ -92,75 +101,76 @@ func TestNewMetaTxProcessor_NilSCProcessorShouldErr(t *testing.T) {
 func TestNewMetaTxProcessor_NilTxTypeHandlerShouldErr(t *testing.T) {
 	t.Parallel()
 
-	txProc, err := txproc.NewMetaTxProcessor(
-		&mock.AccountsStub{},
-		&mock.AddressConverterMock{},
-		mock.NewOneShardCoordinatorMock(),
-		&mock.SCProcessorMock{},
-		nil,
-	)
+	args := createMockNewMetaTxArgs()
+	args.TxTypeHandler = nil
+	txProc, err := txproc.NewMetaTxProcessor(args)
 
 	assert.Equal(t, process.ErrNilTxTypeHandler, err)
+	assert.Nil(t, txProc)
+}
+
+func TestNewMetaTxProcessor_NilTxFeeHandlerShouldErr(t *testing.T) {
+	t.Parallel()
+
+	args := createMockNewMetaTxArgs()
+	args.EconomicsFee = nil
+	txProc, err := txproc.NewMetaTxProcessor(args)
+
+	assert.Equal(t, process.ErrNilEconomicsFeeHandler, err)
+	assert.Nil(t, txProc)
+}
+
+func TestNewMetaTxProcessor_NilEnableEpochsHandlerShouldErr(t *testing.T) {
+	t.Parallel()
+
+	args := createMockNewMetaTxArgs()
+	args.EnableEpochsHandler = nil
+	txProc, err := txproc.NewMetaTxProcessor(args)
+
+	assert.Equal(t, process.ErrNilEnableEpochsHandler, err)
+	assert.Nil(t, txProc)
+}
+
+func TestNewMetaTxProcessor_InvalidEnableEpochsHandlerShouldErr(t *testing.T) {
+	t.Parallel()
+
+	args := createMockNewMetaTxArgs()
+	args.EnableEpochsHandler = enableEpochsHandlerMock.NewEnableEpochsHandlerStubWithNoFlagsDefined()
+	txProc, err := txproc.NewMetaTxProcessor(args)
+
+	assert.True(t, errors.Is(err, core.ErrInvalidEnableEpochsHandler))
 	assert.Nil(t, txProc)
 }
 
 func TestNewMetaTxProcessor_OkValsShouldWork(t *testing.T) {
 	t.Parallel()
 
-	txProc, err := txproc.NewMetaTxProcessor(
-		&mock.AccountsStub{},
-		&mock.AddressConverterMock{},
-		mock.NewOneShardCoordinatorMock(),
-		&mock.SCProcessorMock{},
-		&mock.TxTypeHandlerMock{},
-	)
+	args := createMockNewMetaTxArgs()
+	txProc, err := txproc.NewMetaTxProcessor(args)
 
 	assert.Nil(t, err)
 	assert.NotNil(t, txProc)
 }
 
-//------- ProcessTransaction
+// ------- ProcessTransaction
 
 func TestMetaTxProcessor_ProcessTransactionNilTxShouldErr(t *testing.T) {
 	t.Parallel()
 
-	execTx := createMetaTxProcessor()
+	args := createMockNewMetaTxArgs()
+	txProc, _ := txproc.NewMetaTxProcessor(args)
 
-	err := execTx.ProcessTransaction(nil, 4)
+	_, err := txProc.ProcessTransaction(nil)
 	assert.Equal(t, process.ErrNilTransaction, err)
-}
-
-func TestMetaTxProcessor_ProcessTransactionErrAddressConvShouldErr(t *testing.T) {
-	t.Parallel()
-
-	addressConv := &mock.AddressConverterMock{}
-
-	execTx, _ := txproc.NewMetaTxProcessor(
-		&mock.AccountsStub{},
-		addressConv,
-		mock.NewOneShardCoordinatorMock(),
-		&mock.SCProcessorMock{},
-		&mock.TxTypeHandlerMock{},
-	)
-
-	addressConv.Fail = true
-
-	err := execTx.ProcessTransaction(&transaction.Transaction{}, 4)
-	assert.NotNil(t, err)
 }
 
 func TestMetaTxProcessor_ProcessTransactionMalfunctionAccountsShouldErr(t *testing.T) {
 	t.Parallel()
 
-	accounts := createAccountStub(nil, nil, nil, nil)
-
-	execTx, _ := txproc.NewMetaTxProcessor(
-		accounts,
-		&mock.AddressConverterMock{},
-		mock.NewOneShardCoordinatorMock(),
-		&mock.SCProcessorMock{},
-		&mock.TxTypeHandlerMock{},
-	)
+	adb := createAccountStub(nil, nil, nil, nil)
+	args := createMockNewMetaTxArgs()
+	args.Accounts = adb
+	txProc, _ := txproc.NewMetaTxProcessor(args)
 
 	tx := transaction.Transaction{}
 	tx.Nonce = 1
@@ -168,53 +178,37 @@ func TestMetaTxProcessor_ProcessTransactionMalfunctionAccountsShouldErr(t *testi
 	tx.RcvAddr = []byte("DST")
 	tx.Value = big.NewInt(45)
 
-	err := execTx.ProcessTransaction(&tx, 4)
+	_, err := txProc.ProcessTransaction(&tx)
 	assert.NotNil(t, err)
 }
 
 func TestMetaTxProcessor_ProcessCheckNotPassShouldErr(t *testing.T) {
 	t.Parallel()
 
-	//these values will trigger ErrHigherNonceInTransaction
+	// these values will trigger ErrHigherNonceInTransaction
 	tx := transaction.Transaction{}
 	tx.Nonce = 1
 	tx.SndAddr = []byte("SRC")
 	tx.RcvAddr = []byte("DST")
 	tx.Value = big.NewInt(45)
 
-	acntSrc, err := state.NewAccount(mock.NewAddressMock(tx.SndAddr), &mock.AccountTrackerStub{})
-	assert.Nil(t, err)
-	acntDst, err := state.NewAccount(mock.NewAddressMock(tx.RcvAddr), &mock.AccountTrackerStub{})
-	assert.Nil(t, err)
+	acntSrc := createUserAcc(tx.SndAddr)
+	acntDst := createUserAcc(tx.RcvAddr)
 
-	accounts := createAccountStub(tx.SndAddr, tx.RcvAddr, acntSrc, acntDst)
+	adb := createAccountStub(tx.SndAddr, tx.RcvAddr, acntSrc, acntDst)
 
-	execTx, _ := txproc.NewMetaTxProcessor(
-		accounts,
-		&mock.AddressConverterMock{},
-		mock.NewOneShardCoordinatorMock(),
-		&mock.SCProcessorMock{},
-		&mock.TxTypeHandlerMock{},
-	)
+	args := createMockNewMetaTxArgs()
+	args.Accounts = adb
+	txProc, _ := txproc.NewMetaTxProcessor(args)
 
-	err = execTx.ProcessTransaction(&tx, 4)
+	_, err := txProc.ProcessTransaction(&tx)
 	assert.Equal(t, process.ErrHigherNonceInTransaction, err)
 }
 
-func TestMetaTxProcessor_ProcessMoveBalancesShouldFail(t *testing.T) {
+func TestMetaTxProcessor_ProcessMoveBalancesShouldCallProcessIfError(t *testing.T) {
 	t.Parallel()
 
-	journalizeCalled := 0
 	saveAccountCalled := 0
-	tracker := &mock.AccountTrackerStub{
-		JournalizeCalled: func(entry state.JournalEntry) {
-			journalizeCalled++
-		},
-		SaveAccountCalled: func(accountHandler state.AccountHandler) error {
-			saveAccountCalled++
-			return nil
-		},
-	}
 
 	tx := transaction.Transaction{}
 	tx.Nonce = 0
@@ -222,141 +216,122 @@ func TestMetaTxProcessor_ProcessMoveBalancesShouldFail(t *testing.T) {
 	tx.RcvAddr = []byte("DST")
 	tx.Value = big.NewInt(0)
 
-	acntSrc, err := state.NewAccount(mock.NewAddressMock(tx.SndAddr), tracker)
-	assert.Nil(t, err)
-	acntDst, err := state.NewAccount(mock.NewAddressMock(tx.RcvAddr), tracker)
-	assert.Nil(t, err)
+	acntSrc := createUserAcc(tx.SndAddr)
+	acntDst := createUserAcc(tx.RcvAddr)
 
-	accounts := createAccountStub(tx.SndAddr, tx.RcvAddr, acntSrc, acntDst)
+	adb := createAccountStub(tx.SndAddr, tx.RcvAddr, acntSrc, acntDst)
+	adb.SaveAccountCalled = func(account vmcommon.AccountHandler) error {
+		saveAccountCalled++
+		return nil
+	}
 
-	execTx, _ := txproc.NewMetaTxProcessor(
-		accounts,
-		&mock.AddressConverterMock{},
-		mock.NewOneShardCoordinatorMock(),
-		&mock.SCProcessorMock{},
-		&mock.TxTypeHandlerMock{},
-	)
+	called := false
+	args := createMockNewMetaTxArgs()
+	args.Accounts = adb
+	args.ScProcessor = &testscommon.SCProcessorMock{
+		ProcessIfErrorCalled: func(acntSnd state.UserAccountHandler, txHash []byte, tx data.TransactionHandler, returnCode string, returnMessage []byte, snapshot int, gasLocked uint64) error {
+			called = true
+			return nil
+		},
+	}
+	txProc, _ := txproc.NewMetaTxProcessor(args)
 
-	err = execTx.ProcessTransaction(&tx, 4)
-	assert.Equal(t, process.ErrWrongTransaction, err)
+	_, err := txProc.ProcessTransaction(&tx)
+	assert.Equal(t, nil, err)
+	assert.True(t, called)
 }
 
 func TestMetaTxProcessor_ProcessTransactionScTxShouldWork(t *testing.T) {
 	t.Parallel()
 
-	journalizeCalled := 0
 	saveAccountCalled := 0
-	tracker := &mock.AccountTrackerStub{
-		JournalizeCalled: func(entry state.JournalEntry) {
-			journalizeCalled++
-		},
-		SaveAccountCalled: func(accountHandler state.AccountHandler) error {
-			saveAccountCalled++
-			return nil
-		},
-	}
-
-	addrConverter := &mock.AddressConverterMock{}
 
 	tx := transaction.Transaction{}
 	tx.Nonce = 0
 	tx.SndAddr = []byte("SRC")
-	tx.RcvAddr = generateRandomByteSlice(addrConverter.AddressLen())
+	tx.RcvAddr = generateRandomByteSlice(createMockPubKeyConverter().Len())
 	tx.Value = big.NewInt(45)
 	tx.GasPrice = 1
 	tx.GasLimit = 1
 
-	acntSrc, err := state.NewAccount(mock.NewAddressMock(tx.SndAddr), tracker)
-	assert.Nil(t, err)
+	acntSrc := createUserAcc(tx.SndAddr)
+	acntDst := createUserAcc(tx.RcvAddr)
 
-	acntDst, err := state.NewAccount(mock.NewAddressMock(tx.RcvAddr), tracker)
-	assert.Nil(t, err)
-
-	acntSrc.Balance = big.NewInt(46)
+	_ = acntSrc.AddToBalance(big.NewInt(46))
 	acntDst.SetCode([]byte{65})
 
-	accounts := createAccountStub(tx.SndAddr, tx.RcvAddr, acntSrc, acntDst)
-	scProcessorMock := &mock.SCProcessorMock{}
-
-	wasCalled := false
-	scProcessorMock.ExecuteSmartContractTransactionCalled = func(tx *transaction.Transaction, acntSrc, acntDst state.AccountHandler, round uint64) error {
-		wasCalled = true
+	adb := createAccountStub(tx.SndAddr, tx.RcvAddr, acntSrc, acntDst)
+	adb.SaveAccountCalled = func(account vmcommon.AccountHandler) error {
+		saveAccountCalled++
 		return nil
 	}
+	scProcessorMock := &testscommon.SCProcessorMock{}
 
-	execTx, _ := txproc.NewMetaTxProcessor(
-		accounts,
-		&mock.AddressConverterMock{},
-		mock.NewOneShardCoordinatorMock(),
-		scProcessorMock,
-		&mock.TxTypeHandlerMock{
-			ComputeTransactionTypeCalled: func(tx data.TransactionHandler) (transactionType process.TransactionType, e error) {
-				return process.SCInvoking, nil
-			},
+	wasCalled := false
+	scProcessorMock.ExecuteSmartContractTransactionCalled = func(tx data.TransactionHandler, acntSrc, acntDst state.UserAccountHandler) (vmcommon.ReturnCode, error) {
+		wasCalled = true
+		return 0, nil
+	}
+
+	args := createMockNewMetaTxArgs()
+	args.Accounts = adb
+	args.ScProcessor = scProcessorMock
+	args.TxTypeHandler = &testscommon.TxTypeHandlerMock{
+		ComputeTransactionTypeCalled: func(tx data.TransactionHandler) (process.TransactionType, process.TransactionType, bool) {
+			return process.SCInvoking, process.SCInvoking, false
 		},
-	)
+	}
+	txProc, _ := txproc.NewMetaTxProcessor(args)
 
-	err = execTx.ProcessTransaction(&tx, 4)
+	_, err := txProc.ProcessTransaction(&tx)
 	assert.Nil(t, err)
 	assert.True(t, wasCalled)
-	assert.Equal(t, 0, journalizeCalled)
 	assert.Equal(t, 0, saveAccountCalled)
 }
 
 func TestMetaTxProcessor_ProcessTransactionScTxShouldReturnErrWhenExecutionFails(t *testing.T) {
 	t.Parallel()
 
-	journalizeCalled := 0
 	saveAccountCalled := 0
-	tracker := &mock.AccountTrackerStub{
-		JournalizeCalled: func(entry state.JournalEntry) {
-			journalizeCalled++
-		},
-		SaveAccountCalled: func(accountHandler state.AccountHandler) error {
-			saveAccountCalled++
-			return nil
-		},
-	}
-
-	addrConverter := &mock.AddressConverterMock{}
 
 	tx := transaction.Transaction{}
 	tx.Nonce = 0
 	tx.SndAddr = []byte("SRC")
-	tx.RcvAddr = generateRandomByteSlice(addrConverter.AddressLen())
+	tx.RcvAddr = generateRandomByteSlice(createMockPubKeyConverter().Len())
 	tx.Value = big.NewInt(45)
 
-	acntSrc, err := state.NewAccount(mock.NewAddressMock(tx.SndAddr), tracker)
-	assert.Nil(t, err)
-	acntSrc.Balance = big.NewInt(45)
-	acntDst, err := state.NewAccount(mock.NewAddressMock(tx.RcvAddr), tracker)
-	assert.Nil(t, err)
+	acntSrc := createUserAcc(tx.SndAddr)
+	_ = acntSrc.AddToBalance(big.NewInt(45))
+	acntDst := createUserAcc(tx.RcvAddr)
 	acntDst.SetCode([]byte{65})
 
-	accounts := createAccountStub(tx.SndAddr, tx.RcvAddr, acntSrc, acntDst)
-
-	scProcessorMock := &mock.SCProcessorMock{}
-
-	wasCalled := false
-	scProcessorMock.ExecuteSmartContractTransactionCalled = func(tx *transaction.Transaction, acntSrc, acntDst state.AccountHandler, round uint64) error {
-		wasCalled = true
-		return process.ErrNoVM
+	adb := createAccountStub(tx.SndAddr, tx.RcvAddr, acntSrc, acntDst)
+	adb.SaveAccountCalled = func(account vmcommon.AccountHandler) error {
+		saveAccountCalled++
+		return nil
 	}
 
-	execTx, _ := txproc.NewMetaTxProcessor(
-		accounts,
-		&mock.AddressConverterMock{},
-		mock.NewOneShardCoordinatorMock(),
-		scProcessorMock,
-		&mock.TxTypeHandlerMock{ComputeTransactionTypeCalled: func(tx data.TransactionHandler) (transactionType process.TransactionType, e error) {
-			return process.SCInvoking, nil
-		}},
-	)
+	scProcessorMock := &testscommon.SCProcessorMock{}
 
-	err = execTx.ProcessTransaction(&tx, 4)
+	wasCalled := false
+	scProcessorMock.ExecuteSmartContractTransactionCalled = func(tx data.TransactionHandler, acntSrc, acntDst state.UserAccountHandler) (vmcommon.ReturnCode, error) {
+		wasCalled = true
+		return 0, process.ErrNoVM
+	}
+
+	args := createMockNewMetaTxArgs()
+	args.Accounts = adb
+	args.ScProcessor = scProcessorMock
+	args.TxTypeHandler = &testscommon.TxTypeHandlerMock{
+		ComputeTransactionTypeCalled: func(tx data.TransactionHandler) (process.TransactionType, process.TransactionType, bool) {
+			return process.SCInvoking, process.SCInvoking, false
+		},
+	}
+	txProc, _ := txproc.NewMetaTxProcessor(args)
+
+	_, err := txProc.ProcessTransaction(&tx)
 	assert.Equal(t, process.ErrNoVM, err)
 	assert.True(t, wasCalled)
-	assert.Equal(t, 0, journalizeCalled)
 	assert.Equal(t, 0, saveAccountCalled)
 }
 
@@ -365,64 +340,154 @@ func TestMetaTxProcessor_ProcessTransactionScTxShouldNotBeCalledWhenAdrDstIsNotI
 
 	shardCoordinator := mock.NewOneShardCoordinatorMock()
 
-	journalizeCalled := 0
 	saveAccountCalled := 0
-	tracker := &mock.AccountTrackerStub{
-		JournalizeCalled: func(entry state.JournalEntry) {
-			journalizeCalled++
-		},
-		SaveAccountCalled: func(accountHandler state.AccountHandler) error {
-			saveAccountCalled++
-			return nil
-		},
-	}
-
-	addrConverter := &mock.AddressConverterMock{}
 
 	tx := transaction.Transaction{}
 	tx.Nonce = 0
 	tx.SndAddr = []byte("SRC")
-	tx.RcvAddr = generateRandomByteSlice(addrConverter.AddressLen())
+	tx.RcvAddr = generateRandomByteSlice(createMockPubKeyConverter().Len())
 	tx.Value = big.NewInt(45)
 
-	shardCoordinator.ComputeIdCalled = func(container state.AddressContainer) uint32 {
-		if bytes.Equal(container.Bytes(), tx.RcvAddr) {
+	shardCoordinator.ComputeIdCalled = func(address []byte) uint32 {
+		if bytes.Equal(address, tx.RcvAddr) {
 			return 1
 		}
 
 		return 0
 	}
 
-	acntSrc, err := state.NewAccount(mock.NewAddressMock(tx.SndAddr), tracker)
-	assert.Nil(t, err)
-	acntSrc.Balance = big.NewInt(45)
-	acntDst, err := state.NewAccount(mock.NewAddressMock(tx.RcvAddr), tracker)
-	assert.Nil(t, err)
+	acntSrc := createUserAcc(tx.SndAddr)
+	_ = acntSrc.AddToBalance(big.NewInt(45))
+	acntDst := createUserAcc(tx.RcvAddr)
 	acntDst.SetCode([]byte{65})
 
-	accounts := createAccountStub(tx.SndAddr, tx.RcvAddr, acntSrc, acntDst)
-
-	scProcessorMock := &mock.SCProcessorMock{}
-	wasCalled := false
-	scProcessorMock.ExecuteSmartContractTransactionCalled = func(tx *transaction.Transaction, acntSrc, acntDst state.AccountHandler, round uint64) error {
-		wasCalled = true
-		return process.ErrNoVM
+	adb := createAccountStub(tx.SndAddr, tx.RcvAddr, acntSrc, acntDst)
+	adb.SaveAccountCalled = func(account vmcommon.AccountHandler) error {
+		saveAccountCalled++
+		return nil
 	}
 
-	computeType, _ := coordinator.NewTxTypeHandler(
-		&mock.AddressConverterMock{},
-		shardCoordinator,
-		accounts)
+	scProcessorMock := &testscommon.SCProcessorMock{}
+	wasCalled := false
+	scProcessorMock.ExecuteSmartContractTransactionCalled = func(tx data.TransactionHandler, acntSrc, acntDst state.UserAccountHandler) (vmcommon.ReturnCode, error) {
+		wasCalled = true
+		return 0, process.ErrNoVM
+	}
+	calledIfError := false
+	scProcessorMock.ProcessIfErrorCalled = func(acntSnd state.UserAccountHandler, txHash []byte, tx data.TransactionHandler, returnCode string, returnMessage []byte, snapshot int, gasLocked uint64) error {
+		calledIfError = true
+		return nil
+	}
 
-	execTx, _ := txproc.NewMetaTxProcessor(
-		accounts,
-		&mock.AddressConverterMock{},
-		shardCoordinator,
-		scProcessorMock,
-		computeType,
-	)
+	esdtTransferParser, _ := parsers.NewESDTTransferParser(&mock.MarshalizerMock{})
+	argsTxTypeHandler := coordinator.ArgNewTxTypeHandler{
+		PubkeyConverter:     createMockPubKeyConverter(),
+		ShardCoordinator:    shardCoordinator,
+		BuiltInFunctions:    builtInFunctions.NewBuiltInFunctionContainer(),
+		ArgumentParser:      parsers.NewCallArgsParser(),
+		ESDTTransferParser:  esdtTransferParser,
+		EnableEpochsHandler: enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.ESDTMetadataContinuousCleanupFlag),
+	}
+	computeType, _ := coordinator.NewTxTypeHandler(argsTxTypeHandler)
 
-	err = execTx.ProcessTransaction(&tx, 4)
-	assert.Equal(t, process.ErrWrongTransaction, err)
+	args := createMockNewMetaTxArgs()
+	args.Accounts = adb
+	args.ScProcessor = scProcessorMock
+	args.TxTypeHandler = computeType
+	args.ShardCoordinator = shardCoordinator
+	txProc, _ := txproc.NewMetaTxProcessor(args)
+
+	_, err := txProc.ProcessTransaction(&tx)
+	assert.Equal(t, nil, err)
 	assert.False(t, wasCalled)
+	assert.True(t, calledIfError)
+}
+
+func TestMetaTxProcessor_ProcessTransactionBuiltInCallTxShouldWork(t *testing.T) {
+	t.Parallel()
+
+	saveAccountCalled := 0
+
+	tx := transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = []byte("SRC")
+	tx.RcvAddr = generateRandomByteSlice(createMockPubKeyConverter().Len())
+	tx.Value = big.NewInt(45)
+	tx.GasPrice = 1
+	tx.GasLimit = 1
+
+	acntSrc := createUserAcc(tx.SndAddr)
+	acntDst := createUserAcc(tx.RcvAddr)
+
+	_ = acntSrc.AddToBalance(big.NewInt(46))
+	acntDst.SetCode([]byte{65})
+
+	adb := createAccountStub(tx.SndAddr, tx.RcvAddr, acntSrc, acntDst)
+	adb.SaveAccountCalled = func(account vmcommon.AccountHandler) error {
+		saveAccountCalled++
+		return nil
+	}
+	scProcessorMock := &testscommon.SCProcessorMock{}
+
+	wasCalled := false
+	scProcessorMock.ExecuteSmartContractTransactionCalled = func(tx data.TransactionHandler, acntSrc, acntDst state.UserAccountHandler) (vmcommon.ReturnCode, error) {
+		wasCalled = true
+		return 0, nil
+	}
+
+	args := createMockNewMetaTxArgs()
+	args.Accounts = adb
+	args.ScProcessor = scProcessorMock
+	args.TxTypeHandler = &testscommon.TxTypeHandlerMock{
+		ComputeTransactionTypeCalled: func(tx data.TransactionHandler) (process.TransactionType, process.TransactionType, bool) {
+			return process.BuiltInFunctionCall, process.BuiltInFunctionCall, false
+		},
+	}
+	enableEpochsHandlerStub := enableEpochsHandlerMock.NewEnableEpochsHandlerStub(common.ESDTFlag)
+	args.EnableEpochsHandler = enableEpochsHandlerStub
+	txProc, _ := txproc.NewMetaTxProcessor(args)
+
+	_, err := txProc.ProcessTransaction(&tx)
+	assert.Nil(t, err)
+	assert.True(t, wasCalled)
+	assert.Equal(t, 0, saveAccountCalled)
+}
+
+func TestMetaTxProcessor_ProcessTransactionWithInvalidUsernameShouldNotError(t *testing.T) {
+	t.Parallel()
+
+	tx := &transaction.Transaction{}
+	tx.Nonce = 0
+	tx.SndAddr = bytes.Repeat([]byte{1}, 32)
+	tx.RcvAddr = vm.GovernanceSCAddress
+	tx.RcvUserName = []byte("username")
+	tx.Value = big.NewInt(45)
+	tx.GasPrice = 1
+	tx.GasLimit = 1
+
+	acntDst, err := accounts.NewUserAccount(tx.RcvAddr, &trie.DataTrieTrackerStub{}, &trie.TrieLeafParserStub{})
+	assert.Nil(t, err)
+
+	called := false
+	adb := createAccountStub(tx.SndAddr, tx.RcvAddr, acntDst, acntDst)
+	scProcessor := &testscommon.SCProcessorMock{
+		ProcessIfErrorCalled: func(acntSnd state.UserAccountHandler, txHash []byte, tx data.TransactionHandler, returnCode string, returnMessage []byte, snapshot int, gasLocked uint64) error {
+			called = true
+			return nil
+		},
+	}
+
+	args := createMockNewMetaTxArgs()
+	args.Accounts = adb
+	args.ScProcessor = scProcessor
+	args.ShardCoordinator, _ = sharding.NewMultiShardCoordinator(3, core.MetachainShardId)
+	txProc, _ := txproc.NewMetaTxProcessor(args)
+
+	err = txProc.VerifyTransaction(tx)
+	assert.Equal(t, err, process.ErrUserNameDoesNotMatchInCrossShardTx)
+
+	returnCode, err := txProc.ProcessTransaction(tx)
+	assert.Nil(t, err)
+	assert.Equal(t, vmcommon.UserError, returnCode)
+	assert.True(t, called)
 }

@@ -1,0 +1,197 @@
+package factory_test
+
+import (
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/multiversx/mx-chain-communication-go/websocket/data"
+	indexerFactory "github.com/multiversx/mx-chain-es-indexer-go/process/factory"
+	"github.com/multiversx/mx-chain-go/config"
+	"github.com/multiversx/mx-chain-go/outport"
+	notifierFactory "github.com/multiversx/mx-chain-go/outport/factory"
+	"github.com/multiversx/mx-chain-go/process/mock"
+	"github.com/multiversx/mx-chain-go/testscommon"
+	"github.com/multiversx/mx-chain-go/testscommon/enableEpochsHandlerMock"
+	"github.com/multiversx/mx-chain-go/testscommon/marshallerMock"
+	"github.com/stretchr/testify/require"
+)
+
+func createMockArgsOutportHandler(indexerEnabled, notifierEnabled bool) *notifierFactory.OutportFactoryArgs {
+	mockElasticArgs := indexerFactory.ArgsIndexerFactory{
+		Enabled: indexerEnabled,
+	}
+	mockNotifierArgs := &notifierFactory.EventNotifierFactoryArgs{
+		Enabled: notifierEnabled,
+	}
+	return &notifierFactory.OutportFactoryArgs{
+		RetrialInterval:           time.Second,
+		ElasticIndexerFactoryArgs: mockElasticArgs,
+		EventNotifierFactoryArgs:  mockNotifierArgs,
+		EnableEpochsHandler:       &enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+		EnableRoundsHandler:       &testscommon.EnableRoundsHandlerStub{},
+	}
+}
+
+func TestNewIndexerFactory(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		argsFunc func() *notifierFactory.OutportFactoryArgs
+		exError  error
+	}{
+		{
+			name: "NilArgsOutportFactory",
+			argsFunc: func() *notifierFactory.OutportFactoryArgs {
+				return nil
+			},
+			exError: outport.ErrNilArgsOutportFactory,
+		},
+		{
+			name: "invalid retrial duration",
+			argsFunc: func() *notifierFactory.OutportFactoryArgs {
+				args := createMockArgsOutportHandler(false, false)
+				args.RetrialInterval = 0
+				return args
+			},
+			exError: outport.ErrInvalidRetrialInterval,
+		},
+		{
+			name: "AllOkShouldWork",
+			argsFunc: func() *notifierFactory.OutportFactoryArgs {
+				return createMockArgsOutportHandler(false, false)
+			},
+			exError: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := notifierFactory.CreateOutport(tt.argsFunc())
+			require.True(t, errors.Is(err, tt.exError))
+		})
+	}
+}
+
+func TestCreateOutport_EnabledDriversNilMockArgsExpectErrorSubscribingDrivers(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		argsFunc func() *notifierFactory.OutportFactoryArgs
+	}{
+		{
+			argsFunc: func() *notifierFactory.OutportFactoryArgs {
+				return createMockArgsOutportHandler(true, false)
+			},
+		},
+		{
+			argsFunc: func() *notifierFactory.OutportFactoryArgs {
+				return createMockArgsOutportHandler(false, true)
+			},
+		},
+	}
+
+	for _, currTest := range tests {
+		_, err := notifierFactory.CreateOutport(currTest.argsFunc())
+		require.NotNil(t, err)
+	}
+}
+
+func TestCreateOutport_SubscribeNotifierDriver(t *testing.T) {
+	args := createMockArgsOutportHandler(false, true)
+
+	args.EventNotifierFactoryArgs.Marshaller = &mock.MarshalizerMock{}
+	args.EventNotifierFactoryArgs.RequestTimeoutSec = 1
+	outPort, err := notifierFactory.CreateOutport(args)
+	require.Nil(t, err)
+
+	defer func(c outport.OutportHandler) {
+		_ = c.Close()
+	}(outPort)
+
+	require.True(t, outPort.HasDrivers())
+}
+
+func TestCreateOutport_SubscribeMultipleHostDrivers(t *testing.T) {
+	args := &notifierFactory.OutportFactoryArgs{
+		RetrialInterval: time.Second,
+		EventNotifierFactoryArgs: &notifierFactory.EventNotifierFactoryArgs{
+			Enabled: false,
+		},
+		ElasticIndexerFactoryArgs: indexerFactory.ArgsIndexerFactory{
+			Enabled: false,
+		},
+		HostDriversArgs: []notifierFactory.ArgsHostDriverFactory{
+			{
+				Marshaller: &marshallerMock.MarshalizerMock{},
+				HostConfig: config.HostDriversConfig{
+					Enabled:            true,
+					URL:                "ws://localhost",
+					RetryDurationInSec: 1,
+					MarshallerType:     "json",
+					Mode:               data.ModeClient,
+				},
+			},
+			{
+				Marshaller: &marshallerMock.MarshalizerMock{},
+				HostConfig: config.HostDriversConfig{
+					Enabled:            false,
+					URL:                "ws://localhost",
+					RetryDurationInSec: 1,
+					MarshallerType:     "json",
+					Mode:               data.ModeClient,
+				},
+			},
+			{
+				Marshaller: &marshallerMock.MarshalizerMock{},
+				HostConfig: config.HostDriversConfig{
+					Enabled:            true,
+					URL:                "ws://localhost",
+					RetryDurationInSec: 1,
+					MarshallerType:     "json",
+					Mode:               data.ModeClient,
+				},
+			},
+		},
+		EnableEpochsHandler: &enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+		EnableRoundsHandler: &testscommon.EnableRoundsHandlerStub{},
+	}
+
+	outPort, err := notifierFactory.CreateOutport(args)
+	require.Nil(t, err)
+
+	defer func() {
+		_ = outPort.Close()
+	}()
+
+	require.True(t, outPort.HasDrivers())
+}
+
+func TestCreateAndSubscribeDriversShouldReturnError(t *testing.T) {
+	args := &notifierFactory.OutportFactoryArgs{
+		RetrialInterval: time.Second,
+		EventNotifierFactoryArgs: &notifierFactory.EventNotifierFactoryArgs{
+			Enabled: false,
+		},
+		ElasticIndexerFactoryArgs: indexerFactory.ArgsIndexerFactory{
+			Enabled: false,
+		},
+		HostDriversArgs: []notifierFactory.ArgsHostDriverFactory{
+			{
+				Marshaller: &marshallerMock.MarshalizerMock{},
+				HostConfig: config.HostDriversConfig{
+					Enabled:            true,
+					URL:                "localhost",
+					RetryDurationInSec: 1,
+					MarshallerType:     "json",
+					Mode:               "wrong mode",
+				},
+			},
+		},
+		EnableEpochsHandler: &enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+		EnableRoundsHandler: &testscommon.EnableRoundsHandlerStub{},
+	}
+
+	outPort, err := notifierFactory.CreateOutport(args)
+	require.Nil(t, outPort)
+	require.ErrorIs(t, err, data.ErrInvalidWebSocketHostMode)
+}

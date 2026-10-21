@@ -1,0 +1,557 @@
+package enablers
+
+import (
+	"fmt"
+	"math"
+	"reflect"
+	"testing"
+
+	"github.com/multiversx/mx-chain-core-go/core/check"
+	vmcommon "github.com/multiversx/mx-chain-vm-common-go"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/config"
+	"github.com/multiversx/mx-chain-go/process"
+	"github.com/multiversx/mx-chain-go/testscommon/epochNotifier"
+)
+
+func createEnableEpochsConfig() config.EnableEpochs {
+	return config.EnableEpochs{
+		SCDeployEnableEpoch:                                      1,
+		BuiltInFunctionsEnableEpoch:                              2,
+		RelayedTransactionsEnableEpoch:                           3,
+		PenalizedTooMuchGasEnableEpoch:                           4,
+		SwitchJailWaitingEnableEpoch:                             5,
+		BelowSignedThresholdEnableEpoch:                          6,
+		SwitchHysteresisForMinNodesEnableEpoch:                   7,
+		TransactionSignedWithTxHashEnableEpoch:                   8,
+		MetaProtectionEnableEpoch:                                9,
+		AheadOfTimeGasUsageEnableEpoch:                           10,
+		GasPriceModifierEnableEpoch:                              11,
+		RepairCallbackEnableEpoch:                                12,
+		BlockGasAndFeesReCheckEnableEpoch:                        13,
+		BalanceWaitingListsEnableEpoch:                           14,
+		ReturnDataToLastTransferEnableEpoch:                      15,
+		SenderInOutTransferEnableEpoch:                           16,
+		StakeEnableEpoch:                                         17,
+		StakingV2EnableEpoch:                                     18,
+		DoubleKeyProtectionEnableEpoch:                           19,
+		ESDTEnableEpoch:                                          20,
+		GovernanceEnableEpoch:                                    21,
+		GovernanceDisableProposeEnableEpoch:                      22,
+		GovernanceFixesEnableEpoch:                               23,
+		DelegationManagerEnableEpoch:                             22,
+		DelegationSmartContractEnableEpoch:                       23,
+		CorrectLastUnjailedEnableEpoch:                           24,
+		RelayedTransactionsV2EnableEpoch:                         25,
+		UnbondTokensV2EnableEpoch:                                26,
+		SaveJailedAlwaysEnableEpoch:                              27,
+		ReDelegateBelowMinCheckEnableEpoch:                       28,
+		ValidatorToDelegationEnableEpoch:                         29,
+		IncrementSCRNonceInMultiTransferEnableEpoch:              31,
+		ESDTMultiTransferEnableEpoch:                             32,
+		GlobalMintBurnDisableEpoch:                               33,
+		ESDTTransferRoleEnableEpoch:                              34,
+		ComputeRewardCheckpointEnableEpoch:                       36,
+		SCRSizeInvariantCheckEnableEpoch:                         37,
+		BackwardCompSaveKeyValueEnableEpoch:                      38,
+		ESDTNFTCreateOnMultiShardEnableEpoch:                     39,
+		MetaESDTSetEnableEpoch:                                   40,
+		AddTokensToDelegationEnableEpoch:                         41,
+		MultiESDTTransferFixOnCallBackOnEnableEpoch:              42,
+		OptimizeGasUsedInCrossMiniBlocksEnableEpoch:              43,
+		CorrectFirstQueuedEpoch:                                  44,
+		DeleteDelegatorAfterClaimRewardsEnableEpoch:              45,
+		FixOOGReturnCodeEnableEpoch:                              46,
+		RemoveNonUpdatedStorageEnableEpoch:                       47,
+		OptimizeNFTStoreEnableEpoch:                              48,
+		CreateNFTThroughExecByCallerEnableEpoch:                  49,
+		StopDecreasingValidatorRatingWhenStuckEnableEpoch:        50,
+		FrontRunningProtectionEnableEpoch:                        51,
+		IsPayableBySCEnableEpoch:                                 52,
+		CleanUpInformativeSCRsEnableEpoch:                        53,
+		StorageAPICostOptimizationEnableEpoch:                    54,
+		ESDTRegisterAndSetAllRolesEnableEpoch:                    56,
+		ScheduledMiniBlocksEnableEpoch:                           57,
+		CorrectJailedNotUnstakedEmptyQueueEpoch:                  58,
+		DoNotReturnOldBlockInBlockchainHookEnableEpoch:           59,
+		AddFailedRelayedTxToInvalidMBsDisableEpoch:               60,
+		SCRSizeInvariantOnBuiltInResultEnableEpoch:               61,
+		CheckCorrectTokenIDForTransferRoleEnableEpoch:            62,
+		DisableExecByCallerEnableEpoch:                           63,
+		RefactorContextEnableEpoch:                               64,
+		FailExecutionOnEveryAPIErrorEnableEpoch:                  65,
+		ManagedCryptoAPIsEnableEpoch:                             66,
+		CheckFunctionArgumentEnableEpoch:                         67,
+		CheckExecuteOnReadOnlyEnableEpoch:                        68,
+		ESDTMetadataContinuousCleanupEnableEpoch:                 69,
+		MiniBlockPartialExecutionEnableEpoch:                     70,
+		FixAsyncCallBackArgsListEnableEpoch:                      71,
+		FixOldTokenLiquidityEnableEpoch:                          72,
+		RuntimeMemStoreLimitEnableEpoch:                          73,
+		SetSenderInEeiOutputTransferEnableEpoch:                  74,
+		RefactorPeersMiniBlocksEnableEpoch:                       75,
+		MaxBlockchainHookCountersEnableEpoch:                     76,
+		WipeSingleNFTLiquidityDecreaseEnableEpoch:                77,
+		AlwaysSaveTokenMetaDataEnableEpoch:                       78,
+		RuntimeCodeSizeFixEnableEpoch:                            79,
+		RelayedNonceFixEnableEpoch:                               80,
+		SetGuardianEnableEpoch:                                   81,
+		AutoBalanceDataTriesEnableEpoch:                          82,
+		KeepExecOrderOnCreatedSCRsEnableEpoch:                    83,
+		MultiClaimOnDelegationEnableEpoch:                        84,
+		ChangeUsernameEnableEpoch:                                85,
+		ConsistentTokensValuesLengthCheckEnableEpoch:             86,
+		FixDelegationChangeOwnerOnAccountEnableEpoch:             87,
+		SCProcessorV2EnableEpoch:                                 88,
+		DeterministicSortOnValidatorsInfoEnableEpoch:             89,
+		DynamicGasCostForDataTrieStorageLoadEnableEpoch:          90,
+		ScToScLogEventEnableEpoch:                                91,
+		NFTStopCreateEnableEpoch:                                 92,
+		FixGasRemainingForSaveKeyValueBuiltinFunctionEnableEpoch: 93,
+		ChangeOwnerAddressCrossShardThroughSCEnableEpoch:         94,
+		CurrentRandomnessOnSortingEnableEpoch:                    95,
+		StakeLimitsEnableEpoch:                                   96,
+		StakingV4Step1EnableEpoch:                                97,
+		StakingV4Step2EnableEpoch:                                98,
+		StakingV4Step3EnableEpoch:                                99,
+		AlwaysMergeContextsInEEIEnableEpoch:                      100,
+		CleanupAuctionOnLowWaitingListEnableEpoch:                101,
+		DynamicESDTEnableEpoch:                                   102,
+		EGLDInMultiTransferEnableEpoch:                           103,
+		CryptoOpcodesV2EnableEpoch:                               104,
+		FixRelayedBaseCostEnableEpoch:                            105,
+		MultiESDTNFTTransferAndExecuteByUserEnableEpoch:          106,
+		FixRelayedMoveBalanceToNonPayableSCEnableEpoch:           107,
+		UseGasBoundedShouldFailExecutionEnableEpoch:              108,
+		RelayedTransactionsV3EnableEpoch:                         109,
+		RelayedTransactionsV3FixESDTTransferEnableEpoch:          110,
+		AndromedaEnableEpoch:                                     111,
+		CheckBuiltInCallOnTransferValueAndFailEnableRound:        112,
+		MaskVMInternalDependenciesErrorsEnableEpoch:              113,
+		FixBackTransferOPCODEEnableEpoch:                         114,
+		ValidationOnGobDecodeEnableEpoch:                         115,
+		BarnardOpcodesEnableEpoch:                                116,
+		AutomaticActivationOfNodesDisableEpoch:                   117,
+		RelayedTransactionsV1V2DisableEpoch:                      118,
+		FullShardDataValidationEnableEpoch:                       119,
+		ConsumedGasInEconomicsFixEnableEpoch:                     120,
+		AttributeExtraGasUsageEnableEpoch:                        121,
+		FixCorrectSmallIntAndGasLimitsEnableEpoch:                122,
+		OutputRollbackOnDestContextEnableEpoch:                   123,
+		SupernovaEnableEpoch:                                     124,
+		FixEpochChangeProposedCurrentEpochEnableEpoch:            125,
+	}
+}
+
+func TestNewEnableEpochsHandler(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil epoch notifier should error", func(t *testing.T) {
+		t.Parallel()
+
+		handler, err := NewEnableEpochsHandler(createEnableEpochsConfig(), nil)
+		assert.Equal(t, process.ErrNilEpochNotifier, err)
+		assert.True(t, check.IfNil(handler))
+	})
+	t.Run("should work", func(t *testing.T) {
+		t.Parallel()
+
+		wasCalled := false
+		handler, err := NewEnableEpochsHandler(createEnableEpochsConfig(), &epochNotifier.EpochNotifierStub{
+			RegisterNotifyHandlerCalled: func(handler vmcommon.EpochSubscriberHandler) {
+				wasCalled = true
+			},
+		})
+		assert.Nil(t, err)
+		assert.False(t, check.IfNil(handler))
+		assert.True(t, wasCalled)
+	})
+}
+
+func TestNewEnableEpochsHandler_GetCurrentEpoch(t *testing.T) {
+	t.Parallel()
+
+	cfg := createEnableEpochsConfig()
+	handler, _ := NewEnableEpochsHandler(cfg, &epochNotifier.EpochNotifierStub{})
+	require.NotNil(t, handler)
+
+	currentEpoch := uint32(1234)
+	handler.EpochConfirmed(currentEpoch, 0)
+
+	require.Equal(t, currentEpoch, handler.GetCurrentEpoch())
+}
+
+func TestEnableEpochsHandler_IsFlagDefined(t *testing.T) {
+	t.Parallel()
+
+	cfg := createEnableEpochsConfig()
+	handler, _ := NewEnableEpochsHandler(cfg, &epochNotifier.EpochNotifierStub{})
+	require.NotNil(t, handler)
+
+	require.True(t, handler.IsFlagDefined(common.SCDeployFlag))
+	require.False(t, handler.IsFlagDefined("new flag"))
+}
+
+func TestEnableEpochsHandler_IsFlagEnabledInEpoch(t *testing.T) {
+	t.Parallel()
+
+	cfg := createEnableEpochsConfig()
+	handler, _ := NewEnableEpochsHandler(cfg, &epochNotifier.EpochNotifierStub{})
+	require.NotNil(t, handler)
+
+	require.True(t, handler.IsFlagEnabledInEpoch(common.BuiltInFunctionsFlag, cfg.BuiltInFunctionsEnableEpoch))
+	require.True(t, handler.IsFlagEnabledInEpoch(common.BuiltInFunctionsFlag, cfg.BuiltInFunctionsEnableEpoch+1))
+	require.False(t, handler.IsFlagEnabledInEpoch(common.BuiltInFunctionsFlag, cfg.BuiltInFunctionsEnableEpoch-1))
+	require.False(t, handler.IsFlagEnabledInEpoch("new flag", 0))
+}
+
+func TestEnableEpochsHandler_FixEpochChangeProposedCurrentEpochFlag(t *testing.T) {
+	t.Parallel()
+
+	cfg := createEnableEpochsConfig()
+	handler, err := NewEnableEpochsHandler(cfg, &epochNotifier.EpochNotifierStub{})
+	require.NoError(t, err)
+
+	require.False(t, handler.IsFlagEnabledInEpoch(common.FixEpochChangeProposedCurrentEpochFlag, cfg.FixEpochChangeProposedCurrentEpochEnableEpoch-1))
+	require.True(t, handler.IsFlagEnabledInEpoch(common.FixEpochChangeProposedCurrentEpochFlag, cfg.FixEpochChangeProposedCurrentEpochEnableEpoch))
+	require.True(t, handler.IsFlagEnabledInEpoch(common.FixEpochChangeProposedCurrentEpochFlag, cfg.FixEpochChangeProposedCurrentEpochEnableEpoch+1))
+}
+
+func TestEnableEpochsHandler_FixDataTrieLeafValidation(t *testing.T) {
+	cfg := createEnableEpochsConfig()
+	cfg.FixDataTrieLeafValidationEnableEpoch = 200
+	handler, err := NewEnableEpochsHandler(cfg, &epochNotifier.EpochNotifierStub{})
+	require.NoError(t, err)
+	require.True(t, handler.IsFlagDefined(common.FixDataTrieLeafValidationFlag))
+	require.False(t, handler.IsFlagEnabledInEpoch(common.FixDataTrieLeafValidationFlag, 199))
+	require.True(t, handler.IsFlagEnabledInEpoch(common.FixDataTrieLeafValidationFlag, 200))
+	require.True(t, handler.IsFlagEnabledInEpoch(common.FixDataTrieLeafValidationFlag, 201))
+	require.Equal(t, uint32(200), handler.GetActivationEpoch(common.FixDataTrieLeafValidationFlag))
+}
+
+func TestEnableEpochsHandler_IsFlagEnabled(t *testing.T) {
+	t.Parallel()
+
+	cfg := createEnableEpochsConfig()
+	handler, _ := NewEnableEpochsHandler(cfg, &epochNotifier.EpochNotifierStub{})
+	require.NotNil(t, handler)
+
+	require.False(t, handler.IsFlagEnabled(common.SetGuardianFlag))
+	handler.EpochConfirmed(cfg.SetGuardianEnableEpoch, 0)
+	require.True(t, handler.IsFlagEnabled(common.SetGuardianFlag))
+	handler.EpochConfirmed(cfg.SetGuardianEnableEpoch+1, 0)
+	require.True(t, handler.IsFlagEnabled(common.SetGuardianFlag))
+
+	handler.EpochConfirmed(cfg.StakingV4Step1EnableEpoch-1, 0)
+	require.False(t, handler.IsFlagEnabled(common.StakingV4StartedFlag))
+	handler.EpochConfirmed(cfg.StakingV4Step1EnableEpoch, 0)
+	require.True(t, handler.IsFlagEnabled(common.StakingV4StartedFlag))
+	handler.EpochConfirmed(cfg.StakingV4Step1EnableEpoch+1, 0)
+	require.True(t, handler.IsFlagEnabled(common.StakingV4StartedFlag))
+
+	handler.EpochConfirmed(math.MaxUint32, 0)
+	require.True(t, handler.IsFlagEnabled(common.SCDeployFlag))
+	require.True(t, handler.IsFlagEnabled(common.BuiltInFunctionsFlag))
+	require.True(t, handler.IsFlagEnabled(common.RelayedTransactionsFlag))
+	require.True(t, handler.IsFlagEnabled(common.PenalizedTooMuchGasFlag))
+	require.True(t, handler.IsFlagEnabled(common.SwitchJailWaitingFlag))
+	require.True(t, handler.IsFlagEnabled(common.BelowSignedThresholdFlag))
+	require.False(t, handler.IsFlagEnabled(common.SwitchHysteresisForMinNodesFlagInSpecificEpochOnly)) // ==
+	require.True(t, handler.IsFlagEnabled(common.TransactionSignedWithTxHashFlag))
+	require.True(t, handler.IsFlagEnabled(common.MetaProtectionFlag))
+	require.True(t, handler.IsFlagEnabled(common.AheadOfTimeGasUsageFlag))
+	require.True(t, handler.IsFlagEnabled(common.GasPriceModifierFlag))
+	require.True(t, handler.IsFlagEnabled(common.RepairCallbackFlag))
+	require.True(t, handler.IsFlagEnabled(common.ReturnDataToLastTransferFlagAfterEpoch))
+	require.True(t, handler.IsFlagEnabled(common.SenderInOutTransferFlag))
+	require.True(t, handler.IsFlagEnabled(common.StakeFlag))
+	require.True(t, handler.IsFlagEnabled(common.StakingV2Flag))
+	require.False(t, handler.IsFlagEnabled(common.StakingV2OwnerFlagInSpecificEpochOnly)) // ==
+	require.True(t, handler.IsFlagEnabled(common.StakingV2FlagAfterEpoch))
+	require.True(t, handler.IsFlagEnabled(common.DoubleKeyProtectionFlag))
+	require.True(t, handler.IsFlagEnabled(common.ESDTFlag))
+	require.False(t, handler.IsFlagEnabled(common.ESDTFlagInSpecificEpochOnly)) // ==
+	require.True(t, handler.IsFlagEnabled(common.GovernanceFlag))
+	require.False(t, handler.IsFlagEnabled(common.GovernanceFlagInSpecificEpochOnly)) // ==
+	require.True(t, handler.IsFlagEnabled(common.GovernanceDisableProposeFlag))       // ==
+	require.True(t, handler.IsFlagEnabled(common.GovernanceFixesFlag))                // ==
+	require.True(t, handler.IsFlagEnabled(common.DelegationManagerFlag))
+	require.True(t, handler.IsFlagEnabled(common.DelegationSmartContractFlag))
+	require.False(t, handler.IsFlagEnabled(common.DelegationSmartContractFlagInSpecificEpochOnly)) // ==
+	require.False(t, handler.IsFlagEnabled(common.CorrectLastUnJailedFlagInSpecificEpochOnly))     // ==
+	require.True(t, handler.IsFlagEnabled(common.CorrectLastUnJailedFlag))
+	require.True(t, handler.IsFlagEnabled(common.RelayedTransactionsV2Flag))
+	require.True(t, handler.IsFlagEnabled(common.UnBondTokensV2Flag))
+	require.True(t, handler.IsFlagEnabled(common.SaveJailedAlwaysFlag))
+	require.True(t, handler.IsFlagEnabled(common.ReDelegateBelowMinCheckFlag))
+	require.True(t, handler.IsFlagEnabled(common.ValidatorToDelegationFlag))
+	require.True(t, handler.IsFlagEnabled(common.IncrementSCRNonceInMultiTransferFlag))
+	require.True(t, handler.IsFlagEnabled(common.ESDTMultiTransferFlag))
+	require.False(t, handler.IsFlagEnabled(common.GlobalMintBurnFlag)) // <
+	require.True(t, handler.IsFlagEnabled(common.ESDTTransferRoleFlag))
+	require.True(t, handler.IsFlagEnabled(common.ComputeRewardCheckpointFlag))
+	require.True(t, handler.IsFlagEnabled(common.SCRSizeInvariantCheckFlag))
+	require.False(t, handler.IsFlagEnabled(common.BackwardCompSaveKeyValueFlag)) // <
+	require.True(t, handler.IsFlagEnabled(common.ESDTNFTCreateOnMultiShardFlag))
+	require.True(t, handler.IsFlagEnabled(common.MetaESDTSetFlag))
+	require.True(t, handler.IsFlagEnabled(common.AddTokensToDelegationFlag))
+	require.True(t, handler.IsFlagEnabled(common.MultiESDTTransferFixOnCallBackFlag))
+	require.True(t, handler.IsFlagEnabled(common.OptimizeGasUsedInCrossMiniBlocksFlag))
+	require.True(t, handler.IsFlagEnabled(common.CorrectFirstQueuedFlag))
+	require.True(t, handler.IsFlagEnabled(common.DeleteDelegatorAfterClaimRewardsFlag))
+	require.True(t, handler.IsFlagEnabled(common.RemoveNonUpdatedStorageFlag))
+	require.True(t, handler.IsFlagEnabled(common.OptimizeNFTStoreFlag))
+	require.True(t, handler.IsFlagEnabled(common.CreateNFTThroughExecByCallerFlag))
+	require.True(t, handler.IsFlagEnabled(common.StopDecreasingValidatorRatingWhenStuckFlag))
+	require.True(t, handler.IsFlagEnabled(common.FrontRunningProtectionFlag))
+	require.True(t, handler.IsFlagEnabled(common.PayableBySCFlag))
+	require.True(t, handler.IsFlagEnabled(common.CleanUpInformativeSCRsFlag))
+	require.True(t, handler.IsFlagEnabled(common.StorageAPICostOptimizationFlag))
+	require.True(t, handler.IsFlagEnabled(common.ESDTRegisterAndSetAllRolesFlag))
+	require.True(t, handler.IsFlagEnabled(common.ScheduledMiniBlocksFlag))
+	require.True(t, handler.IsFlagEnabled(common.CorrectJailedNotUnStakedEmptyQueueFlag))
+	require.True(t, handler.IsFlagEnabled(common.DoNotReturnOldBlockInBlockchainHookFlag))
+	require.False(t, handler.IsFlagEnabled(common.AddFailedRelayedTxToInvalidMBsFlag)) // <
+	require.True(t, handler.IsFlagEnabled(common.SCRSizeInvariantOnBuiltInResultFlag))
+	require.True(t, handler.IsFlagEnabled(common.CheckCorrectTokenIDForTransferRoleFlag))
+	require.True(t, handler.IsFlagEnabled(common.FailExecutionOnEveryAPIErrorFlag))
+	require.True(t, handler.IsFlagEnabled(common.MiniBlockPartialExecutionFlag))
+	require.True(t, handler.IsFlagEnabled(common.ManagedCryptoAPIsFlag))
+	require.True(t, handler.IsFlagEnabled(common.ESDTMetadataContinuousCleanupFlag))
+	require.True(t, handler.IsFlagEnabled(common.DisableExecByCallerFlag))
+	require.True(t, handler.IsFlagEnabled(common.RefactorContextFlag))
+	require.True(t, handler.IsFlagEnabled(common.CheckFunctionArgumentFlag))
+	require.True(t, handler.IsFlagEnabled(common.CheckExecuteOnReadOnlyFlag))
+	require.True(t, handler.IsFlagEnabled(common.SetSenderInEeiOutputTransferFlag))
+	require.True(t, handler.IsFlagEnabled(common.FixAsyncCallbackCheckFlag))
+	require.True(t, handler.IsFlagEnabled(common.SaveToSystemAccountFlag))
+	require.True(t, handler.IsFlagEnabled(common.CheckFrozenCollectionFlag))
+	require.True(t, handler.IsFlagEnabled(common.SendAlwaysFlag))
+	require.True(t, handler.IsFlagEnabled(common.ValueLengthCheckFlag))
+	require.True(t, handler.IsFlagEnabled(common.CheckTransferFlag))
+	require.True(t, handler.IsFlagEnabled(common.ESDTNFTImprovementV1Flag))
+	require.True(t, handler.IsFlagEnabled(common.ChangeDelegationOwnerFlag))
+	require.True(t, handler.IsFlagEnabled(common.RefactorPeersMiniBlocksFlag))
+	require.True(t, handler.IsFlagEnabled(common.SCProcessorV2Flag))
+	require.True(t, handler.IsFlagEnabled(common.FixAsyncCallBackArgsListFlag))
+	require.True(t, handler.IsFlagEnabled(common.FixOldTokenLiquidityFlag))
+	require.True(t, handler.IsFlagEnabled(common.RuntimeMemStoreLimitFlag))
+	require.True(t, handler.IsFlagEnabled(common.RuntimeCodeSizeFixFlag))
+	require.True(t, handler.IsFlagEnabled(common.MaxBlockchainHookCountersFlag))
+	require.True(t, handler.IsFlagEnabled(common.WipeSingleNFTLiquidityDecreaseFlag))
+	require.True(t, handler.IsFlagEnabled(common.AlwaysSaveTokenMetaDataFlag))
+	require.True(t, handler.IsFlagEnabled(common.SetGuardianFlag))
+	require.True(t, handler.IsFlagEnabled(common.RelayedNonceFixFlag))
+	require.True(t, handler.IsFlagEnabled(common.ConsistentTokensValuesLengthCheckFlag))
+	require.True(t, handler.IsFlagEnabled(common.KeepExecOrderOnCreatedSCRsFlag))
+	require.True(t, handler.IsFlagEnabled(common.MultiClaimOnDelegationFlag))
+	require.True(t, handler.IsFlagEnabled(common.ChangeUsernameFlag))
+	require.True(t, handler.IsFlagEnabled(common.AutoBalanceDataTriesFlag))
+	require.True(t, handler.IsFlagEnabled(common.MigrateDataTrieFlag))
+	require.True(t, handler.IsFlagEnabled(common.FixDelegationChangeOwnerOnAccountFlag))
+	require.True(t, handler.IsFlagEnabled(common.FixOOGReturnCodeFlag))
+	require.True(t, handler.IsFlagEnabled(common.DeterministicSortOnValidatorsInfoFixFlag))
+	require.True(t, handler.IsFlagEnabled(common.DynamicGasCostForDataTrieStorageLoadFlag))
+	require.True(t, handler.IsFlagEnabled(common.ScToScLogEventFlag))
+	require.True(t, handler.IsFlagEnabled(common.BlockGasAndFeesReCheckFlag))
+	require.True(t, handler.IsFlagEnabled(common.BalanceWaitingListsFlag))
+	require.True(t, handler.IsFlagEnabled(common.NFTStopCreateFlag))
+	require.True(t, handler.IsFlagEnabled(common.FixGasRemainingForSaveKeyValueFlag))
+	require.True(t, handler.IsFlagEnabled(common.IsChangeOwnerAddressCrossShardThroughSCFlag))
+	require.True(t, handler.IsFlagEnabled(common.CurrentRandomnessOnSortingFlag))
+	require.True(t, handler.IsFlagEnabled(common.StakeLimitsFlag))
+	require.False(t, handler.IsFlagEnabled(common.StakingV4Step1Flag))
+	require.True(t, handler.IsFlagEnabled(common.StakingV4Step2Flag))
+	require.True(t, handler.IsFlagEnabled(common.StakingV4Step3Flag))
+	require.True(t, handler.IsFlagEnabled(common.StakingV4StartedFlag))
+	require.True(t, handler.IsFlagEnabled(common.AlwaysMergeContextsInEEIFlag))
+	require.True(t, handler.IsFlagEnabled(common.DynamicESDTFlag))
+	require.True(t, handler.IsFlagEnabled(common.FixRelayedBaseCostFlag))
+	require.True(t, handler.IsFlagEnabled(common.FixRelayedMoveBalanceToNonPayableSCFlag))
+	require.True(t, handler.IsFlagEnabled(common.AndromedaFlag))
+	require.True(t, handler.IsFlagEnabled(common.DynamicESDTFlag))
+	require.True(t, handler.IsFlagEnabled(common.RelayedTransactionsV1V2DisableFlag))
+	require.True(t, handler.IsFlagEnabled(common.FullShardDataValidationFlag))
+	require.True(t, handler.IsFlagEnabled(common.SupernovaFlag))
+}
+
+func TestEnableEpochsHandler_GetActivationEpoch(t *testing.T) {
+	t.Parallel()
+
+	cfg := createEnableEpochsConfig()
+	handler, _ := NewEnableEpochsHandler(cfg, &epochNotifier.EpochNotifierStub{})
+	require.NotNil(t, handler)
+
+	require.Equal(t, uint32(0), handler.GetActivationEpoch("dummy flag"))
+	require.Equal(t, cfg.SCDeployEnableEpoch, handler.GetActivationEpoch(common.SCDeployFlag))
+	require.Equal(t, cfg.BuiltInFunctionsEnableEpoch, handler.GetActivationEpoch(common.BuiltInFunctionsFlag))
+	require.Equal(t, cfg.RelayedTransactionsEnableEpoch, handler.GetActivationEpoch(common.RelayedTransactionsFlag))
+	require.Equal(t, cfg.PenalizedTooMuchGasEnableEpoch, handler.GetActivationEpoch(common.PenalizedTooMuchGasFlag))
+	require.Equal(t, cfg.SwitchJailWaitingEnableEpoch, handler.GetActivationEpoch(common.SwitchJailWaitingFlag))
+	require.Equal(t, cfg.BelowSignedThresholdEnableEpoch, handler.GetActivationEpoch(common.BelowSignedThresholdFlag))
+	require.Equal(t, cfg.TransactionSignedWithTxHashEnableEpoch, handler.GetActivationEpoch(common.TransactionSignedWithTxHashFlag))
+	require.Equal(t, cfg.MetaProtectionEnableEpoch, handler.GetActivationEpoch(common.MetaProtectionFlag))
+	require.Equal(t, cfg.AheadOfTimeGasUsageEnableEpoch, handler.GetActivationEpoch(common.AheadOfTimeGasUsageFlag))
+	require.Equal(t, cfg.GasPriceModifierEnableEpoch, handler.GetActivationEpoch(common.GasPriceModifierFlag))
+	require.Equal(t, cfg.RepairCallbackEnableEpoch, handler.GetActivationEpoch(common.RepairCallbackFlag))
+	require.Equal(t, cfg.SenderInOutTransferEnableEpoch, handler.GetActivationEpoch(common.SenderInOutTransferFlag))
+	require.Equal(t, cfg.StakeEnableEpoch, handler.GetActivationEpoch(common.StakeFlag))
+	require.Equal(t, cfg.StakingV2EnableEpoch, handler.GetActivationEpoch(common.StakingV2Flag))
+	require.Equal(t, cfg.DoubleKeyProtectionEnableEpoch, handler.GetActivationEpoch(common.DoubleKeyProtectionFlag))
+	require.Equal(t, cfg.ESDTEnableEpoch, handler.GetActivationEpoch(common.ESDTFlag))
+	require.Equal(t, cfg.GovernanceEnableEpoch, handler.GetActivationEpoch(common.GovernanceFlag))
+	require.Equal(t, cfg.GovernanceDisableProposeEnableEpoch, handler.GetActivationEpoch(common.GovernanceDisableProposeFlag))
+	require.Equal(t, cfg.GovernanceFixesEnableEpoch, handler.GetActivationEpoch(common.GovernanceFixesFlag))
+	require.Equal(t, cfg.DelegationManagerEnableEpoch, handler.GetActivationEpoch(common.DelegationManagerFlag))
+	require.Equal(t, cfg.DelegationSmartContractEnableEpoch, handler.GetActivationEpoch(common.DelegationSmartContractFlag))
+	require.Equal(t, cfg.CorrectLastUnjailedEnableEpoch, handler.GetActivationEpoch(common.CorrectLastUnJailedFlag))
+	require.Equal(t, cfg.RelayedTransactionsV2EnableEpoch, handler.GetActivationEpoch(common.RelayedTransactionsV2Flag))
+	require.Equal(t, cfg.UnbondTokensV2EnableEpoch, handler.GetActivationEpoch(common.UnBondTokensV2Flag))
+	require.Equal(t, cfg.SaveJailedAlwaysEnableEpoch, handler.GetActivationEpoch(common.SaveJailedAlwaysFlag))
+	require.Equal(t, cfg.ReDelegateBelowMinCheckEnableEpoch, handler.GetActivationEpoch(common.ReDelegateBelowMinCheckFlag))
+	require.Equal(t, cfg.ValidatorToDelegationEnableEpoch, handler.GetActivationEpoch(common.ValidatorToDelegationFlag))
+	require.Equal(t, cfg.IncrementSCRNonceInMultiTransferEnableEpoch, handler.GetActivationEpoch(common.IncrementSCRNonceInMultiTransferFlag))
+	require.Equal(t, cfg.ESDTMultiTransferEnableEpoch, handler.GetActivationEpoch(common.ESDTMultiTransferFlag))
+	require.Equal(t, cfg.GlobalMintBurnDisableEpoch, handler.GetActivationEpoch(common.GlobalMintBurnFlag))
+	require.Equal(t, cfg.ESDTTransferRoleEnableEpoch, handler.GetActivationEpoch(common.ESDTTransferRoleFlag))
+	require.Equal(t, cfg.ComputeRewardCheckpointEnableEpoch, handler.GetActivationEpoch(common.ComputeRewardCheckpointFlag))
+	require.Equal(t, cfg.SCRSizeInvariantCheckEnableEpoch, handler.GetActivationEpoch(common.SCRSizeInvariantCheckFlag))
+	require.Equal(t, cfg.BackwardCompSaveKeyValueEnableEpoch, handler.GetActivationEpoch(common.BackwardCompSaveKeyValueFlag))
+	require.Equal(t, cfg.ESDTNFTCreateOnMultiShardEnableEpoch, handler.GetActivationEpoch(common.ESDTNFTCreateOnMultiShardFlag))
+	require.Equal(t, cfg.MetaESDTSetEnableEpoch, handler.GetActivationEpoch(common.MetaESDTSetFlag))
+	require.Equal(t, cfg.AddTokensToDelegationEnableEpoch, handler.GetActivationEpoch(common.AddTokensToDelegationFlag))
+	require.Equal(t, cfg.MultiESDTTransferFixOnCallBackOnEnableEpoch, handler.GetActivationEpoch(common.MultiESDTTransferFixOnCallBackFlag))
+	require.Equal(t, cfg.OptimizeGasUsedInCrossMiniBlocksEnableEpoch, handler.GetActivationEpoch(common.OptimizeGasUsedInCrossMiniBlocksFlag))
+	require.Equal(t, cfg.CorrectFirstQueuedEpoch, handler.GetActivationEpoch(common.CorrectFirstQueuedFlag))
+	require.Equal(t, cfg.DeleteDelegatorAfterClaimRewardsEnableEpoch, handler.GetActivationEpoch(common.DeleteDelegatorAfterClaimRewardsFlag))
+	require.Equal(t, cfg.RemoveNonUpdatedStorageEnableEpoch, handler.GetActivationEpoch(common.RemoveNonUpdatedStorageFlag))
+	require.Equal(t, cfg.OptimizeNFTStoreEnableEpoch, handler.GetActivationEpoch(common.OptimizeNFTStoreFlag))
+	require.Equal(t, cfg.CreateNFTThroughExecByCallerEnableEpoch, handler.GetActivationEpoch(common.CreateNFTThroughExecByCallerFlag))
+	require.Equal(t, cfg.StopDecreasingValidatorRatingWhenStuckEnableEpoch, handler.GetActivationEpoch(common.StopDecreasingValidatorRatingWhenStuckFlag))
+	require.Equal(t, cfg.FrontRunningProtectionEnableEpoch, handler.GetActivationEpoch(common.FrontRunningProtectionFlag))
+	require.Equal(t, cfg.IsPayableBySCEnableEpoch, handler.GetActivationEpoch(common.PayableBySCFlag))
+	require.Equal(t, cfg.CleanUpInformativeSCRsEnableEpoch, handler.GetActivationEpoch(common.CleanUpInformativeSCRsFlag))
+	require.Equal(t, cfg.StorageAPICostOptimizationEnableEpoch, handler.GetActivationEpoch(common.StorageAPICostOptimizationFlag))
+	require.Equal(t, cfg.ESDTRegisterAndSetAllRolesEnableEpoch, handler.GetActivationEpoch(common.ESDTRegisterAndSetAllRolesFlag))
+	require.Equal(t, cfg.ScheduledMiniBlocksEnableEpoch, handler.GetActivationEpoch(common.ScheduledMiniBlocksFlag))
+	require.Equal(t, cfg.CorrectJailedNotUnstakedEmptyQueueEpoch, handler.GetActivationEpoch(common.CorrectJailedNotUnStakedEmptyQueueFlag))
+	require.Equal(t, cfg.DoNotReturnOldBlockInBlockchainHookEnableEpoch, handler.GetActivationEpoch(common.DoNotReturnOldBlockInBlockchainHookFlag))
+	require.Equal(t, cfg.AddFailedRelayedTxToInvalidMBsDisableEpoch, handler.GetActivationEpoch(common.AddFailedRelayedTxToInvalidMBsFlag))
+	require.Equal(t, cfg.SCRSizeInvariantOnBuiltInResultEnableEpoch, handler.GetActivationEpoch(common.SCRSizeInvariantOnBuiltInResultFlag))
+	require.Equal(t, cfg.CheckCorrectTokenIDForTransferRoleEnableEpoch, handler.GetActivationEpoch(common.CheckCorrectTokenIDForTransferRoleFlag))
+	require.Equal(t, cfg.FailExecutionOnEveryAPIErrorEnableEpoch, handler.GetActivationEpoch(common.FailExecutionOnEveryAPIErrorFlag))
+	require.Equal(t, cfg.MiniBlockPartialExecutionEnableEpoch, handler.GetActivationEpoch(common.MiniBlockPartialExecutionFlag))
+	require.Equal(t, cfg.ManagedCryptoAPIsEnableEpoch, handler.GetActivationEpoch(common.ManagedCryptoAPIsFlag))
+	require.Equal(t, cfg.ESDTMetadataContinuousCleanupEnableEpoch, handler.GetActivationEpoch(common.ESDTMetadataContinuousCleanupFlag))
+	require.Equal(t, cfg.DisableExecByCallerEnableEpoch, handler.GetActivationEpoch(common.DisableExecByCallerFlag))
+	require.Equal(t, cfg.RefactorContextEnableEpoch, handler.GetActivationEpoch(common.RefactorContextFlag))
+	require.Equal(t, cfg.CheckFunctionArgumentEnableEpoch, handler.GetActivationEpoch(common.CheckFunctionArgumentFlag))
+	require.Equal(t, cfg.CheckExecuteOnReadOnlyEnableEpoch, handler.GetActivationEpoch(common.CheckExecuteOnReadOnlyFlag))
+	require.Equal(t, cfg.SetSenderInEeiOutputTransferEnableEpoch, handler.GetActivationEpoch(common.SetSenderInEeiOutputTransferFlag))
+	require.Equal(t, cfg.ESDTMetadataContinuousCleanupEnableEpoch, handler.GetActivationEpoch(common.FixAsyncCallbackCheckFlag))
+	require.Equal(t, cfg.OptimizeNFTStoreEnableEpoch, handler.GetActivationEpoch(common.SaveToSystemAccountFlag))
+	require.Equal(t, cfg.OptimizeNFTStoreEnableEpoch, handler.GetActivationEpoch(common.CheckFrozenCollectionFlag))
+	require.Equal(t, cfg.ESDTMetadataContinuousCleanupEnableEpoch, handler.GetActivationEpoch(common.SendAlwaysFlag))
+	require.Equal(t, cfg.OptimizeNFTStoreEnableEpoch, handler.GetActivationEpoch(common.ValueLengthCheckFlag))
+	require.Equal(t, cfg.OptimizeNFTStoreEnableEpoch, handler.GetActivationEpoch(common.CheckTransferFlag))
+	require.Equal(t, cfg.ESDTMultiTransferEnableEpoch, handler.GetActivationEpoch(common.ESDTNFTImprovementV1Flag))
+	require.Equal(t, cfg.ESDTMetadataContinuousCleanupEnableEpoch, handler.GetActivationEpoch(common.ChangeDelegationOwnerFlag))
+	require.Equal(t, cfg.RefactorPeersMiniBlocksEnableEpoch, handler.GetActivationEpoch(common.RefactorPeersMiniBlocksFlag))
+	require.Equal(t, cfg.SCProcessorV2EnableEpoch, handler.GetActivationEpoch(common.SCProcessorV2Flag))
+	require.Equal(t, cfg.FixAsyncCallBackArgsListEnableEpoch, handler.GetActivationEpoch(common.FixAsyncCallBackArgsListFlag))
+	require.Equal(t, cfg.FixOldTokenLiquidityEnableEpoch, handler.GetActivationEpoch(common.FixOldTokenLiquidityFlag))
+	require.Equal(t, cfg.RuntimeMemStoreLimitEnableEpoch, handler.GetActivationEpoch(common.RuntimeMemStoreLimitFlag))
+	require.Equal(t, cfg.RuntimeCodeSizeFixEnableEpoch, handler.GetActivationEpoch(common.RuntimeCodeSizeFixFlag))
+	require.Equal(t, cfg.MaxBlockchainHookCountersEnableEpoch, handler.GetActivationEpoch(common.MaxBlockchainHookCountersFlag))
+	require.Equal(t, cfg.WipeSingleNFTLiquidityDecreaseEnableEpoch, handler.GetActivationEpoch(common.WipeSingleNFTLiquidityDecreaseFlag))
+	require.Equal(t, cfg.AlwaysSaveTokenMetaDataEnableEpoch, handler.GetActivationEpoch(common.AlwaysSaveTokenMetaDataFlag))
+	require.Equal(t, cfg.SetGuardianEnableEpoch, handler.GetActivationEpoch(common.SetGuardianFlag))
+	require.Equal(t, cfg.RelayedNonceFixEnableEpoch, handler.GetActivationEpoch(common.RelayedNonceFixFlag))
+	require.Equal(t, cfg.ConsistentTokensValuesLengthCheckEnableEpoch, handler.GetActivationEpoch(common.ConsistentTokensValuesLengthCheckFlag))
+	require.Equal(t, cfg.KeepExecOrderOnCreatedSCRsEnableEpoch, handler.GetActivationEpoch(common.KeepExecOrderOnCreatedSCRsFlag))
+	require.Equal(t, cfg.MultiClaimOnDelegationEnableEpoch, handler.GetActivationEpoch(common.MultiClaimOnDelegationFlag))
+	require.Equal(t, cfg.ChangeUsernameEnableEpoch, handler.GetActivationEpoch(common.ChangeUsernameFlag))
+	require.Equal(t, cfg.AutoBalanceDataTriesEnableEpoch, handler.GetActivationEpoch(common.AutoBalanceDataTriesFlag))
+	require.Equal(t, cfg.MigrateDataTrieEnableEpoch, handler.GetActivationEpoch(common.MigrateDataTrieFlag))
+	require.Equal(t, cfg.FixDelegationChangeOwnerOnAccountEnableEpoch, handler.GetActivationEpoch(common.FixDelegationChangeOwnerOnAccountFlag))
+	require.Equal(t, cfg.FixOOGReturnCodeEnableEpoch, handler.GetActivationEpoch(common.FixOOGReturnCodeFlag))
+	require.Equal(t, cfg.DeterministicSortOnValidatorsInfoEnableEpoch, handler.GetActivationEpoch(common.DeterministicSortOnValidatorsInfoFixFlag))
+	require.Equal(t, cfg.DynamicGasCostForDataTrieStorageLoadEnableEpoch, handler.GetActivationEpoch(common.DynamicGasCostForDataTrieStorageLoadFlag))
+	require.Equal(t, cfg.ScToScLogEventEnableEpoch, handler.GetActivationEpoch(common.ScToScLogEventFlag))
+	require.Equal(t, cfg.BlockGasAndFeesReCheckEnableEpoch, handler.GetActivationEpoch(common.BlockGasAndFeesReCheckFlag))
+	require.Equal(t, cfg.BalanceWaitingListsEnableEpoch, handler.GetActivationEpoch(common.BalanceWaitingListsFlag))
+	require.Equal(t, cfg.NFTStopCreateEnableEpoch, handler.GetActivationEpoch(common.NFTStopCreateFlag))
+	require.Equal(t, cfg.ChangeOwnerAddressCrossShardThroughSCEnableEpoch, handler.GetActivationEpoch(common.IsChangeOwnerAddressCrossShardThroughSCFlag))
+	require.Equal(t, cfg.FixGasRemainingForSaveKeyValueBuiltinFunctionEnableEpoch, handler.GetActivationEpoch(common.FixGasRemainingForSaveKeyValueFlag))
+	require.Equal(t, cfg.CurrentRandomnessOnSortingEnableEpoch, handler.GetActivationEpoch(common.CurrentRandomnessOnSortingFlag))
+	require.Equal(t, cfg.StakeLimitsEnableEpoch, handler.GetActivationEpoch(common.StakeLimitsFlag))
+	require.Equal(t, cfg.StakingV4Step1EnableEpoch, handler.GetActivationEpoch(common.StakingV4Step1Flag))
+	require.Equal(t, cfg.StakingV4Step2EnableEpoch, handler.GetActivationEpoch(common.StakingV4Step2Flag))
+	require.Equal(t, cfg.StakingV4Step3EnableEpoch, handler.GetActivationEpoch(common.StakingV4Step3Flag))
+	require.Equal(t, cfg.CleanupAuctionOnLowWaitingListEnableEpoch, handler.GetActivationEpoch(common.CleanupAuctionOnLowWaitingListFlag))
+	require.Equal(t, cfg.StakingV4Step1EnableEpoch, handler.GetActivationEpoch(common.StakingV4StartedFlag))
+	require.Equal(t, cfg.AlwaysMergeContextsInEEIEnableEpoch, handler.GetActivationEpoch(common.AlwaysMergeContextsInEEIFlag))
+	require.Equal(t, cfg.UseGasBoundedShouldFailExecutionEnableEpoch, handler.GetActivationEpoch(common.UseGasBoundedShouldFailExecutionFlag))
+	require.Equal(t, cfg.DynamicESDTEnableEpoch, handler.GetActivationEpoch(common.DynamicESDTFlag))
+	require.Equal(t, cfg.EGLDInMultiTransferEnableEpoch, handler.GetActivationEpoch(common.EGLDInESDTMultiTransferFlag))
+	require.Equal(t, cfg.CryptoOpcodesV2EnableEpoch, handler.GetActivationEpoch(common.CryptoOpcodesV2Flag))
+	require.Equal(t, cfg.FixRelayedBaseCostEnableEpoch, handler.GetActivationEpoch(common.FixRelayedBaseCostFlag))
+	require.Equal(t, cfg.MultiESDTNFTTransferAndExecuteByUserEnableEpoch, handler.GetActivationEpoch(common.MultiESDTNFTTransferAndExecuteByUserFlag))
+	require.Equal(t, cfg.FixRelayedMoveBalanceToNonPayableSCEnableEpoch, handler.GetActivationEpoch(common.FixRelayedMoveBalanceToNonPayableSCFlag))
+	require.Equal(t, cfg.RelayedTransactionsV3EnableEpoch, handler.GetActivationEpoch(common.RelayedTransactionsV3Flag))
+	require.Equal(t, cfg.RelayedTransactionsV3FixESDTTransferEnableEpoch, handler.GetActivationEpoch(common.RelayedTransactionsV3FixESDTTransferFlag))
+	require.Equal(t, cfg.AndromedaEnableEpoch, handler.GetActivationEpoch(common.AndromedaFlag))
+	require.Equal(t, cfg.CheckBuiltInCallOnTransferValueAndFailEnableRound, handler.GetActivationEpoch(common.CheckBuiltInCallOnTransferValueAndFailExecutionFlag))
+	require.Equal(t, cfg.MaskVMInternalDependenciesErrorsEnableEpoch, handler.GetActivationEpoch(common.MaskInternalDependenciesErrorsFlag))
+	require.Equal(t, cfg.FixBackTransferOPCODEEnableEpoch, handler.GetActivationEpoch(common.FixBackTransferOPCODEFlag))
+	require.Equal(t, cfg.ValidationOnGobDecodeEnableEpoch, handler.GetActivationEpoch(common.ValidationOnGobDecodeFlag))
+	require.Equal(t, cfg.BarnardOpcodesEnableEpoch, handler.GetActivationEpoch(common.BarnardOpcodesFlag))
+	require.Equal(t, cfg.AutomaticActivationOfNodesDisableEpoch, handler.GetActivationEpoch(common.AutomaticActivationOfNodesDisableFlag))
+	require.Equal(t, cfg.FixGetBalanceEnableEpoch, handler.GetActivationEpoch(common.FixGetBalanceFlag))
+	require.Equal(t, cfg.RelayedTransactionsV1V2DisableEpoch, handler.GetActivationEpoch(common.RelayedTransactionsV1V2DisableFlag))
+	require.Equal(t, cfg.FullShardDataValidationEnableEpoch, handler.GetActivationEpoch(common.FullShardDataValidationFlag))
+	require.Equal(t, cfg.ConsumedGasInEconomicsFixEnableEpoch, handler.GetActivationEpoch(common.ConsumedGasInEconomicsFlag))
+	require.Equal(t, cfg.AttributeExtraGasUsageEnableEpoch, handler.GetActivationEpoch(common.AttributeExtraGasUsageFlag))
+	require.Equal(t, cfg.FixCorrectSmallIntAndGasLimitsEnableEpoch, handler.GetActivationEpoch(common.FixCorrectSmallIntAndGasLimitsFlag))
+	require.Equal(t, cfg.OutputRollbackOnDestContextEnableEpoch, handler.GetActivationEpoch(common.OutputRollbackOnDestContextFlag))
+	require.Equal(t, cfg.SupernovaEnableEpoch, handler.GetActivationEpoch(common.SupernovaFlag))
+	require.Equal(t, cfg.FixEpochChangeProposedCurrentEpochEnableEpoch, handler.GetActivationEpoch(common.FixEpochChangeProposedCurrentEpochFlag))
+}
+
+func TestEnableEpochsHandler_GetAllEnableEpochs(t *testing.T) {
+	t.Parallel()
+
+	cfg := createEnableEpochsConfig()
+	handler, _ := NewEnableEpochsHandler(cfg, &epochNotifier.EpochNotifierStub{})
+	require.NotNil(t, handler)
+
+	allEpochs := handler.GetAllEnableEpochs()
+	typeOfCfg := reflect.TypeOf(cfg)
+	valueOfCfg := reflect.ValueOf(cfg)
+	for i := 0; i < typeOfCfg.NumField(); i++ {
+		field := typeOfCfg.Field(i)
+		value := valueOfCfg.Field(i)
+		if field.Name == "MaxNodesChangeEnableEpoch" ||
+			field.Name == "BLSMultiSignerEnableEpoch" {
+			// slices, ignoring
+			continue
+		}
+
+		epoch, exists := allEpochs[field.Name]
+		require.True(t, exists, fmt.Sprintf("could not find: %s", field.Name))
+		require.Equal(t, value.Uint(), uint64(epoch))
+	}
+}
+
+func TestEnableEpochsHandler_IsInterfaceNil(t *testing.T) {
+	t.Parallel()
+
+	var handler *enableEpochsHandler
+	require.True(t, handler.IsInterfaceNil())
+
+	handler, _ = NewEnableEpochsHandler(createEnableEpochsConfig(), &epochNotifier.EpochNotifierStub{})
+	require.False(t, handler.IsInterfaceNil())
+}

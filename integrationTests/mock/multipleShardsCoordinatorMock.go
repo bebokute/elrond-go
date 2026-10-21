@@ -2,29 +2,28 @@ package mock
 
 import (
 	"fmt"
-
-	"github.com/ElrondNetwork/elrond-go/data/state"
 )
 
 type multipleShardsCoordinatorMock struct {
-	noShards        uint32
-	ComputeIdCalled func(address state.AddressContainer) uint32
+	ComputeIdCalled func(address []byte) uint32
+	numShards       uint32
 	CurrentShard    uint32
 }
 
-func NewMultipleShardsCoordinatorMock() *multipleShardsCoordinatorMock {
-	return &multipleShardsCoordinatorMock{noShards: 1}
+// NewMultiShardsCoordinatorMock -
+func NewMultiShardsCoordinatorMock(numShard uint32) *multipleShardsCoordinatorMock {
+	return &multipleShardsCoordinatorMock{
+		numShards: numShard,
+	}
 }
 
-func NewMultiShardsCoordinatorMock(nrShard uint32) *multipleShardsCoordinatorMock {
-	return &multipleShardsCoordinatorMock{noShards: nrShard}
-}
-
+// NumberOfShards -
 func (scm *multipleShardsCoordinatorMock) NumberOfShards() uint32 {
-	return scm.noShards
+	return scm.numShards
 }
 
-func (scm *multipleShardsCoordinatorMock) ComputeId(address state.AddressContainer) uint32 {
+// ComputeId -
+func (scm *multipleShardsCoordinatorMock) ComputeId(address []byte) uint32 {
 	if scm.ComputeIdCalled != nil {
 		return scm.ComputeIdCalled(address)
 	}
@@ -32,20 +31,24 @@ func (scm *multipleShardsCoordinatorMock) ComputeId(address state.AddressContain
 	return uint32(0)
 }
 
+// SelfId -
 func (scm *multipleShardsCoordinatorMock) SelfId() uint32 {
 	return scm.CurrentShard
 }
 
-func (scm *multipleShardsCoordinatorMock) SetSelfId(shardId uint32) error {
+// SetSelfId -
+func (scm *multipleShardsCoordinatorMock) SetSelfId(_ uint32) error {
 	return nil
 }
 
-func (scm *multipleShardsCoordinatorMock) SameShard(firstAddress, secondAddress state.AddressContainer) bool {
+// SameShard -
+func (scm *multipleShardsCoordinatorMock) SameShard(_, _ []byte) bool {
 	return true
 }
 
-func (scm *multipleShardsCoordinatorMock) SetNoShards(noShards uint32) {
-	scm.noShards = noShards
+// SetNoShards -
+func (scm *multipleShardsCoordinatorMock) SetNoShards(numShards uint32) {
+	scm.numShards = numShards
 }
 
 // CommunicationIdentifier returns the identifier between current shard ID and destination shard ID
@@ -64,8 +67,5 @@ func (scm *multipleShardsCoordinatorMock) CommunicationIdentifier(destShardID ui
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (scm *multipleShardsCoordinatorMock) IsInterfaceNil() bool {
-	if scm == nil {
-		return true
-	}
-	return false
+	return scm == nil
 }

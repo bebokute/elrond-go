@@ -1,23 +1,38 @@
 package dataValidators_test
 
 import (
+	"bytes"
 	"errors"
 	"math/big"
 	"strconv"
 	"testing"
 
-	"github.com/ElrondNetwork/elrond-go/core/check"
-	"github.com/ElrondNetwork/elrond-go/data/state"
-	"github.com/ElrondNetwork/elrond-go/process"
-	"github.com/ElrondNetwork/elrond-go/process/dataValidators"
-	"github.com/ElrondNetwork/elrond-go/process/mock"
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/core/check"
+	"github.com/multiversx/mx-chain-core-go/data"
+	"github.com/multiversx/mx-chain-core-go/data/transaction"
+	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/process"
+	"github.com/multiversx/mx-chain-go/process/dataValidators"
+	"github.com/multiversx/mx-chain-go/process/mock"
+	"github.com/multiversx/mx-chain-go/state/accounts"
+	"github.com/multiversx/mx-chain-go/testscommon"
+	"github.com/multiversx/mx-chain-go/testscommon/enableEpochsHandlerMock"
+	stateMock "github.com/multiversx/mx-chain-go/testscommon/state"
+	"github.com/multiversx/mx-chain-go/testscommon/trie"
+	vmcommon "github.com/multiversx/mx-chain-vm-common-go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func getAccAdapter(nonce uint64, balance *big.Int) *mock.AccountsStub {
-	accDB := &mock.AccountsStub{}
-	accDB.GetExistingAccountCalled = func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
-		return &state.Account{Nonce: nonce, Balance: balance}, nil
+func getAccAdapter(nonce uint64, balance *big.Int) *stateMock.AccountsStub {
+	accDB := &stateMock.AccountsStub{}
+	accDB.GetExistingAccountCalled = func(address []byte) (handler vmcommon.AccountHandler, e error) {
+		acc, _ := accounts.NewUserAccount(address, &trie.DataTrieTrackerStub{}, &trie.TrieLeafParserStub{})
+		acc.Nonce = nonce
+		acc.Balance = balance
+
+		return acc, nil
 	}
 
 	return accDB
@@ -34,57 +49,166 @@ func createMockCoordinator(identifierPrefix string, currentShardID uint32) *mock
 	}
 }
 
-func getTxValidatorHandler(
+func getInterceptedTxHandler(
 	sndShardId uint32,
+	rcvShardId uint32,
 	nonce uint64,
-	sndAddr state.AddressContainer,
-	totalValue *big.Int,
-) process.TxValidatorHandler {
-	return &mock.TxValidatorHandlerStub{
+	sndAddr []byte,
+	fee *big.Int,
+) process.InterceptedTransactionHandler {
+	return &mock.InterceptedTxHandlerStub{
 		SenderShardIdCalled: func() uint32 {
 			return sndShardId
+		},
+		ReceiverShardIdCalled: func() uint32 {
+			return rcvShardId
 		},
 		NonceCalled: func() uint64 {
 			return nonce
 		},
-		SenderAddressCalled: func() state.AddressContainer {
+		SenderAddressCalled: func() []byte {
 			return sndAddr
 		},
-		TotalValueCalled: func() *big.Int {
-			return totalValue
+		FeeCalled: func() *big.Int {
+			return fee
+		},
+		TransactionCalled: func() data.TransactionHandler {
+			return &transaction.Transaction{}
 		},
 	}
 }
 
-func TestTxValidator_NewValidatorNilAccountsShouldErr(t *testing.T) {
+func TestNewTxValidator_NilAccountsShouldErr(t *testing.T) {
 	t.Parallel()
 
 	shardCoordinator := createMockCoordinator("_", 0)
 	maxNonceDeltaAllowed := 100
-	txValidator, err := dataValidators.NewTxValidator(nil, shardCoordinator, maxNonceDeltaAllowed)
+	txValidator, err := dataValidators.NewTxValidator(
+		nil,
+		shardCoordinator,
+		&testscommon.WhiteListHandlerStub{},
+		testscommon.NewPubkeyConverterMock(32),
+		&testscommon.TxVersionCheckerStub{},
+		&enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+		maxNonceDeltaAllowed,
+	)
 
 	assert.Nil(t, txValidator)
 	assert.Equal(t, process.ErrNilAccountsAdapter, err)
 }
 
-func TestTxValidator_NewValidatorNilShardCoordinatorShouldErr(t *testing.T) {
+func TestNewTxValidator_NilShardCoordinatorShouldErr(t *testing.T) {
 	t.Parallel()
 
-	accounts := getAccAdapter(0, big.NewInt(0))
+	adb := getAccAdapter(0, big.NewInt(0))
 	maxNonceDeltaAllowed := 100
-	txValidator, err := dataValidators.NewTxValidator(accounts, nil, maxNonceDeltaAllowed)
+	txValidator, err := dataValidators.NewTxValidator(
+		adb,
+		nil,
+		&testscommon.WhiteListHandlerStub{},
+		testscommon.NewPubkeyConverterMock(32),
+		&testscommon.TxVersionCheckerStub{},
+		&enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+		maxNonceDeltaAllowed,
+	)
 
 	assert.Nil(t, txValidator)
 	assert.Equal(t, process.ErrNilShardCoordinator, err)
 }
 
-func TestTxValidator_NewValidatorShouldWork(t *testing.T) {
+func TestTxValidator_NewValidatorNilWhiteListHandlerShouldErr(t *testing.T) {
 	t.Parallel()
 
-	accounts := getAccAdapter(0, big.NewInt(0))
+	adb := getAccAdapter(0, big.NewInt(0))
+	maxNonceDeltaAllowed := 100
+	shardCoordinator := createMockCoordinator("_", 0)
+	txValidator, err := dataValidators.NewTxValidator(
+		adb,
+		shardCoordinator,
+		nil,
+		testscommon.NewPubkeyConverterMock(32),
+		&testscommon.TxVersionCheckerStub{},
+		&enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+		maxNonceDeltaAllowed,
+	)
+
+	assert.Nil(t, txValidator)
+	assert.Equal(t, process.ErrNilWhiteListHandler, err)
+}
+
+func TestNewTxValidator_NilPubkeyConverterShouldErr(t *testing.T) {
+	t.Parallel()
+
+	adb := getAccAdapter(0, big.NewInt(0))
+	maxNonceDeltaAllowed := 100
+	shardCoordinator := createMockCoordinator("_", 0)
+	txValidator, err := dataValidators.NewTxValidator(
+		adb,
+		shardCoordinator,
+		&testscommon.WhiteListHandlerStub{},
+		nil,
+		&testscommon.TxVersionCheckerStub{},
+		&enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+		maxNonceDeltaAllowed,
+	)
+
+	assert.Nil(t, txValidator)
+	assert.True(t, errors.Is(err, process.ErrNilPubkeyConverter))
+}
+
+func TestNewTxValidator_NilTxVersionCheckerShouldErr(t *testing.T) {
+	t.Parallel()
+
+	adb := getAccAdapter(0, big.NewInt(0))
 	shardCoordinator := createMockCoordinator("_", 0)
 	maxNonceDeltaAllowed := 100
-	txValidator, err := dataValidators.NewTxValidator(accounts, shardCoordinator, maxNonceDeltaAllowed)
+	txValidator, err := dataValidators.NewTxValidator(
+		adb,
+		shardCoordinator,
+		&testscommon.WhiteListHandlerStub{},
+		testscommon.NewPubkeyConverterMock(32),
+		nil,
+		&enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+		maxNonceDeltaAllowed,
+	)
+	assert.Nil(t, txValidator)
+	assert.True(t, errors.Is(err, process.ErrNilTransactionVersionChecker))
+}
+
+func TestNewTxValidator_NilEnableEpochsHandlerShouldErr(t *testing.T) {
+	t.Parallel()
+
+	adb := getAccAdapter(0, big.NewInt(0))
+	shardCoordinator := createMockCoordinator("_", 0)
+	maxNonceDeltaAllowed := 100
+	txValidator, err := dataValidators.NewTxValidator(
+		adb,
+		shardCoordinator,
+		&testscommon.WhiteListHandlerStub{},
+		testscommon.NewPubkeyConverterMock(32),
+		&testscommon.TxVersionCheckerStub{},
+		nil,
+		maxNonceDeltaAllowed,
+	)
+	assert.Nil(t, txValidator)
+	assert.True(t, errors.Is(err, process.ErrNilEnableEpochsHandler))
+}
+
+func TestNewTxValidator_ShouldWork(t *testing.T) {
+	t.Parallel()
+
+	adb := getAccAdapter(0, big.NewInt(0))
+	shardCoordinator := createMockCoordinator("_", 0)
+	maxNonceDeltaAllowed := 100
+	txValidator, err := dataValidators.NewTxValidator(
+		adb,
+		shardCoordinator,
+		&testscommon.WhiteListHandlerStub{},
+		testscommon.NewPubkeyConverterMock(32),
+		&testscommon.TxVersionCheckerStub{},
+		&enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+		maxNonceDeltaAllowed,
+	)
 
 	assert.Nil(t, err)
 	assert.NotNil(t, txValidator)
@@ -93,167 +217,559 @@ func TestTxValidator_NewValidatorShouldWork(t *testing.T) {
 	assert.Equal(t, false, result)
 }
 
-func TestTxValidator_IsTxValidForProcessingTxIsCrossShardShouldReturnTrue(t *testing.T) {
+func TestTxValidator_CheckTxValidityTxCrossShardShouldWork(t *testing.T) {
 	t.Parallel()
 
-	accounts := getAccAdapter(1, big.NewInt(0))
-	shardCoordinator := createMockCoordinator("_", 0)
+	adb := getAccAdapter(1, big.NewInt(0))
+	currentShard := uint32(0)
+	shardCoordinator := createMockCoordinator("_", currentShard)
 	maxNonceDeltaAllowed := 100
-	txValidator, err := dataValidators.NewTxValidator(accounts, shardCoordinator, maxNonceDeltaAllowed)
+	txValidator, err := dataValidators.NewTxValidator(
+		adb,
+		shardCoordinator,
+		&testscommon.WhiteListHandlerStub{},
+		testscommon.NewPubkeyConverterMock(32),
+		&testscommon.TxVersionCheckerStub{},
+		&enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+		maxNonceDeltaAllowed,
+	)
 	assert.Nil(t, err)
 
-	addressMock := mock.NewAddressMock([]byte("address"))
-	txValidatorHandler := getTxValidatorHandler(1, 1, addressMock, big.NewInt(0))
+	addressMock := []byte("address")
+	txValidatorHandler := getInterceptedTxHandler(currentShard+1, currentShard, 1, addressMock, big.NewInt(0))
 
-	result := txValidator.IsTxValidForProcessing(txValidatorHandler)
-	assert.Equal(t, true, result)
+	result := txValidator.CheckTxValidity(txValidatorHandler)
+	assert.Nil(t, result)
 }
 
-func TestTxValidator_IsTxValidForProcessingAccountNonceIsGreaterThanTxNonceShouldReturnFalse(t *testing.T) {
+func TestTxValidator_CheckTxValidityAccountNonceIsGreaterThanTxNonceShouldReturnFalse(t *testing.T) {
 	t.Parallel()
 
 	accountNonce := uint64(100)
 	txNonce := uint64(0)
 
-	accounts := getAccAdapter(accountNonce, big.NewInt(0))
+	adb := getAccAdapter(accountNonce, big.NewInt(0))
 	shardCoordinator := createMockCoordinator("_", 0)
 	maxNonceDeltaAllowed := 100
-	txValidator, err := dataValidators.NewTxValidator(accounts, shardCoordinator, maxNonceDeltaAllowed)
+	txValidator, err := dataValidators.NewTxValidator(
+		adb,
+		shardCoordinator,
+		&testscommon.WhiteListHandlerStub{},
+		testscommon.NewPubkeyConverterMock(32),
+		&testscommon.TxVersionCheckerStub{},
+		&enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+		maxNonceDeltaAllowed,
+	)
 	assert.Nil(t, err)
 
-	addressMock := mock.NewAddressMock([]byte("address"))
-	txValidatorHandler := getTxValidatorHandler(0, txNonce, addressMock, big.NewInt(0))
+	addressMock := []byte("address")
+	currentShard := uint32(0)
+	txValidatorHandler := getInterceptedTxHandler(currentShard, currentShard, txNonce, addressMock, big.NewInt(0))
 
-	result := txValidator.IsTxValidForProcessing(txValidatorHandler)
-	assert.Equal(t, false, result)
+	result := txValidator.CheckTxValidity(txValidatorHandler)
+	assert.True(t, errors.Is(result, process.ErrWrongTransaction))
 }
 
-func TestTxValidator_IsTxValidForProcessingTxNonceIsTooHigh(t *testing.T) {
+func TestTxValidator_CheckTxValidityTxNonceIsTooHigh(t *testing.T) {
 	t.Parallel()
 
 	accountNonce := uint64(100)
 	maxNonceDeltaAllowed := 100
 	txNonce := accountNonce + uint64(maxNonceDeltaAllowed) + 1
 
-	accounts := getAccAdapter(accountNonce, big.NewInt(0))
+	adb := getAccAdapter(accountNonce, big.NewInt(0))
 	shardCoordinator := createMockCoordinator("_", 0)
-	txValidator, err := dataValidators.NewTxValidator(accounts, shardCoordinator, maxNonceDeltaAllowed)
+	txValidator, err := dataValidators.NewTxValidator(
+		adb,
+		shardCoordinator,
+		&testscommon.WhiteListHandlerStub{},
+		testscommon.NewPubkeyConverterMock(32),
+		&testscommon.TxVersionCheckerStub{},
+		&enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+		maxNonceDeltaAllowed,
+	)
 	assert.Nil(t, err)
 
-	addressMock := mock.NewAddressMock([]byte("address"))
-	txValidatorHandler := getTxValidatorHandler(0, txNonce, addressMock, big.NewInt(0))
+	addressMock := []byte("address")
+	currentShard := uint32(0)
+	txValidatorHandler := getInterceptedTxHandler(currentShard, currentShard, txNonce, addressMock, big.NewInt(0))
 
-	result := txValidator.IsTxValidForProcessing(txValidatorHandler)
-	assert.Equal(t, false, result)
+	result := txValidator.CheckTxValidity(txValidatorHandler)
+	assert.True(t, errors.Is(result, process.ErrWrongTransaction))
 }
 
-func TestTxValidator_IsTxValidForProcessingAccountBalanceIsLessThanTxTotalValueShouldReturnFalse(t *testing.T) {
+func TestTxValidator_CheckTxValidityAccountBalanceIsLessThanTxTotalValueShouldReturnFalse(t *testing.T) {
 	t.Parallel()
 
-	accountNonce := uint64(0)
-	txNonce := uint64(1)
-	totalCost := big.NewInt(1000)
-	accountBalance := big.NewInt(10)
+	t.Run("normal tx should return false for sender", func(t *testing.T) {
+		t.Parallel()
 
-	accounts := getAccAdapter(accountNonce, accountBalance)
-	shardCoordinator := createMockCoordinator("_", 0)
-	maxNonceDeltaAllowed := 100
-	txValidator, err := dataValidators.NewTxValidator(accounts, shardCoordinator, maxNonceDeltaAllowed)
-	assert.Nil(t, err)
+		accountNonce := uint64(0)
+		txNonce := uint64(1)
+		fee := big.NewInt(1000)
+		accountBalance := big.NewInt(10)
 
-	addressMock := mock.NewAddressMock([]byte("address"))
-	txValidatorHandler := getTxValidatorHandler(0, txNonce, addressMock, totalCost)
+		providedSenderAddress := []byte("address")
+		adb := &stateMock.AccountsStub{}
+		adb.GetExistingAccountCalled = func(address []byte) (handler vmcommon.AccountHandler, e error) {
+			require.True(t, bytes.Equal(providedSenderAddress, address))
 
-	result := txValidator.IsTxValidForProcessing(txValidatorHandler)
-	assert.Equal(t, false, result)
+			acc, _ := accounts.NewUserAccount(address, &trie.DataTrieTrackerStub{}, &trie.TrieLeafParserStub{})
+			acc.Nonce = accountNonce
+			acc.Balance = accountBalance
+
+			return acc, nil
+		}
+
+		shardCoordinator := createMockCoordinator("_", 0)
+		maxNonceDeltaAllowed := 100
+		txValidator, err := dataValidators.NewTxValidator(
+			adb,
+			shardCoordinator,
+			&testscommon.WhiteListHandlerStub{},
+			testscommon.NewPubkeyConverterMock(32),
+			&testscommon.TxVersionCheckerStub{},
+			&enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+			maxNonceDeltaAllowed,
+		)
+		assert.Nil(t, err)
+
+		currentShard := uint32(0)
+		txValidatorHandler := getInterceptedTxHandler(currentShard, currentShard, txNonce, providedSenderAddress, fee)
+
+		result := txValidator.CheckTxValidity(txValidatorHandler)
+		assert.NotNil(t, result)
+		assert.True(t, errors.Is(result, process.ErrInsufficientFunds))
+	})
+	t.Run("relayed tx v3 should return false for relayer", func(t *testing.T) {
+		t.Parallel()
+
+		accountNonce := uint64(0)
+		txNonce := uint64(1)
+		fee := big.NewInt(1000)
+		accountBalance := big.NewInt(10)
+
+		providedRelayerAddress := []byte("relayer")
+		providedSenderAddress := []byte("address")
+		adb := &stateMock.AccountsStub{}
+		cnt := 0
+		adb.GetExistingAccountCalled = func(address []byte) (handler vmcommon.AccountHandler, e error) {
+			cnt++
+			if cnt == 1 {
+				return nil, errors.New("sender not found")
+			}
+
+			require.True(t, bytes.Equal(providedRelayerAddress, address))
+
+			acc, _ := accounts.NewUserAccount(address, &trie.DataTrieTrackerStub{}, &trie.TrieLeafParserStub{})
+			acc.Nonce = accountNonce
+			acc.Balance = accountBalance
+
+			return acc, nil
+		}
+
+		shardCoordinator := createMockCoordinator("_", 0)
+		maxNonceDeltaAllowed := 100
+		txValidator, err := dataValidators.NewTxValidator(
+			adb,
+			shardCoordinator,
+			&testscommon.WhiteListHandlerStub{},
+			testscommon.NewPubkeyConverterMock(32),
+			&testscommon.TxVersionCheckerStub{},
+			&enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+			maxNonceDeltaAllowed,
+		)
+		assert.Nil(t, err)
+
+		currentShard := uint32(0)
+		txValidatorHandler := getInterceptedTxHandler(currentShard, currentShard, txNonce, providedSenderAddress, fee)
+		txValidatorHandlerStub, ok := txValidatorHandler.(*mock.InterceptedTxHandlerStub)
+		require.True(t, ok)
+		txValidatorHandlerStub.TransactionCalled = func() data.TransactionHandler {
+			return &transaction.Transaction{
+				SndAddr:          providedSenderAddress,
+				Signature:        []byte("address sig"),
+				RelayerAddr:      providedRelayerAddress,
+				RelayerSignature: []byte("relayer sig"),
+				Value:            big.NewInt(0),
+			}
+		}
+		result := txValidator.CheckTxValidity(txValidatorHandler)
+		assert.NotNil(t, result)
+		assert.True(t, errors.Is(result, process.ErrInsufficientFunds))
+	})
+	t.Run("relayed tx v3 with guarded relayer should fail", func(t *testing.T) {
+		t.Parallel()
+
+		txNonce := uint64(1)
+		fee := big.NewInt(1000)
+
+		providedRelayerAddress := []byte("relayer")
+		providedSenderAddress := []byte("address")
+		adb := &stateMock.AccountsStub{}
+		adb.GetExistingAccountCalled = func(address []byte) (handler vmcommon.AccountHandler, e error) {
+			return &stateMock.UserAccountStub{
+				IsGuardedCalled: func() bool {
+					return bytes.Equal(providedRelayerAddress, address)
+				},
+			}, nil
+		}
+
+		shardCoordinator := createMockCoordinator("_", 0)
+		maxNonceDeltaAllowed := 100
+		txValidator, err := dataValidators.NewTxValidator(
+			adb,
+			shardCoordinator,
+			&testscommon.WhiteListHandlerStub{},
+			testscommon.NewPubkeyConverterMock(32),
+			&testscommon.TxVersionCheckerStub{},
+			&enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+			maxNonceDeltaAllowed,
+		)
+		assert.Nil(t, err)
+
+		currentShard := uint32(0)
+		txValidatorHandler := getInterceptedTxHandler(currentShard, currentShard, txNonce, providedSenderAddress, fee)
+		txValidatorHandlerStub, ok := txValidatorHandler.(*mock.InterceptedTxHandlerStub)
+		require.True(t, ok)
+		txValidatorHandlerStub.TransactionCalled = func() data.TransactionHandler {
+			return &transaction.Transaction{
+				SndAddr:          providedSenderAddress,
+				Signature:        []byte("address sig"),
+				RelayerAddr:      providedRelayerAddress,
+				RelayerSignature: []byte("relayer sig"),
+				Value:            big.NewInt(0),
+			}
+		}
+		result := txValidator.CheckTxValidity(txValidatorHandler)
+		assert.NotNil(t, result)
+		assert.True(t, errors.Is(result, process.ErrGuardedRelayerNotAllowed))
+	})
 }
 
-func TestTxValidator_IsTxValidForProcessingNumOfRejectedTxShouldIncreaseShouldReturnFalse(t *testing.T) {
+func TestTxValidator_CheckTxValidityRelayedV3(t *testing.T) {
 	t.Parallel()
 
-	accountNonce := uint64(0)
-	txNonce := uint64(1)
-	totalCost := big.NewInt(1000)
-	accountBalance := big.NewInt(10)
+	t.Run("missing sender should work without value", func(t *testing.T) {
+		t.Parallel()
 
-	accounts := getAccAdapter(accountNonce, accountBalance)
-	shardCoordinator := createMockCoordinator("_", 0)
-	maxNonceDeltaAllowed := 100
-	txValidator, err := dataValidators.NewTxValidator(accounts, shardCoordinator, maxNonceDeltaAllowed)
-	assert.Nil(t, err)
+		accountNonce := uint64(0)
+		txNonce := uint64(1)
+		fee := big.NewInt(1000)
+		accountBalance := big.NewInt(1000)
 
-	addressMock := mock.NewAddressMock([]byte("address"))
-	txValidatorHandler := getTxValidatorHandler(0, txNonce, addressMock, totalCost)
+		providedRelayerAddress := []byte("relayer")
+		providedSenderAddress := []byte("address")
+		adb := &stateMock.AccountsStub{}
+		cnt := 0
+		adb.GetExistingAccountCalled = func(address []byte) (handler vmcommon.AccountHandler, e error) {
+			cnt++
+			if cnt == 1 {
+				return nil, errors.New("sender not found")
+			}
 
-	result := txValidator.IsTxValidForProcessing(txValidatorHandler)
-	assert.Equal(t, false, result)
+			require.True(t, bytes.Equal(providedRelayerAddress, address))
 
-	numRejectedTx := txValidator.NumRejectedTxs()
-	assert.Equal(t, uint64(1), numRejectedTx)
+			acc, _ := accounts.NewUserAccount(address, &trie.DataTrieTrackerStub{}, &trie.TrieLeafParserStub{})
+			acc.Nonce = accountNonce
+			acc.Balance = accountBalance
+
+			return acc, nil
+		}
+
+		shardCoordinator := createMockCoordinator("_", 0)
+		maxNonceDeltaAllowed := 100
+		txValidator, err := dataValidators.NewTxValidator(
+			adb,
+			shardCoordinator,
+			&testscommon.WhiteListHandlerStub{},
+			testscommon.NewPubkeyConverterMock(32),
+			&testscommon.TxVersionCheckerStub{},
+			&enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+			maxNonceDeltaAllowed,
+		)
+		assert.Nil(t, err)
+
+		currentShard := uint32(0)
+		txValidatorHandler := getInterceptedTxHandler(currentShard, currentShard, txNonce, providedSenderAddress, fee)
+		txValidatorHandlerStub, ok := txValidatorHandler.(*mock.InterceptedTxHandlerStub)
+		require.True(t, ok)
+		txValidatorHandlerStub.TransactionCalled = func() data.TransactionHandler {
+			return &transaction.Transaction{
+				SndAddr:          providedSenderAddress,
+				Signature:        []byte("address sig"),
+				RelayerAddr:      providedRelayerAddress,
+				RelayerSignature: []byte("relayer sig"),
+				Value:            big.NewInt(0),
+			}
+		}
+		err = txValidator.CheckTxValidity(txValidatorHandler)
+		assert.NoError(t, err)
+	})
+	t.Run("missing sender but guarded tx should error", func(t *testing.T) {
+		t.Parallel()
+
+		accountNonce := uint64(0)
+		txNonce := uint64(1)
+		fee := big.NewInt(1000)
+		accountBalance := big.NewInt(1000)
+
+		providedRelayerAddress := []byte("relayer")
+		providedSenderAddress := []byte("address")
+		adb := &stateMock.AccountsStub{}
+		cnt := 0
+		adb.GetExistingAccountCalled = func(address []byte) (handler vmcommon.AccountHandler, e error) {
+			cnt++
+			if cnt == 1 {
+				return nil, errors.New("sender not found")
+			}
+
+			require.True(t, bytes.Equal(providedRelayerAddress, address))
+
+			acc, _ := accounts.NewUserAccount(address, &trie.DataTrieTrackerStub{}, &trie.TrieLeafParserStub{})
+			acc.Nonce = accountNonce
+			acc.Balance = accountBalance
+
+			return acc, nil
+		}
+
+		shardCoordinator := createMockCoordinator("_", 0)
+		maxNonceDeltaAllowed := 100
+		txValidator, err := dataValidators.NewTxValidator(
+			adb,
+			shardCoordinator,
+			&testscommon.WhiteListHandlerStub{},
+			testscommon.NewPubkeyConverterMock(32),
+			&testscommon.TxVersionCheckerStub{
+				IsGuardedTransactionCalled: func(tx *transaction.Transaction) bool {
+					return true
+				},
+			},
+			&enableEpochsHandlerMock.EnableEpochsHandlerStub{
+				IsFlagEnabledCalled: func(flag core.EnableEpochFlag) bool {
+					return flag == common.SupernovaFlag
+				},
+			},
+			maxNonceDeltaAllowed,
+		)
+		assert.Nil(t, err)
+
+		currentShard := uint32(0)
+		txValidatorHandler := getInterceptedTxHandler(currentShard, currentShard, txNonce, providedSenderAddress, fee)
+		txValidatorHandlerStub, ok := txValidatorHandler.(*mock.InterceptedTxHandlerStub)
+		require.True(t, ok)
+		txValidatorHandlerStub.TransactionCalled = func() data.TransactionHandler {
+			return &transaction.Transaction{
+				SndAddr:           providedSenderAddress,
+				Signature:         []byte("address sig"),
+				RelayerAddr:       providedRelayerAddress,
+				RelayerSignature:  []byte("relayer sig"),
+				Value:             big.NewInt(0),
+				GuardianAddr:      []byte("guardian"),
+				GuardianSignature: []byte("guardian sig"),
+				Options:           2,
+			}
+		}
+		err = txValidator.CheckTxValidity(txValidatorHandler)
+		assert.True(t, errors.Is(err, process.ErrAccountNotFound))
+	})
 }
 
-func TestTxValidator_IsTxValidForProcessingAccountNotExitsShouldReturnFalse(t *testing.T) {
+func TestTxValidator_CheckTxValidityAccountNotExitsShouldReturnFalse(t *testing.T) {
 	t.Parallel()
 
-	accDB := &mock.AccountsStub{}
-	accDB.GetExistingAccountCalled = func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
+	accDB := &stateMock.AccountsStub{}
+	accDB.GetExistingAccountCalled = func(address []byte) (handler vmcommon.AccountHandler, e error) {
 		return nil, errors.New("cannot find account")
 	}
 	shardCoordinator := createMockCoordinator("_", 0)
 	maxNonceDeltaAllowed := 100
-	txValidator, _ := dataValidators.NewTxValidator(accDB, shardCoordinator, maxNonceDeltaAllowed)
+	txValidator, _ := dataValidators.NewTxValidator(
+		accDB,
+		shardCoordinator,
+		&testscommon.WhiteListHandlerStub{},
+		testscommon.NewPubkeyConverterMock(32),
+		&testscommon.TxVersionCheckerStub{},
+		&enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+		maxNonceDeltaAllowed,
+	)
 
-	addressMock := mock.NewAddressMock([]byte("address"))
-	txValidatorHandler := getTxValidatorHandler(0, 1, addressMock, big.NewInt(0))
+	addressMock := []byte("address")
+	currentShard := uint32(0)
+	txValidatorHandler := getInterceptedTxHandler(currentShard, currentShard, 1, addressMock, big.NewInt(0))
 
-	result := txValidator.IsTxValidForProcessing(txValidatorHandler)
-	assert.Equal(t, false, result)
+	result := txValidator.CheckTxValidity(txValidatorHandler)
+	assert.True(t, errors.Is(result, process.ErrAccountNotFound))
 }
 
-func TestTxValidator_IsTxValidForProcessingWrongAccountTypeShouldReturnFalse(t *testing.T) {
+func TestTxValidator_CheckTxValidityAccountNotExitsButWhiteListedShouldReturnTrue(t *testing.T) {
 	t.Parallel()
 
-	accDB := &mock.AccountsStub{}
-	accDB.GetExistingAccountCalled = func(addressContainer state.AddressContainer) (handler state.AccountHandler, e error) {
-		return &state.MetaAccount{}, nil
+	accDB := &stateMock.AccountsStub{}
+	accDB.GetExistingAccountCalled = func(address []byte) (handler vmcommon.AccountHandler, e error) {
+		return nil, errors.New("cannot find account")
 	}
 	shardCoordinator := createMockCoordinator("_", 0)
 	maxNonceDeltaAllowed := 100
-	txValidator, _ := dataValidators.NewTxValidator(accDB, shardCoordinator, maxNonceDeltaAllowed)
+	txValidator, _ := dataValidators.NewTxValidator(
+		accDB,
+		shardCoordinator,
+		&testscommon.WhiteListHandlerStub{
+			IsWhiteListedCalled: func(interceptedData process.InterceptedData) bool {
+				return true
+			},
+		},
+		testscommon.NewPubkeyConverterMock(32),
+		&testscommon.TxVersionCheckerStub{},
+		&enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+		maxNonceDeltaAllowed,
+	)
 
-	addressMock := mock.NewAddressMock([]byte("address"))
-	txValidatorHandler := getTxValidatorHandler(0, 1, addressMock, big.NewInt(0))
+	addressMock := []byte("address")
+	currentShard := uint32(0)
+	txValidatorHandler := getInterceptedTxHandler(currentShard, currentShard, 1, addressMock, big.NewInt(0))
 
-	result := txValidator.IsTxValidForProcessing(txValidatorHandler)
-	assert.Equal(t, false, result)
+	interceptedTx := struct {
+		process.InterceptedData
+		process.InterceptedTransactionHandler
+	}{
+		InterceptedData:               nil,
+		InterceptedTransactionHandler: txValidatorHandler,
+	}
+
+	// interceptedTx needs to be of type InterceptedData & TxValidatorHandler
+	result := txValidator.CheckTxValidity(interceptedTx)
+	assert.Nil(t, result)
 }
 
-func TestTxValidator_IsTxValidForProcessingTxIsOkShouldReturnTrue(t *testing.T) {
+func TestTxValidator_CheckTxValidityWrongAccountTypeShouldReturnFalse(t *testing.T) {
+	t.Parallel()
+
+	accDB := &stateMock.AccountsStub{}
+	accDB.GetExistingAccountCalled = func(address []byte) (handler vmcommon.AccountHandler, e error) {
+		return accounts.NewPeerAccount(address)
+	}
+	shardCoordinator := createMockCoordinator("_", 0)
+	maxNonceDeltaAllowed := 100
+	txValidator, _ := dataValidators.NewTxValidator(
+		accDB,
+		shardCoordinator,
+		&testscommon.WhiteListHandlerStub{},
+		testscommon.NewPubkeyConverterMock(32),
+		&testscommon.TxVersionCheckerStub{},
+		&enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+		maxNonceDeltaAllowed,
+	)
+
+	addressMock := []byte("address")
+	currentShard := uint32(0)
+	txValidatorHandler := getInterceptedTxHandler(currentShard, currentShard, 1, addressMock, big.NewInt(0))
+
+	result := txValidator.CheckTxValidity(txValidatorHandler)
+	assert.True(t, errors.Is(result, process.ErrWrongTypeAssertion))
+}
+
+func TestTxValidator_CheckTxValidityTxIsOkShouldReturnTrue(t *testing.T) {
 	t.Parallel()
 
 	accountNonce := uint64(0)
 	accountBalance := big.NewInt(10)
-	accounts := getAccAdapter(accountNonce, accountBalance)
+	adb := getAccAdapter(accountNonce, accountBalance)
 	shardCoordinator := createMockCoordinator("_", 0)
 	maxNonceDeltaAllowed := 100
-	txValidator, _ := dataValidators.NewTxValidator(accounts, shardCoordinator, maxNonceDeltaAllowed)
+	txValidator, _ := dataValidators.NewTxValidator(
+		adb,
+		shardCoordinator,
+		&testscommon.WhiteListHandlerStub{},
+		testscommon.NewPubkeyConverterMock(32),
+		&testscommon.TxVersionCheckerStub{},
+		&enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+		maxNonceDeltaAllowed,
+	)
 
-	addressMock := mock.NewAddressMock([]byte("address"))
-	txValidatorHandler := getTxValidatorHandler(0, 1, addressMock, big.NewInt(0))
+	addressMock := []byte("address")
+	currentShard := uint32(0)
+	txValidatorHandler := getInterceptedTxHandler(currentShard, currentShard, 1, addressMock, big.NewInt(0))
 
-	result := txValidator.IsTxValidForProcessing(txValidatorHandler)
-	assert.Equal(t, true, result)
+	result := txValidator.CheckTxValidity(txValidatorHandler)
+	assert.Nil(t, result)
 }
 
-//------- IsInterfaceNil
+func Test_getTxData(t *testing.T) {
+	t.Run("nil tx in intercepted tx returns error", func(t *testing.T) {
+		interceptedTx := getDefaultInterceptedTx()
+		interceptedTx.TransactionCalled = func() data.TransactionHandler { return nil }
+		txData, err := dataValidators.GetTxData(interceptedTx)
+		require.Equal(t, process.ErrNilTransaction, err)
+		require.Nil(t, txData)
+	})
+	t.Run("non nil intercepted tx without data", func(t *testing.T) {
+		expectedData := []byte(nil)
+		interceptedTx := getDefaultInterceptedTx()
+		interceptedTx.TransactionCalled = func() data.TransactionHandler {
+			return &transaction.Transaction{
+				Data: expectedData,
+			}
+		}
+		txData, err := dataValidators.GetTxData(interceptedTx)
+		require.Nil(t, err)
+		require.Equal(t, expectedData, txData)
+	})
+	t.Run("non nil intercepted tx with data", func(t *testing.T) {
+		expectedData := []byte("expected data")
+		interceptedTx := getDefaultInterceptedTx()
+		interceptedTx.TransactionCalled = func() data.TransactionHandler {
+			return &transaction.Transaction{
+				Data: expectedData,
+			}
+		}
+		txData, err := dataValidators.GetTxData(interceptedTx)
+		require.Nil(t, err)
+		require.Equal(t, expectedData, txData)
+	})
+}
+
+// ------- IsInterfaceNil
 
 func TestTxValidator_IsInterfaceNil(t *testing.T) {
 	t.Parallel()
 
-	accounts := getAccAdapter(0, big.NewInt(0))
+	adb := getAccAdapter(0, big.NewInt(0))
 	shardCoordinator := createMockCoordinator("_", 0)
-	txValidator, _ := dataValidators.NewTxValidator(accounts, shardCoordinator, 100)
+	txValidator, _ := dataValidators.NewTxValidator(
+		adb,
+		shardCoordinator,
+		&testscommon.WhiteListHandlerStub{},
+		testscommon.NewPubkeyConverterMock(32),
+		&testscommon.TxVersionCheckerStub{},
+		&enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+		100,
+	)
+	_ = txValidator
 	txValidator = nil
 
 	assert.True(t, check.IfNil(txValidator))
+}
+
+func getDefaultInterceptedTx() *mock.InterceptedTxHandlerStub {
+	return &mock.InterceptedTxHandlerStub{
+		SenderShardIdCalled: func() uint32 {
+			return 0
+		},
+		ReceiverShardIdCalled: func() uint32 {
+			return 1
+		},
+		NonceCalled: func() uint64 {
+			return 0
+		},
+		SenderAddressCalled: func() []byte {
+			return []byte("sender address")
+		},
+		FeeCalled: func() *big.Int {
+			return big.NewInt(100000)
+		},
+		TransactionCalled: func() data.TransactionHandler {
+			return &transaction.Transaction{}
+		},
+	}
 }

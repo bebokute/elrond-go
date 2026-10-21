@@ -7,61 +7,87 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/ElrondNetwork/elrond-go/core"
-	"github.com/ElrondNetwork/elrond-go/core/partitioning"
-	"github.com/ElrondNetwork/elrond-go/data/state"
-	"github.com/ElrondNetwork/elrond-go/data/transaction"
-	"github.com/ElrondNetwork/elrond-go/process/factory"
+	"github.com/multiversx/mx-chain-core-go/core/check"
+	"github.com/multiversx/mx-chain-core-go/core/partitioning"
+	"github.com/multiversx/mx-chain-core-go/data/batch"
+	"github.com/multiversx/mx-chain-core-go/data/transaction"
+	"github.com/multiversx/mx-chain-crypto-go"
+
+	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/process/factory"
+	"github.com/multiversx/mx-chain-go/process/txsSender"
+	"github.com/multiversx/mx-chain-go/state"
 )
 
 const maxGoRoutinesSendMessage = 30
 
-//TODO move this funcs in a new benchmarking/stress-test binary
+var currentSendingGoRoutines = int32(0)
+
+var minTxGasPrice = uint64(100)
+var minTxGasLimit = uint64(1000)
+
+// TODO remove this file and adapt integration tests using GenerateAndSendBulkTransactions
 
 // GenerateAndSendBulkTransactions is a method for generating and propagating a set
 // of transactions to be processed. It is mainly used for demo purposes
-func (n *Node) GenerateAndSendBulkTransactions(receiverHex string, value *big.Int, noOfTxs uint64) error {
-	if atomic.LoadInt32(&n.currentSendingGoRoutines) >= maxGoRoutinesSendMessage {
+func (n *Node) GenerateAndSendBulkTransactions(
+	receiverHex string,
+	value *big.Int,
+	numOfTxs uint64,
+	sk crypto.PrivateKey,
+	whiteList func([]*transaction.Transaction),
+	chainID []byte,
+	minTxVersion uint32,
+) error {
+	if sk == nil {
+		return ErrNilPrivateKey
+	}
+
+	if atomic.LoadInt32(&currentSendingGoRoutines) >= maxGoRoutinesSendMessage {
 		return ErrSystemBusyGeneratingTransactions
 	}
 
-	err := n.generateBulkTransactionsChecks(noOfTxs)
+	err := n.generateBulkTransactionsChecks(numOfTxs)
 	if err != nil {
 		return err
 	}
 
-	newNonce, senderAddressBytes, recvAddressBytes, senderShardId, err := n.generateBulkTransactionsPrepareParams(receiverHex)
+	newNonce, senderAddressBytes, recvAddressBytes, senderShardId, err := n.generateBulkTransactionsPrepareParams(receiverHex, sk)
 	if err != nil {
 		return err
 	}
 
 	wg := sync.WaitGroup{}
-	wg.Add(int(noOfTxs))
+	wg.Add(int(numOfTxs))
 
 	mutTransactions := sync.RWMutex{}
-	transactions := make([][]byte, 0)
+	txsBuff := make([][]byte, 0)
 
 	mutErrFound := sync.Mutex{}
 	var errFound error
 
-	dataPacker, err := partitioning.NewSimpleDataPacker(n.marshalizer)
+	dataPacker, err := partitioning.NewSimpleDataPacker(n.coreComponents.InternalMarshalizer())
 	if err != nil {
 		return err
 	}
 
-	for nonce := newNonce; nonce < newNonce+noOfTxs; nonce++ {
+	txs := make([]*transaction.Transaction, 0)
+	for nonce := newNonce; nonce < newNonce+numOfTxs; nonce++ {
 		go func(crtNonce uint64) {
-			_, signedTxBuff, err := n.generateAndSignSingleTx(
+			tx, txBuff, errGenTx := n.generateAndSignSingleTx(
 				crtNonce,
 				value,
 				recvAddressBytes,
 				senderAddressBytes,
 				"",
+				sk,
+				chainID,
+				minTxVersion,
 			)
 
-			if err != nil {
+			if errGenTx != nil {
 				mutErrFound.Lock()
-				errFound = errors.New(fmt.Sprintf("failure generating transaction %d: %s", crtNonce, err.Error()))
+				errFound = fmt.Errorf("failure generating transaction %d: %s", crtNonce, errGenTx.Error())
 				mutErrFound.Unlock()
 
 				wg.Done()
@@ -69,147 +95,100 @@ func (n *Node) GenerateAndSendBulkTransactions(receiverHex string, value *big.In
 			}
 
 			mutTransactions.Lock()
-			transactions = append(transactions, signedTxBuff)
+			txsBuff = append(txsBuff, txBuff)
+			txs = append(txs, tx)
 			mutTransactions.Unlock()
 			wg.Done()
 		}(nonce)
 	}
 
+	// TODO: might think of a way to stop waiting at a signal
 	wg.Wait()
 
 	if errFound != nil {
 		return errFound
 	}
 
-	if len(transactions) != int(noOfTxs) {
-		return errors.New(fmt.Sprintf("generated only %d from required %d transactions", len(transactions), noOfTxs))
+	if len(txsBuff) != int(numOfTxs) {
+		return fmt.Errorf("generated only %d from required %d transactions", len(txsBuff), numOfTxs)
 	}
 
-	//the topic identifier is made of the current shard id and sender's shard id
-	identifier := factory.TransactionTopic + n.shardCoordinator.CommunicationIdentifier(senderShardId)
+	if whiteList != nil {
+		whiteList(txs)
+	}
 
-	packets, err := dataPacker.PackDataInChunks(transactions, core.MaxBulkTransactionSize)
+	// the topic identifier is made of the current shard id and sender's shard id
+	identifier := factory.TransactionTopic + n.processComponents.ShardCoordinator().CommunicationIdentifier(senderShardId)
+
+	packets, err := dataPacker.PackDataInChunks(txsBuff, common.MaxBulkTransactionSize)
 	if err != nil {
 		return err
 	}
 
-	atomic.AddInt32(&n.currentSendingGoRoutines, int32(len(packets)))
+	atomic.AddInt32(&currentSendingGoRoutines, int32(len(packets)))
 	for _, buff := range packets {
-		go func(bufferToSend []byte) {
-			n.messenger.BroadcastOnChannelBlocking(
-				SendTransactionsPipe,
-				identifier,
-				bufferToSend,
-			)
-
-			atomic.AddInt32(&n.currentSendingGoRoutines, -1)
-		}(buff)
-	}
-
-	return nil
-}
-
-// GenerateAndSendBulkTransactionsOneByOne is a method for generating and propagating a set
-// of transactions to be processed. It is mainly used for demo purposes
-func (n *Node) GenerateAndSendBulkTransactionsOneByOne(receiverHex string, value *big.Int, noOfTx uint64) error {
-	err := n.generateBulkTransactionsChecks(noOfTx)
-	if err != nil {
-		return err
-	}
-
-	newNonce, senderAddressBytes, recvAddressBytes, senderShardId, err := n.generateBulkTransactionsPrepareParams(receiverHex)
-	if err != nil {
-		return err
-	}
-
-	generated := 0
-	identifier := factory.TransactionTopic + n.shardCoordinator.CommunicationIdentifier(senderShardId)
-	for nonce := newNonce; nonce < newNonce+noOfTx; nonce++ {
-		_, signedTxBuff, err := n.generateAndSignTxBuffArray(
-			nonce,
-			value,
-			recvAddressBytes,
-			senderAddressBytes,
-			"",
-		)
-		if err != nil {
-			return err
-		}
-
-		generated++
-
-		n.messenger.BroadcastOnChannel(
-			SendTransactionsPipe,
+		n.networkComponents.NetworkMessenger().BroadcastOnChannel(
+			txsSender.SendTransactionsPipe,
 			identifier,
-			signedTxBuff,
+			buff,
 		)
-	}
 
-	if generated != int(noOfTx) {
-		return errors.New(fmt.Sprintf("generated only %d from required %d transactions", generated, noOfTx))
+		atomic.AddInt32(&currentSendingGoRoutines, -1)
 	}
 
 	return nil
 }
 
-func (n *Node) generateBulkTransactionsChecks(noOfTx uint64) error {
-	if noOfTx == 0 {
+func (n *Node) generateBulkTransactionsChecks(numOfTxs uint64) error {
+	if numOfTxs == 0 {
 		return errors.New("can not generate and broadcast 0 transactions")
 	}
-	if n.txSignPubKey == nil {
-		return ErrNilPublicKey
-	}
-	if n.txSingleSigner == nil {
+	if check.IfNil(n.cryptoComponents.TxSingleSigner()) {
 		return ErrNilSingleSig
 	}
-	if n.addrConverter == nil {
-		return ErrNilAddressConverter
+	if check.IfNil(n.coreComponents.AddressPubKeyConverter()) {
+		return ErrNilPubkeyConverter
 	}
-	if n.shardCoordinator == nil {
+	if check.IfNil(n.processComponents.ShardCoordinator()) {
 		return ErrNilShardCoordinator
 	}
-	if n.accounts == nil {
+	if check.IfNil(n.stateComponents.AccountsAdapterAPI()) {
 		return ErrNilAccountsAdapter
 	}
 
 	return nil
 }
 
-func (n *Node) generateBulkTransactionsPrepareParams(receiverHex string) (uint64, []byte, []byte, uint32, error) {
-	senderAddressBytes, err := n.txSignPubKey.ToByteArray()
+func (n *Node) generateBulkTransactionsPrepareParams(receiverHex string, sk crypto.PrivateKey) (uint64, []byte, []byte, uint32, error) {
+	senderAddressBytes, err := sk.GeneratePublic().ToByteArray()
 	if err != nil {
 		return 0, nil, nil, 0, err
 	}
 
-	senderAddress, err := n.addrConverter.CreateAddressFromPublicKeyBytes(senderAddressBytes)
-	if err != nil {
-		return 0, nil, nil, 0, err
-	}
-
-	receiverAddress, err := n.addrConverter.CreateAddressFromHex(receiverHex)
+	receiverAddress, err := n.coreComponents.AddressPubKeyConverter().Decode(receiverHex)
 	if err != nil {
 		return 0, nil, nil, 0, errors.New("could not create receiver address from provided param: " + err.Error())
 	}
 
-	senderShardId := n.shardCoordinator.ComputeId(senderAddress)
+	senderShardId := n.processComponents.ShardCoordinator().ComputeId(senderAddressBytes)
 
 	newNonce := uint64(0)
-	if senderShardId != n.shardCoordinator.SelfId() {
-		return newNonce, senderAddressBytes, receiverAddress.Bytes(), senderShardId, nil
+	if senderShardId != n.processComponents.ShardCoordinator().SelfId() {
+		return newNonce, senderAddressBytes, receiverAddress, senderShardId, nil
 	}
 
-	senderAccount, err := n.accounts.GetExistingAccount(senderAddress)
+	senderAccount, err := n.stateComponents.AccountsAdapterAPI().GetExistingAccount(senderAddressBytes)
 	if err != nil {
 		return 0, nil, nil, 0, errors.New("could not fetch sender account from provided param: " + err.Error())
 	}
 
-	acc, ok := senderAccount.(*state.Account)
+	acc, ok := senderAccount.(state.UserAccountHandler)
 	if !ok {
 		return 0, nil, nil, 0, errors.New("wrong account type")
 	}
-	newNonce = acc.Nonce
+	newNonce = acc.GetNonce()
 
-	return newNonce, senderAddressBytes, receiverAddress.Bytes(), senderShardId, nil
+	return newNonce, senderAddressBytes, receiverAddress, senderShardId, nil
 }
 
 func (n *Node) generateAndSignSingleTx(
@@ -217,38 +196,45 @@ func (n *Node) generateAndSignSingleTx(
 	value *big.Int,
 	rcvAddrBytes []byte,
 	sndAddrBytes []byte,
-	data string,
+	dataField string,
+	sk crypto.PrivateKey,
+	chainID []byte,
+	minTxVersion uint32,
 ) (*transaction.Transaction, []byte, error) {
-
-	if n.marshalizer == nil {
+	if check.IfNil(n.coreComponents.InternalMarshalizer()) {
 		return nil, nil, ErrNilMarshalizer
 	}
-	if n.txSignPrivKey == nil {
+	if check.IfNil(n.coreComponents.TxMarshalizer()) {
+		return nil, nil, ErrNilMarshalizer
+	}
+	if check.IfNil(sk) {
 		return nil, nil, ErrNilPrivateKey
 	}
 
 	tx := transaction.Transaction{
 		Nonce:    nonce,
-		Value:    value,
-		GasLimit: 100,
-		GasPrice: 10,
+		Value:    new(big.Int).Set(value),
+		GasLimit: minTxGasLimit,
+		GasPrice: minTxGasPrice,
 		RcvAddr:  rcvAddrBytes,
 		SndAddr:  sndAddrBytes,
-		Data:     data,
+		Data:     []byte(dataField),
+		ChainID:  chainID,
+		Version:  minTxVersion,
 	}
 
-	marshalizedTx, err := n.marshalizer.Marshal(&tx)
+	txSigningData, err := tx.GetDataForSigning(n.coreComponents.AddressPubKeyConverter(), n.coreComponents.TxMarshalizer(), n.coreComponents.TxSignHasher())
 	if err != nil {
 		return nil, nil, errors.New("could not marshal transaction")
 	}
 
-	sig, err := n.txSingleSigner.Sign(n.txSignPrivKey, marshalizedTx)
+	sig, err := n.cryptoComponents.TxSingleSigner().Sign(sk, txSigningData)
 	if err != nil {
 		return nil, nil, errors.New("could not sign the transaction")
 	}
 
 	tx.Signature = sig
-	txBuff, err := n.marshalizer.Marshal(&tx)
+	txBuff, err := n.coreComponents.InternalMarshalizer().Marshal(&tx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -262,14 +248,16 @@ func (n *Node) generateAndSignTxBuffArray(
 	rcvAddrBytes []byte,
 	sndAddrBytes []byte,
 	data string,
+	sk crypto.PrivateKey,
+	chainID []byte,
+	minTxVersion uint32,
 ) (*transaction.Transaction, []byte, error) {
-
-	tx, txBuff, err := n.generateAndSignSingleTx(nonce, value, rcvAddrBytes, sndAddrBytes, data)
+	tx, txBuff, err := n.generateAndSignSingleTx(nonce, value, rcvAddrBytes, sndAddrBytes, data, sk, chainID, minTxVersion)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	signedMarshalizedTx, err := n.marshalizer.Marshal([][]byte{txBuff})
+	signedMarshalizedTx, err := n.coreComponents.InternalMarshalizer().Marshal(&batch.Batch{Data: [][]byte{txBuff}})
 	if err != nil {
 		return nil, nil, errors.New("could not marshal signed transaction")
 	}
@@ -277,44 +265,48 @@ func (n *Node) generateAndSignTxBuffArray(
 	return tx, signedMarshalizedTx, nil
 }
 
-//GenerateTransaction generates a new transaction with sender, receiver, amount and code
-func (n *Node) GenerateTransaction(senderHex string, receiverHex string, value *big.Int, transactionData string) (*transaction.Transaction, error) {
-	if n.addrConverter == nil || n.addrConverter.IsInterfaceNil() {
-		return nil, ErrNilAddressConverter
+// GenerateTransaction generates a new transaction with sender, receiver, amount and code
+func (n *Node) GenerateTransaction(senderHex string, receiverHex string, value *big.Int, transactionData string, privateKey crypto.PrivateKey, chainID []byte, minTxVersion uint32) (*transaction.Transaction, error) {
+	if check.IfNil(n.coreComponents.AddressPubKeyConverter()) {
+		return nil, ErrNilPubkeyConverter
 	}
-	if n.accounts == nil || n.accounts.IsInterfaceNil() {
+	if check.IfNil(n.stateComponents.AccountsAdapterAPI()) {
 		return nil, ErrNilAccountsAdapter
 	}
-	if n.txSignPrivKey == nil {
+	if check.IfNil(privateKey) {
 		return nil, errors.New("initialize PrivateKey first")
 	}
 
-	receiverAddress, err := n.addrConverter.CreateAddressFromHex(receiverHex)
+	receiverAddress, err := n.coreComponents.AddressPubKeyConverter().Decode(receiverHex)
 	if err != nil {
 		return nil, errors.New("could not create receiver address from provided param")
 	}
-	senderAddress, err := n.addrConverter.CreateAddressFromHex(senderHex)
+	senderAddress, err := n.coreComponents.AddressPubKeyConverter().Decode(senderHex)
 	if err != nil {
 		return nil, errors.New("could not create sender address from provided param")
 	}
-	senderAccount, err := n.accounts.GetExistingAccount(senderAddress)
+	senderAccount, err := n.stateComponents.AccountsAdapterAPI().GetExistingAccount(senderAddress)
 	if err != nil {
 		return nil, errors.New("could not fetch sender address from provided param")
 	}
 
 	newNonce := uint64(0)
-	acc, ok := senderAccount.(*state.Account)
+	acc, ok := senderAccount.(state.UserAccountHandler)
 	if !ok {
 		return nil, errors.New("wrong account type")
 	}
-	newNonce = acc.Nonce
+	newNonce = acc.GetNonce()
 
 	tx, _, err := n.generateAndSignTxBuffArray(
 		newNonce,
 		value,
-		receiverAddress.Bytes(),
-		senderAddress.Bytes(),
-		transactionData)
+		receiverAddress,
+		senderAddress,
+		transactionData,
+		privateKey,
+		chainID,
+		minTxVersion,
+	)
 
 	return tx, err
 }

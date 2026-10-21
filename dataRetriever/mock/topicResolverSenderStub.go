@@ -1,36 +1,59 @@
 package mock
 
 import (
-	"github.com/ElrondNetwork/elrond-go/dataRetriever"
-	"github.com/ElrondNetwork/elrond-go/p2p"
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/core/check"
+	"github.com/multiversx/mx-chain-go/dataRetriever"
+	"github.com/multiversx/mx-chain-go/p2p"
 )
 
+// TopicResolverSenderStub -
 type TopicResolverSenderStub struct {
-	SendOnRequestTopicCalled func(rd *dataRetriever.RequestData) error
-	SendCalled               func(buff []byte, peer p2p.PeerID) error
-	TargetShardIDCalled      func() uint32
+	SendCalled          func(buff []byte, peer core.PeerID, source p2p.MessageHandler) error
+	TargetShardIDCalled func() uint32
+	debugHandler        dataRetriever.DebugHandler
 }
 
-func (trss *TopicResolverSenderStub) TopicRequestSuffix() string {
-	return "_REQUEST"
+// RequestTopic -
+func (trss *TopicResolverSenderStub) RequestTopic() string {
+	return "topic_REQUEST"
 }
 
-func (trss *TopicResolverSenderStub) SendOnRequestTopic(rd *dataRetriever.RequestData) error {
-	return trss.SendOnRequestTopicCalled(rd)
+// Send -
+func (trss *TopicResolverSenderStub) Send(buff []byte, peer core.PeerID, source p2p.MessageHandler) error {
+	if trss.SendCalled != nil {
+		return trss.SendCalled(buff, peer, source)
+	}
+
+	return nil
 }
 
-func (trss *TopicResolverSenderStub) Send(buff []byte, peer p2p.PeerID) error {
-	return trss.SendCalled(buff, peer)
-}
-
+// TargetShardID -
 func (trss *TopicResolverSenderStub) TargetShardID() uint32 {
-	return trss.TargetShardIDCalled()
+	if trss.TargetShardIDCalled != nil {
+		return trss.TargetShardIDCalled()
+	}
+
+	return 0
+}
+
+// DebugHandler -
+func (trss *TopicResolverSenderStub) DebugHandler() dataRetriever.DebugHandler {
+	if check.IfNil(trss.debugHandler) {
+		return &DebugHandler{}
+	}
+
+	return trss.debugHandler
+}
+
+// SetDebugHandler -
+func (trss *TopicResolverSenderStub) SetDebugHandler(handler dataRetriever.DebugHandler) error {
+	trss.debugHandler = handler
+
+	return nil
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (trss *TopicResolverSenderStub) IsInterfaceNil() bool {
-	if trss == nil {
-		return true
-	}
-	return false
+	return trss == nil
 }

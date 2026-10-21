@@ -1,27 +1,35 @@
 package mock
 
+import (
+	"github.com/multiversx/mx-chain-core-go/core"
+)
+
+// BlockSizeThrottlerStub -
 type BlockSizeThrottlerStub struct {
-	MaxItemsToAddCalled   func() uint32
-	AddCalled             func(round uint64, items uint32)
-	SucceedCalled         func(round uint64)
-	ComputeMaxItemsCalled func()
+	GetCurrentMaxSizeCalled     func() uint32
+	AddCalled                   func(round uint64, size uint32)
+	SucceedCalled               func(round uint64)
+	ComputeCurrentMaxSizeCalled func()
 }
 
-func (bsts *BlockSizeThrottlerStub) MaxItemsToAdd() uint32 {
-	if bsts.MaxItemsToAddCalled != nil {
-		return bsts.MaxItemsToAddCalled()
+// GetCurrentMaxSize -
+func (bsts *BlockSizeThrottlerStub) GetCurrentMaxSize() uint32 {
+	if bsts.GetCurrentMaxSizeCalled != nil {
+		return bsts.GetCurrentMaxSizeCalled()
 	}
 
-	return 15000
+	return uint32(core.MegabyteSize * 90 / 100)
 }
 
-func (bsts *BlockSizeThrottlerStub) Add(round uint64, items uint32) {
+// Add -
+func (bsts *BlockSizeThrottlerStub) Add(round uint64, size uint32) {
 	if bsts.AddCalled != nil {
-		bsts.AddCalled(round, items)
+		bsts.AddCalled(round, size)
 		return
 	}
 }
 
+// Succeed -
 func (bsts *BlockSizeThrottlerStub) Succeed(round uint64) {
 	if bsts.SucceedCalled != nil {
 		bsts.SucceedCalled(round)
@@ -29,17 +37,15 @@ func (bsts *BlockSizeThrottlerStub) Succeed(round uint64) {
 	}
 }
 
-func (bsts *BlockSizeThrottlerStub) ComputeMaxItems() {
-	if bsts.ComputeMaxItemsCalled != nil {
-		bsts.ComputeMaxItemsCalled()
+// ComputeCurrentMaxSize -
+func (bsts *BlockSizeThrottlerStub) ComputeCurrentMaxSize() {
+	if bsts.ComputeCurrentMaxSizeCalled != nil {
+		bsts.ComputeCurrentMaxSizeCalled()
 		return
 	}
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (bsts *BlockSizeThrottlerStub) IsInterfaceNil() bool {
-	if bsts == nil {
-		return true
-	}
-	return false
+	return bsts == nil
 }

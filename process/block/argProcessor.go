@@ -1,46 +1,136 @@
 package block
 
 import (
-	"github.com/ElrondNetwork/elrond-go/core/serviceContainer"
-	"github.com/ElrondNetwork/elrond-go/data"
-	"github.com/ElrondNetwork/elrond-go/data/state"
-	"github.com/ElrondNetwork/elrond-go/data/typeConverters"
-	"github.com/ElrondNetwork/elrond-go/dataRetriever"
-	"github.com/ElrondNetwork/elrond-go/hashing"
-	"github.com/ElrondNetwork/elrond-go/marshal"
-	"github.com/ElrondNetwork/elrond-go/process"
-	"github.com/ElrondNetwork/elrond-go/sharding"
+	"sync/atomic"
+
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/data"
+	"github.com/multiversx/mx-chain-core-go/data/typeConverters"
+	"github.com/multiversx/mx-chain-core-go/hashing"
+	"github.com/multiversx/mx-chain-core-go/marshal"
+
+	nodeFactory "github.com/multiversx/mx-chain-go/cmd/node/factory"
+	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/config"
+	"github.com/multiversx/mx-chain-go/consensus"
+	"github.com/multiversx/mx-chain-go/dataRetriever"
+	"github.com/multiversx/mx-chain-go/dblookupext"
+	"github.com/multiversx/mx-chain-go/outport"
+	"github.com/multiversx/mx-chain-go/process"
+	"github.com/multiversx/mx-chain-go/process/block/cutoff"
+	"github.com/multiversx/mx-chain-go/sharding"
+	"github.com/multiversx/mx-chain-go/sharding/nodesCoordinator"
+	"github.com/multiversx/mx-chain-go/state"
 )
+
+type coreComponentsHolder interface {
+	Hasher() hashing.Hasher
+	InternalMarshalizer() marshal.Marshalizer
+	Uint64ByteSliceConverter() typeConverters.Uint64ByteSliceConverter
+	EpochNotifier() process.EpochNotifier
+	EnableEpochsHandler() common.EnableEpochsHandler
+	RoundNotifier() process.RoundNotifier
+	EnableRoundsHandler() common.EnableRoundsHandler
+	EpochChangeGracePeriodHandler() common.EpochChangeGracePeriodHandler
+	ProcessConfigsHandler() common.ProcessConfigsHandler
+	RoundHandler() consensus.RoundHandler
+	EconomicsData() process.EconomicsDataHandler
+	ProcessStatusHandler() common.ProcessStatusHandler
+	ClosingNodeStarted() *atomic.Bool
+	IsInterfaceNil() bool
+}
+
+type dataComponentsHolder interface {
+	StorageService() dataRetriever.StorageService
+	Datapool() dataRetriever.PoolsHolder
+	Blockchain() data.ChainHandler
+	IsInterfaceNil() bool
+}
+
+type bootstrapComponentsHolder interface {
+	ShardCoordinator() sharding.Coordinator
+	VersionedHeaderFactory() nodeFactory.VersionedHeaderFactory
+	HeaderIntegrityVerifier() nodeFactory.HeaderIntegrityVerifierHandler
+	IsInterfaceNil() bool
+}
+
+type statusComponentsHolder interface {
+	OutportHandler() outport.OutportHandler
+	IsInterfaceNil() bool
+}
+
+type statusCoreComponentsHolder interface {
+	AppStatusHandler() core.AppStatusHandler
+	IsInterfaceNil() bool
+}
 
 // ArgBaseProcessor holds all dependencies required by the process data factory in order to create
 // new instances
 type ArgBaseProcessor struct {
-	Accounts              state.AccountsAdapter
-	ForkDetector          process.ForkDetector
-	Hasher                hashing.Hasher
-	Marshalizer           marshal.Marshalizer
-	Store                 dataRetriever.StorageService
-	ShardCoordinator      sharding.Coordinator
-	NodesCoordinator      sharding.NodesCoordinator
-	SpecialAddressHandler process.SpecialAddressHandler
-	Uint64Converter       typeConverters.Uint64ByteSliceConverter
-	StartHeaders          map[uint32]data.HeaderHandler
-	RequestHandler        process.RequestHandler
-	Core                  serviceContainer.Core
+	CoreComponents       coreComponentsHolder
+	DataComponents       dataComponentsHolder
+	BootstrapComponents  bootstrapComponentsHolder
+	StatusComponents     statusComponentsHolder
+	StatusCoreComponents statusCoreComponentsHolder
+
+	Config                             config.Config
+	PrefsConfig                        config.Preferences
+	AccountsDB                         map[state.AccountsDbIdentifier]state.AccountsAdapter
+	AccountsProposal                   state.AccountsAdapter
+	ForkDetector                       process.ForkDetector
+	NodesCoordinator                   nodesCoordinator.NodesCoordinator
+	FeeHandler                         process.TransactionFeeHandler
+	RequestHandler                     process.RequestHandler
+	BlockChainHook                     process.BlockChainHookHandler
+	TxCoordinator                      process.TransactionCoordinator
+	EpochStartTrigger                  process.EpochStartTriggerHandler
+	HeaderValidator                    process.HeaderConstructionValidator
+	BootStorer                         process.BootStorer
+	BlockTracker                       process.BlockTracker
+	BlockSizeThrottler                 process.BlockSizeThrottler
+	Version                            string
+	HistoryRepository                  dblookupext.HistoryRepository
+	VMContainersFactory                process.VirtualMachinesContainerFactory
+	VmContainer                        process.VirtualMachinesContainer
+	GasHandler                         gasConsumedProvider
+	OutportDataProvider                outport.DataProviderOutport
+	ScheduledTxsExecutionHandler       process.ScheduledTxsExecutionHandler
+	ScheduledMiniBlocksEnableEpoch     uint32
+	ProcessedMiniBlocksTracker         process.ProcessedMiniBlocksTracker
+	ReceiptsRepository                 receiptsRepository
+	BlockProcessingCutoffHandler       cutoff.BlockProcessingCutoffHandler
+	ManagedPeersHolder                 common.ManagedPeersHolder
+	SentSignaturesTracker              process.SentSignaturesTracker
+	StateAccessesCollector             state.StateAccessesCollector
+	MiniBlockTracker                   process.MiniBlockTracker
+	HeadersForBlock                    HeadersForBlock
+	ExecutionResultsInclusionEstimator process.InclusionEstimator
+	MiniBlocksSelectionSession         MiniBlocksSelectionSession
+	ExecutionResultsVerifier           ExecutionResultsVerifier
+	MissingDataResolver                MissingDataResolver
+	GasComputation                     process.GasComputation
+	ExecutionManager                   process.ExecutionManager
+	TxExecutionOrderHandler            common.TxExecutionOrderHandler
+	AOTSelector                        process.AOTTransactionSelector
 }
 
 // ArgShardProcessor holds all dependencies required by the process data factory in order to create
 // new instances of shard processor
 type ArgShardProcessor struct {
 	ArgBaseProcessor
-	DataPool        dataRetriever.PoolsHolder
-	TxCoordinator   process.TransactionCoordinator
-	TxsPoolsCleaner process.PoolsCleaner
 }
 
 // ArgMetaProcessor holds all dependencies required by the process data factory in order to create
 // new instances of meta processor
 type ArgMetaProcessor struct {
 	ArgBaseProcessor
-	DataPool dataRetriever.MetaPoolsHolder
+	PendingMiniBlocksHandler     process.PendingMiniBlocksHandler
+	SCToProtocol                 process.SmartContractToProtocolHandler
+	EpochStartDataCreator        process.EpochStartDataCreator
+	EpochEconomics               process.EndOfEpochEconomics
+	EpochRewardsCreator          process.RewardsCreator
+	EpochValidatorInfoCreator    process.EpochStartValidatorInfoCreator
+	EpochSystemSCProcessor       process.EpochStartSystemSCProcessor
+	ValidatorStatisticsProcessor process.ValidatorStatisticsProcessor
+	ShardInfoCreator             process.ShardInfoCreator
 }

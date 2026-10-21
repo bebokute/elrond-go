@@ -1,19 +1,26 @@
 package containers
 
 import (
-	"github.com/ElrondNetwork/elrond-go/process"
-	"github.com/cornelk/hashmap"
+	"fmt"
+
+	"github.com/multiversx/mx-chain-core-go/core/check"
+	"github.com/multiversx/mx-chain-core-go/core/container"
+	"github.com/multiversx/mx-chain-go/process"
+	logger "github.com/multiversx/mx-chain-logger-go"
 )
+
+var _ process.InterceptorsContainer = (*interceptorsContainer)(nil)
+var log = logger.GetOrCreate("process/factory/containers")
 
 // interceptorsContainer is an interceptors holder organized by type
 type interceptorsContainer struct {
-	objects *hashmap.HashMap
+	objects *container.MutexMap
 }
 
 // NewInterceptorsContainer will create a new instance of a container
 func NewInterceptorsContainer() *interceptorsContainer {
 	return &interceptorsContainer{
-		objects: &hashmap.HashMap{},
+		objects: container.NewMutexMap(),
 	}
 }
 
@@ -22,7 +29,7 @@ func NewInterceptorsContainer() *interceptorsContainer {
 func (ic *interceptorsContainer) Get(key string) (process.Interceptor, error) {
 	value, ok := ic.objects.Get(key)
 	if !ok {
-		return nil, process.ErrInvalidContainerKey
+		return nil, fmt.Errorf("%w in interceptors container for key %v", process.ErrInvalidContainerKey, key)
 	}
 
 	interceptor, ok := value.(process.Interceptor)
@@ -36,12 +43,11 @@ func (ic *interceptorsContainer) Get(key string) (process.Interceptor, error) {
 // Add will add an object at a given key. Returns
 // an error if the element already exists
 func (ic *interceptorsContainer) Add(key string, interceptor process.Interceptor) error {
-	if interceptor == nil || interceptor.IsInterfaceNil() {
+	if check.IfNil(interceptor) {
 		return process.ErrNilContainerElement
 	}
 
 	ok := ic.objects.Insert(key, interceptor)
-
 	if !ok {
 		return process.ErrContainerKeyAlreadyExists
 	}
@@ -57,6 +63,10 @@ func (ic *interceptorsContainer) AddMultiple(keys []string, interceptors []proce
 	}
 
 	for idx, key := range keys {
+		if len(key) == 0 {
+			continue
+		}
+
 		err := ic.Add(key, interceptors[idx])
 		if err != nil {
 			return err
@@ -68,7 +78,7 @@ func (ic *interceptorsContainer) AddMultiple(keys []string, interceptors []proce
 
 // Replace will add (or replace if it already exists) an object at a given key
 func (ic *interceptorsContainer) Replace(key string, interceptor process.Interceptor) error {
-	if interceptor == nil || interceptor.IsInterfaceNil() {
+	if check.IfNil(interceptor) {
 		return process.ErrNilContainerElement
 	}
 
@@ -78,7 +88,7 @@ func (ic *interceptorsContainer) Replace(key string, interceptor process.Interce
 
 // Remove will remove an object at a given key
 func (ic *interceptorsContainer) Remove(key string) {
-	ic.objects.Del(key)
+	ic.objects.Remove(key)
 }
 
 // Len returns the length of the added objects
@@ -86,10 +96,53 @@ func (ic *interceptorsContainer) Len() int {
 	return ic.objects.Len()
 }
 
+// Iterate will call the provided handler for each and every key-value pair
+func (ic *interceptorsContainer) Iterate(handler func(key string, interceptor process.Interceptor) bool) {
+	if handler == nil {
+		return
+	}
+
+	for _, keyVal := range ic.objects.Keys() {
+		key, ok := keyVal.(string)
+		if !ok {
+			continue
+		}
+
+		val, ok := ic.objects.Get(key)
+		if !ok {
+			continue
+		}
+
+		interceptor, ok := val.(process.Interceptor)
+		if !ok {
+			continue
+		}
+
+		shouldContinue := handler(key, interceptor)
+		if !shouldContinue {
+			return
+		}
+	}
+}
+
+// Close will call the close method on all contained interceptors
+func (ic *interceptorsContainer) Close() error {
+	var errFound error
+	ic.Iterate(func(key string, interceptor process.Interceptor) bool {
+		log.Debug("interceptorsContainer closing interceptor", "key", key)
+		err := interceptor.Close()
+		if err != nil {
+			log.Error("error closing interceptor", "key", key, "error", err)
+			errFound = err
+		}
+
+		return true
+	})
+
+	return errFound
+}
+
 // IsInterfaceNil returns true if there is no value under the interface
 func (ic *interceptorsContainer) IsInterfaceNil() bool {
-	if ic == nil {
-		return true
-	}
-	return false
+	return ic == nil
 }

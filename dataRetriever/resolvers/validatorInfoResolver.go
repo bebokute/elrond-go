@@ -1,0 +1,246 @@
+package resolvers
+
+import (
+	"fmt"
+	"runtime/debug"
+
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/core/check"
+	"github.com/multiversx/mx-chain-core-go/data/batch"
+	"github.com/multiversx/mx-chain-core-go/marshal"
+	logger "github.com/multiversx/mx-chain-logger-go"
+
+	"github.com/multiversx/mx-chain-go/dataRetriever"
+	"github.com/multiversx/mx-chain-go/p2p"
+	"github.com/multiversx/mx-chain-go/storage"
+)
+
+// maxBuffToSendValidatorsInfo represents max buffer size to send in bytes
+const maxBuffToSendValidatorsInfo = 1 << 18 // 256KB
+
+// ArgValidatorInfoResolver is the argument structure used to create a new validator info resolver instance
+type ArgValidatorInfoResolver struct {
+	SenderResolver       dataRetriever.TopicResolverSender
+	Marshaller           marshal.Marshalizer
+	AntifloodHandler     dataRetriever.P2PAntifloodHandler
+	Throttler            dataRetriever.ResolverThrottler
+	ValidatorInfoPool    dataRetriever.ShardedDataCacherNotifier
+	ValidatorInfoStorage storage.Storer
+	DataPacker           dataRetriever.DataPacker
+	IsFullHistoryNode    bool
+}
+
+// validatorInfoResolver is a wrapper over Resolver that is specialized in resolving validator info requests
+type validatorInfoResolver struct {
+	dataRetriever.TopicResolverSender
+	messageProcessor
+	baseStorageResolver
+	validatorInfoPool    dataRetriever.ShardedDataCacherNotifier
+	validatorInfoStorage storage.Storer
+	dataPacker           dataRetriever.DataPacker
+}
+
+// NewValidatorInfoResolver creates a validator info resolver
+func NewValidatorInfoResolver(args ArgValidatorInfoResolver) (*validatorInfoResolver, error) {
+	err := checkArgs(args)
+	if err != nil {
+		return nil, err
+	}
+
+	return &validatorInfoResolver{
+		TopicResolverSender: args.SenderResolver,
+		messageProcessor: messageProcessor{
+			marshalizer:      args.Marshaller,
+			antifloodHandler: args.AntifloodHandler,
+			throttler:        args.Throttler,
+			topic:            args.SenderResolver.RequestTopic(),
+		},
+		baseStorageResolver:  createBaseStorageResolver(args.ValidatorInfoStorage, args.IsFullHistoryNode),
+		validatorInfoPool:    args.ValidatorInfoPool,
+		validatorInfoStorage: args.ValidatorInfoStorage,
+		dataPacker:           args.DataPacker,
+	}, nil
+}
+
+func checkArgs(args ArgValidatorInfoResolver) error {
+	if check.IfNil(args.SenderResolver) {
+		return dataRetriever.ErrNilResolverSender
+	}
+	if check.IfNil(args.Marshaller) {
+		return dataRetriever.ErrNilMarshalizer
+	}
+	if check.IfNil(args.AntifloodHandler) {
+		return dataRetriever.ErrNilAntifloodHandler
+	}
+	if check.IfNil(args.Throttler) {
+		return dataRetriever.ErrNilThrottler
+	}
+	if check.IfNil(args.ValidatorInfoPool) {
+		return dataRetriever.ErrNilValidatorInfoPool
+	}
+	if check.IfNil(args.ValidatorInfoStorage) {
+		return dataRetriever.ErrNilValidatorInfoStorage
+	}
+	if check.IfNil(args.DataPacker) {
+		return dataRetriever.ErrNilDataPacker
+	}
+
+	return nil
+}
+
+// ProcessReceivedMessage represents the callback func from the p2p.Messenger that is called each time a new message is received
+// (for the topic this validator was registered to, usually a request topic)
+func (res *validatorInfoResolver) ProcessReceivedMessage(message p2p.MessageP2P, fromConnectedPeer core.PeerID, source p2p.MessageHandler) (msg []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			logTrieNodes.Error("panic recovered", "peer", fromConnectedPeer, "panic", r, "stack", string(debug.Stack()))
+			err = fmt.Errorf("panic in validatorInfoResolver.ProcessReceivedMessage: %v", r)
+		}
+	}()
+
+	err = res.canProcessMessage(message, fromConnectedPeer)
+	if err != nil {
+		return nil, err
+	}
+
+	res.throttler.StartProcessing()
+	defer res.throttler.EndProcessing()
+
+	rd, err := res.parseReceivedMessage(message, fromConnectedPeer)
+	if err != nil {
+		return nil, err
+	}
+
+	switch rd.Type {
+	case dataRetriever.HashType:
+		err = validateRequestedHashSize(rd.Value)
+		if err != nil {
+			return nil, err
+		}
+		err = res.resolveHashRequest(rd.Value, rd.Epoch, fromConnectedPeer, source)
+	case dataRetriever.HashArrayType:
+		err = res.resolveMultipleHashesRequest(rd.Value, rd.Epoch, fromConnectedPeer, source, message.SeqNo())
+	default:
+		err = fmt.Errorf("%w for value %s", dataRetriever.ErrRequestTypeNotImplemented, logger.DisplayByteSlice(rd.Value))
+	}
+
+	if err != nil {
+		return nil, err
+	}
+	return []byte{}, nil
+}
+
+// resolveHashRequest sends the response for a hash request
+func (res *validatorInfoResolver) resolveHashRequest(hash []byte, epoch uint32, pid core.PeerID, source p2p.MessageHandler) error {
+	data, err := res.fetchValidatorInfoByteSlice(hash, epoch)
+	if err != nil {
+		return err
+	}
+
+	return res.marshalAndSend(data, pid, source)
+}
+
+// resolveMultipleHashesRequest sends the response for a hash array type request
+func (res *validatorInfoResolver) resolveMultipleHashesRequest(
+	hashesBuff []byte,
+	epoch uint32,
+	pid core.PeerID,
+	source p2p.MessageHandler,
+	sequence []byte,
+) error {
+	hashes, err := res.parseRequestedHashesWithPartialResponse(hashesBuff, pid, sequence)
+	if err != nil {
+		return err
+	}
+	err = validateRequestedHashesSize(hashes)
+	if err != nil {
+		return err
+	}
+
+	validatorInfoForHashes, err := res.fetchValidatorInfoForHashes(hashes, epoch)
+	if err != nil {
+		return fmt.Errorf("resolveMultipleHashesRequest error %w for %d hashes", err, len(hashes))
+	}
+
+	return res.sendValidatorInfoForHashes(validatorInfoForHashes, pid, source)
+}
+
+func (res *validatorInfoResolver) sendValidatorInfoForHashes(validatorInfoForHashes [][]byte, pid core.PeerID, source p2p.MessageHandler) error {
+	buffsToSend, err := res.dataPacker.PackDataInChunks(validatorInfoForHashes, maxBuffToSendValidatorsInfo)
+	if err != nil {
+		return err
+	}
+
+	for _, buff := range buffsToSend {
+		err = res.Send(buff, pid, source)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (res *validatorInfoResolver) fetchValidatorInfoForHashes(hashes [][]byte, epoch uint32) ([][]byte, error) {
+	reply := newHashArrayReply()
+	for _, hash := range hashes {
+		validatorInfoForHash, _ := res.fetchValidatorInfoByteSlice(hash, epoch)
+		if validatorInfoForHash != nil && !reply.add(validatorInfoForHash) {
+			break
+		}
+	}
+
+	if len(reply.data) == 0 {
+		return nil, dataRetriever.ErrValidatorInfoNotFound
+	}
+
+	return reply.data, nil
+}
+
+func (res *validatorInfoResolver) fetchValidatorInfoByteSlice(hash []byte, epoch uint32) ([]byte, error) {
+	data, ok := res.validatorInfoPool.SearchFirstData(hash)
+	if ok {
+		return res.marshalizer.Marshal(data)
+	}
+
+	buff, err := res.getFromStorage(hash, epoch)
+	if err != nil {
+		res.DebugHandler().LogFailedToResolveData(
+			res.topic,
+			hash,
+			err,
+		)
+		return nil, err
+	}
+
+	res.DebugHandler().LogSucceededToResolveData(res.topic, hash)
+
+	return buff, nil
+}
+
+func (res *validatorInfoResolver) marshalAndSend(data []byte, pid core.PeerID, source p2p.MessageHandler) error {
+	b := &batch.Batch{
+		Data: [][]byte{data},
+	}
+	buff, err := res.marshalizer.Marshal(b)
+	if err != nil {
+		return err
+	}
+
+	return res.Send(buff, pid, source)
+}
+
+// SetDebugHandler sets a debug handler
+func (res *validatorInfoResolver) SetDebugHandler(handler dataRetriever.DebugHandler) error {
+	return res.TopicResolverSender.SetDebugHandler(handler)
+}
+
+// Close returns nil
+func (res *validatorInfoResolver) Close() error {
+	return nil
+}
+
+// IsInterfaceNil returns true if there is no value under the interface
+func (res *validatorInfoResolver) IsInterfaceNil() bool {
+	return res == nil
+}

@@ -1,31 +1,52 @@
 package mock
 
 import (
-	"github.com/ElrondNetwork/elrond-go/p2p"
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-go/p2p"
 )
 
+// TopicHandlerStub -
 type TopicHandlerStub struct {
 	HasTopicCalled                 func(name string) bool
 	CreateTopicCalled              func(name string, createChannelForTopic bool) error
-	RegisterMessageProcessorCalled func(topic string, handler p2p.MessageProcessor) error
+	RegisterMessageProcessorCalled func(topic string, identifier string, handler p2p.MessageProcessor) error
+	IDCalled                       func() core.PeerID
 }
 
-func (ths *TopicHandlerStub) HasTopic(name string) bool {
-	return ths.HasTopicCalled(name)
+// HasTopic -
+func (stub *TopicHandlerStub) HasTopic(name string) bool {
+	if stub.HasTopicCalled != nil {
+		return stub.HasTopicCalled(name)
+	}
+	return false
 }
 
-func (ths *TopicHandlerStub) CreateTopic(name string, createChannelForTopic bool) error {
-	return ths.CreateTopicCalled(name, createChannelForTopic)
+// CreateTopic -
+func (stub *TopicHandlerStub) CreateTopic(name string, createChannelForTopic bool) error {
+	if stub.CreateTopicCalled != nil {
+		return stub.CreateTopicCalled(name, createChannelForTopic)
+	}
+	return nil
 }
 
-func (ths *TopicHandlerStub) RegisterMessageProcessor(topic string, handler p2p.MessageProcessor) error {
-	return ths.RegisterMessageProcessorCalled(topic, handler)
+// RegisterMessageProcessor -
+func (stub *TopicHandlerStub) RegisterMessageProcessor(topic string, identifier string, handler p2p.MessageProcessor) error {
+	if stub.RegisterMessageProcessorCalled != nil {
+		return stub.RegisterMessageProcessorCalled(topic, identifier, handler)
+	}
+	return nil
+}
+
+// ID -
+func (stub *TopicHandlerStub) ID() core.PeerID {
+	if stub.IDCalled != nil {
+		return stub.IDCalled()
+	}
+
+	return "peer ID"
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
-func (ths *TopicHandlerStub) IsInterfaceNil() bool {
-	if ths == nil {
-		return true
-	}
-	return false
+func (stub *TopicHandlerStub) IsInterfaceNil() bool {
+	return stub == nil
 }

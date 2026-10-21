@@ -1,51 +1,113 @@
 package spos
 
+import (
+	"github.com/multiversx/mx-chain-core-go/core/check"
+)
+
 // ValidateConsensusCore checks for nil all the container objects
 func ValidateConsensusCore(container ConsensusCoreHandler) error {
-	if container == nil || container.IsInterfaceNil() {
+	if check.IfNil(container) {
 		return ErrNilConsensusCore
 	}
-	if container.Blockchain() == nil || container.Blockchain().IsInterfaceNil() {
+	if check.IfNil(container.Blockchain()) {
 		return ErrNilBlockChain
 	}
-	if container.BlockProcessor() == nil || container.BlockProcessor().IsInterfaceNil() {
+	if check.IfNil(container.BlockProcessor()) {
 		return ErrNilBlockProcessor
 	}
-	if container.BootStrapper() == nil || container.BootStrapper().IsInterfaceNil() {
+	if check.IfNil(container.ExecutionManager()) {
+		return ErrNilExecutionManager
+	}
+	if check.IfNil(container.BootStrapper()) {
 		return ErrNilBootstrapper
 	}
-	if container.BroadcastMessenger() == nil || container.BroadcastMessenger().IsInterfaceNil() {
+	if check.IfNil(container.BroadcastMessenger()) {
 		return ErrNilBroadcastMessenger
 	}
-	if container.Chronology() == nil || container.Chronology().IsInterfaceNil() {
+	if check.IfNil(container.Chronology()) {
 		return ErrNilChronologyHandler
 	}
-	if container.Hasher() == nil || container.Hasher().IsInterfaceNil() {
+	if check.IfNil(container.Hasher()) {
 		return ErrNilHasher
 	}
-	if container.Marshalizer() == nil || container.Marshalizer().IsInterfaceNil() {
+	if check.IfNil(container.Marshalizer()) {
 		return ErrNilMarshalizer
 	}
-	if container.MultiSigner() == nil || container.MultiSigner().IsInterfaceNil() {
+	if check.IfNil(container.MultiSignerContainer()) {
+		return ErrNilMultiSignerContainer
+	}
+	multiSigner, _ := container.MultiSignerContainer().GetMultiSigner(0)
+	if check.IfNil(multiSigner) {
 		return ErrNilMultiSigner
 	}
-	if container.Rounder() == nil || container.Rounder().IsInterfaceNil() {
-		return ErrNilRounder
+	if check.IfNil(container.RoundHandler()) {
+		return ErrNilRoundHandler
 	}
-	if container.ShardCoordinator() == nil || container.ShardCoordinator().IsInterfaceNil() {
+	if check.IfNil(container.ShardCoordinator()) {
 		return ErrNilShardCoordinator
 	}
-	if container.SyncTimer() == nil || container.SyncTimer().IsInterfaceNil() {
+	if check.IfNil(container.SyncTimer()) {
 		return ErrNilSyncTimer
 	}
-	if container.NodesCoordinator() == nil || container.NodesCoordinator().IsInterfaceNil() {
-		return ErrNilValidatorGroupSelector
+	if check.IfNil(container.NodesCoordinator()) {
+		return ErrNilNodesCoordinator
 	}
-	if container.RandomnessPrivateKey() == nil || container.RandomnessPrivateKey().IsInterfaceNil() {
-		return ErrNilBlsPrivateKey
+	if check.IfNil(container.GetAntiFloodHandler()) {
+		return ErrNilAntifloodHandler
 	}
-	if container.RandomnessSingleSigner() == nil || container.RandomnessSingleSigner().IsInterfaceNil() {
-		return ErrNilBlsSingleSigner
+	if check.IfNil(container.PeerHonestyHandler()) {
+		return ErrNilPeerHonestyHandler
+	}
+	if check.IfNil(container.HeaderSigVerifier()) {
+		return ErrNilHeaderSigVerifier
+	}
+	if check.IfNil(container.FallbackHeaderValidator()) {
+		return ErrNilFallbackHeaderValidator
+	}
+	if check.IfNil(container.NodeRedundancyHandler()) {
+		return ErrNilNodeRedundancyHandler
+	}
+	if check.IfNil(container.ScheduledProcessor()) {
+		return ErrNilScheduledProcessor
+	}
+	if check.IfNil(container.MessageSigningHandler()) {
+		return ErrNilMessageSigningHandler
+	}
+	if check.IfNil(container.PeerBlacklistHandler()) {
+		return ErrNilPeerBlacklistHandler
+	}
+	if check.IfNil(container.PeerSignatureHandler()) {
+		return ErrNilPeerSignatureHandler
+	}
+	if check.IfNil(container.SigningHandler()) {
+		return ErrNilSigningHandler
+	}
+	if check.IfNil(container.EnableEpochsHandler()) {
+		return ErrNilEnableEpochsHandler
+	}
+	if check.IfNil(container.EnableRoundsHandler()) {
+		return ErrNilEnableRoundsHandler
+	}
+	if check.IfNil(container.EquivalentProofsPool()) {
+		return ErrNilEquivalentProofPool
+	}
+	if check.IfNil(container.HeadersPool()) {
+		return ErrNilHeadersPool
+	}
+	if check.IfNil(container.EpochNotifier()) {
+		return ErrNilEpochNotifier
+	}
+	if check.IfNil(container.EpochStartRegistrationHandler()) {
+		return ErrNilEpochStartNotifier
+	}
+	if check.IfNil(container.InvalidSignersCache()) {
+		return ErrNilInvalidSignersCache
+	}
+	if check.IfNil(container.MessagesHandler()) {
+		return ErrNilConsensusService
+	}
+	if check.IfNil(container.CommonConfigsHandler()) {
+		return ErrNilCommonConfigsHandler
 	}
 
 	return nil

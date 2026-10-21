@@ -1,0 +1,351 @@
+package heartbeat
+
+import (
+	"bytes"
+	"fmt"
+
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/core/check"
+	"github.com/multiversx/mx-chain-core-go/marshal"
+	crypto "github.com/multiversx/mx-chain-crypto-go"
+	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/heartbeat"
+	"github.com/multiversx/mx-chain-go/process"
+	"github.com/multiversx/mx-chain-go/storage"
+	logger "github.com/multiversx/mx-chain-logger-go"
+)
+
+const (
+	minPeerAuthenticationTimeBetweenSendsInSec = 1
+	maxPercentAllowed                          = 0.8 // TODO: move this into config with supernova
+)
+
+// ArgInterceptedPeerAuthentication is the argument used in the intercepted peer authentication constructor
+type ArgInterceptedPeerAuthentication struct {
+	ArgBaseInterceptedHeartbeat
+	NodesCoordinator                        NodesCoordinator
+	SignaturesHandler                       SignaturesHandler
+	PeerSignatureHandler                    crypto.PeerSignatureHandler
+	PayloadValidator                        process.PeerAuthenticationPayloadValidator
+	HardforkTriggerPubKey                   []byte
+	PeerShardMapper                         process.PeerShardMapper
+	PeerAuthCacher                          storage.Cacher
+	MessageOriginator                       core.PeerID
+	SelfPeerID                              core.PeerID
+	PeerAuthenticationTimeBetweenSendsInSec int64
+	ManagedPeersHolder                      common.ManagedPeersHolder
+}
+
+// interceptedPeerAuthentication is a wrapper over PeerAuthentication
+type interceptedPeerAuthentication struct {
+	peerAuthentication     heartbeat.PeerAuthentication
+	payload                heartbeat.Payload
+	peerId                 core.PeerID
+	nodesCoordinator       NodesCoordinator
+	signaturesHandler      SignaturesHandler
+	peerSignatureHandler   crypto.PeerSignatureHandler
+	payloadValidator       process.PeerAuthenticationPayloadValidator
+	hardforkTriggerPubKey  []byte
+	peerShardMapper        process.PeerShardMapper
+	peerAuthCacher         storage.Cacher
+	messageOriginator      core.PeerID
+	selfPeerID             core.PeerID
+	managedPeersHolder     common.ManagedPeersHolder
+	peerAuthTimestampDelta int64
+}
+
+// NewInterceptedPeerAuthentication tries to create a new intercepted peer authentication instance
+func NewInterceptedPeerAuthentication(arg ArgInterceptedPeerAuthentication) (*interceptedPeerAuthentication, error) {
+	err := checkArg(arg)
+	if err != nil {
+		return nil, err
+	}
+
+	peerAuthentication, payload, err := createPeerAuthentication(arg.Marshaller, arg.DataBuff)
+	if err != nil {
+		return nil, err
+	}
+
+	deltaSec := float64(arg.PeerAuthenticationTimeBetweenSendsInSec) * maxPercentAllowed
+
+	intercepted := &interceptedPeerAuthentication{
+		peerAuthentication:     *peerAuthentication,
+		payload:                *payload,
+		nodesCoordinator:       arg.NodesCoordinator,
+		signaturesHandler:      arg.SignaturesHandler,
+		peerSignatureHandler:   arg.PeerSignatureHandler,
+		payloadValidator:       arg.PayloadValidator,
+		hardforkTriggerPubKey:  arg.HardforkTriggerPubKey,
+		peerShardMapper:        arg.PeerShardMapper,
+		peerAuthCacher:         arg.PeerAuthCacher,
+		messageOriginator:      arg.MessageOriginator,
+		selfPeerID:             arg.SelfPeerID,
+		peerAuthTimestampDelta: int64(deltaSec),
+		managedPeersHolder:     arg.ManagedPeersHolder,
+	}
+	intercepted.peerId = core.PeerID(intercepted.peerAuthentication.Pid)
+
+	return intercepted, nil
+}
+
+func checkArg(arg ArgInterceptedPeerAuthentication) error {
+	err := checkBaseArg(arg.ArgBaseInterceptedHeartbeat)
+	if err != nil {
+		return err
+	}
+	if check.IfNil(arg.NodesCoordinator) {
+		return process.ErrNilNodesCoordinator
+	}
+	if check.IfNil(arg.SignaturesHandler) {
+		return process.ErrNilSignaturesHandler
+	}
+	if check.IfNil(arg.PayloadValidator) {
+		return process.ErrNilPayloadValidator
+	}
+	if check.IfNil(arg.PeerSignatureHandler) {
+		return process.ErrNilPeerSignatureHandler
+	}
+	if len(arg.HardforkTriggerPubKey) == 0 {
+		return fmt.Errorf("%w hardfork trigger public key bytes length is 0", process.ErrInvalidValue)
+	}
+	if check.IfNil(arg.PeerShardMapper) {
+		return process.ErrNilPeerShardMapper
+	}
+	if check.IfNil(arg.PeerAuthCacher) {
+		return process.ErrNilPeerAuthenticationCacher
+	}
+	if arg.PeerAuthenticationTimeBetweenSendsInSec < minPeerAuthenticationTimeBetweenSendsInSec {
+		return fmt.Errorf("%w for PeerAuthenticationTimeBetweenSendsInSec", process.ErrInvalidValue)
+	}
+	if len(arg.SelfPeerID) == 0 {
+		return fmt.Errorf("%w for self peer id", process.ErrInvalidValue)
+	}
+	if check.IfNil(arg.ManagedPeersHolder) {
+		return process.ErrNilManagedPeersHolder
+	}
+
+	return nil
+}
+
+func createPeerAuthentication(marshalizer marshal.Marshalizer, buff []byte) (*heartbeat.PeerAuthentication, *heartbeat.Payload, error) {
+	peerAuthentication := &heartbeat.PeerAuthentication{}
+	err := marshalizer.Unmarshal(peerAuthentication, buff)
+	if err != nil {
+		return nil, nil, err
+	}
+	payload := &heartbeat.Payload{}
+	err = marshalizer.Unmarshal(payload, peerAuthentication.Payload)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	log.Trace("interceptedPeerAuthentication successfully created")
+
+	return peerAuthentication, payload, nil
+}
+
+// CheckValidity checks the validity of the received peer authentication. This call won't trigger the signature validation.
+func (ipa *interceptedPeerAuthentication) CheckValidity() error {
+	// Verify properties len
+	err := verifyPropertyMinMaxLen(publicKeyProperty, ipa.peerAuthentication.Pubkey)
+	if err != nil {
+		return err
+	}
+	err = verifyPropertyMinMaxLen(signatureProperty, ipa.peerAuthentication.Signature)
+	if err != nil {
+		return err
+	}
+	err = verifyPropertyMinMaxLen(peerIdProperty, ipa.peerId.Bytes())
+	if err != nil {
+		return err
+	}
+	err = verifyPropertyMinMaxLen(payloadProperty, ipa.peerAuthentication.Payload)
+	if err != nil {
+		return err
+	}
+	err = verifyPropertyMinMaxLen(payloadSignatureProperty, ipa.peerAuthentication.PayloadSignature)
+	if err != nil {
+		return err
+	}
+
+	// If the message is hardfork trigger, it should be from the expected source
+	if !ipa.isHardforkFromSource() {
+		// Verify validator
+		_, _, err = ipa.nodesCoordinator.GetValidatorWithPublicKey(ipa.peerAuthentication.Pubkey)
+		if err != nil {
+			return err
+		}
+
+		shouldSkipSigChecks, errCheck := ipa.checkExistingInfo()
+		if errCheck != nil {
+			return errCheck
+		}
+		if shouldSkipSigChecks {
+			return nil
+		}
+	}
+
+	// Verify payload
+	err = ipa.payloadValidator.ValidateTimestamp(ipa.payload.Timestamp)
+	if err != nil {
+		return err
+	}
+
+	// Verify payload signature
+	err = ipa.signaturesHandler.Verify(ipa.peerAuthentication.Payload, ipa.peerId, ipa.peerAuthentication.PayloadSignature)
+	if err != nil {
+		return err
+	}
+
+	// Verify message bls signature
+	err = ipa.peerSignatureHandler.VerifyPeerSignature(ipa.peerAuthentication.Pubkey, ipa.peerId, ipa.peerAuthentication.Signature)
+	if err != nil {
+		return err
+	}
+
+	log.Trace("interceptedPeerAuthentication received valid data")
+
+	return nil
+}
+
+func (ipa *interceptedPeerAuthentication) checkExistingInfo() (bool, error) {
+	existingInfo := ipa.peerShardMapper.GetPeerInfo(ipa.peerId)
+	pairExists := string(existingInfo.PkBytes) == string(ipa.Pubkey())
+	if !pairExists {
+		return false, nil // continue verification and eventually save in cache
+	}
+
+	if len(ipa.messageOriginator) == 0 {
+		return false, nil
+	}
+
+	isFromSelf := ipa.messageOriginator == ipa.selfPeerID
+	isManagedBySelf := ipa.managedPeersHolder.IsPidManagedByCurrentNode(ipa.messageOriginator)
+	if isFromSelf || isManagedBySelf {
+		return true, nil // skip sig checks
+	}
+
+	hasInCache := ipa.peerAuthCacher.Has(ipa.Pubkey())
+	if !hasInCache {
+		return false, nil // continue verification and eventually save in cache
+	}
+
+	minTimestampAccepted := existingInfo.AuthTimestamp + ipa.peerAuthTimestampDelta
+	if ipa.payload.Timestamp <= minTimestampAccepted {
+		return false, fmt.Errorf("%w, received timestamp %d while the last one saved is %d", process.ErrPeerAlreadyAuthenticated, ipa.payload.Timestamp, existingInfo.AuthTimestamp)
+	}
+
+	// mapping exists and delta condition is not satisfied, valid message
+	return false, nil
+}
+
+// ShouldAllowDuplicates returns if this type of intercepted data should allow duplicates
+func (ipa *interceptedPeerAuthentication) ShouldAllowDuplicates() bool {
+	return true
+}
+
+// IsForCurrentShard always returns true
+func (ipa *interceptedPeerAuthentication) IsForCurrentShard() bool {
+	return true
+}
+
+// Hash always returns an empty string
+func (ipa *interceptedPeerAuthentication) Hash() []byte {
+	return []byte("")
+}
+
+// Type returns the type of this intercepted data
+func (ipa *interceptedPeerAuthentication) Type() string {
+	return interceptedPeerAuthenticationType
+}
+
+// Identifiers returns the identifiers used in requests
+func (ipa *interceptedPeerAuthentication) Identifiers() [][]byte {
+	identifier := common.PeerAuthenticationPublicKeyIdentifier(ipa.peerAuthentication.Pubkey)
+	return [][]byte{ipa.peerAuthentication.Pubkey, ipa.peerAuthentication.Pid, identifier}
+}
+
+// PeerID returns the peer ID
+func (ipa *interceptedPeerAuthentication) PeerID() core.PeerID {
+	return core.PeerID(ipa.peerAuthentication.Pid)
+}
+
+// Signature returns the signature for the peer authentication
+func (ipa *interceptedPeerAuthentication) Signature() []byte {
+	return ipa.peerAuthentication.Signature
+}
+
+// Payload returns the payload data
+func (ipa *interceptedPeerAuthentication) Payload() []byte {
+	return ipa.peerAuthentication.Payload
+}
+
+// PayloadSignature returns the signature done on the payload
+func (ipa *interceptedPeerAuthentication) PayloadSignature() []byte {
+	return ipa.peerAuthentication.PayloadSignature
+}
+
+// Message returns the peer authentication message
+func (ipa *interceptedPeerAuthentication) Message() interface{} {
+	return &ipa.peerAuthentication
+}
+
+// Pubkey returns the public key
+func (ipa *interceptedPeerAuthentication) Pubkey() []byte {
+	return ipa.peerAuthentication.Pubkey
+}
+
+// String returns the most important fields as string
+func (ipa *interceptedPeerAuthentication) String() string {
+	return fmt.Sprintf("pk=%s, pid=%s, sig=%s, payload=%s, payloadSig=%s",
+		logger.DisplayByteSlice(ipa.peerAuthentication.Pubkey),
+		ipa.peerId.Pretty(),
+		logger.DisplayByteSlice(ipa.peerAuthentication.Signature),
+		logger.DisplayByteSlice(ipa.peerAuthentication.Payload),
+		logger.DisplayByteSlice(ipa.peerAuthentication.PayloadSignature),
+	)
+}
+
+func (ipa *interceptedPeerAuthentication) isHardforkFromSource() bool {
+	if len(ipa.payload.HardforkMessage) == 0 {
+		return false
+	}
+
+	return bytes.Equal(ipa.peerAuthentication.Pubkey, ipa.hardforkTriggerPubKey)
+}
+
+// SizeInBytes returns the size in bytes held by this instance
+func (ipa *interceptedPeerAuthentication) SizeInBytes() int {
+	return len(ipa.peerAuthentication.Pubkey) +
+		len(ipa.peerAuthentication.Signature) +
+		len(ipa.peerAuthentication.Pid) +
+		len(ipa.peerAuthentication.Payload) +
+		len(ipa.peerAuthentication.PayloadSignature)
+}
+
+// verifyPropertyMaxLen returns an error if the provided value is longer than max accepted by the network
+func verifyPropertyMaxLen(property string, value []byte) error {
+	if len(value) > maxSizeInBytes {
+		return fmt.Errorf("%w for %s", process.ErrPropertyTooLong, property)
+	}
+
+	return nil
+}
+
+// verifyPropertyMinMaxLen returns an error if the provided value is longer/shorter than max/min accepted by the network
+func verifyPropertyMinMaxLen(property string, value []byte) error {
+	err := verifyPropertyMaxLen(property, value)
+	if err != nil {
+		return err
+	}
+
+	if len(value) < minSizeInBytes {
+		return fmt.Errorf("%w for %s", process.ErrPropertyTooShort, property)
+	}
+	return nil
+}
+
+// IsInterfaceNil returns true if there is no value under the interface
+func (ipa *interceptedPeerAuthentication) IsInterfaceNil() bool {
+	return ipa == nil
+}

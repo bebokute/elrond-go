@@ -1,0 +1,103 @@
+package factory
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-go/config"
+	"github.com/multiversx/mx-chain-go/p2p"
+	"github.com/multiversx/mx-chain-go/process/throttle/antiflood/disabled"
+	"github.com/multiversx/mx-chain-go/testscommon"
+	"github.com/multiversx/mx-chain-go/testscommon/statusHandler"
+	"github.com/stretchr/testify/assert"
+)
+
+const currentPid = core.PeerID("current pid")
+
+func TestNewP2PAntiFloodAndBlackList_NilStatusHandlerShouldErr(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	cfg := config.Config{}
+	components, err := NewP2PAntiFloodComponents(ctx, cfg, nil, currentPid, &testscommon.AntifloodConfigsHandlerStub{})
+	assert.Nil(t, components)
+	assert.Equal(t, p2p.ErrNilStatusHandler, err)
+}
+
+func TestNewP2PAntiFloodAndBlackList_ShouldWorkAndReturnDisabledImplementations(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{
+		Antiflood: config.AntifloodConfig{
+			Enabled: false,
+		},
+	}
+	ash := statusHandler.NewAppStatusHandlerMock()
+	ctx := context.Background()
+	components, err := NewP2PAntiFloodComponents(ctx, cfg, ash, currentPid, &testscommon.AntifloodConfigsHandlerStub{})
+	assert.NotNil(t, components)
+	assert.Nil(t, err)
+
+	_, ok1 := components.AntiFloodHandler.(*disabled.AntiFlood)
+	_, ok2 := components.BlacklistHandler.(*disabled.PeerBlacklistCacher)
+	_, ok3 := components.PubKeysCacher.(*disabled.TimeCache)
+	assert.True(t, ok1)
+	assert.True(t, ok2)
+	assert.True(t, ok3)
+}
+
+func TestNewP2PAntiFloodAndBlackList_ShouldWorkAndReturnOkImplementations(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{}
+
+	antifloodConfigHandler := &testscommon.AntifloodConfigsHandlerStub{
+		IsEnabledCalled: func() bool {
+			return true
+		},
+		GetCurrentConfigCalled: func() config.AntifloodConfigByRound {
+			return config.AntifloodConfigByRound{
+				Cache: config.CacheConfig{
+					Type:     "LRU",
+					Capacity: 10,
+					Shards:   2,
+				},
+				FastReacting: createFloodPreventerConfig(),
+				SlowReacting: createFloodPreventerConfig(),
+				OutOfSpecs:   createFloodPreventerConfig(),
+				Topic: config.TopicAntifloodConfig{
+					DefaultMaxMessagesPerSec: 10,
+				},
+			}
+		},
+	}
+
+	ash := statusHandler.NewAppStatusHandlerMock()
+	ctx := context.Background()
+	components, err := NewP2PAntiFloodComponents(ctx, cfg, ash, currentPid, antifloodConfigHandler)
+	assert.Nil(t, err)
+	assert.NotNil(t, components.AntiFloodHandler)
+	assert.NotNil(t, components.BlacklistHandler)
+	assert.NotNil(t, components.PubKeysCacher)
+
+	// we need this time sleep as to allow the code coverage tool to deterministically compute the code coverage
+	//on the go routines that are automatically launched
+	time.Sleep(time.Second * 2)
+}
+
+func createFloodPreventerConfig() config.FloodPreventerConfig {
+	return config.FloodPreventerConfig{
+		IntervalInSeconds: 1,
+		PeerMaxInput: config.AntifloodLimitsConfig{
+			BaseMessagesPerInterval: 10,
+			TotalSizePerInterval:    10,
+		},
+		BlackList: config.BlackListConfig{
+			ThresholdNumMessagesPerInterval: 10,
+			ThresholdSizePerInterval:        10,
+			PeerBanDurationInSeconds:        10,
+		},
+	}
+}

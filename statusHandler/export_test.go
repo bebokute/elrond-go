@@ -1,15 +1,11 @@
 package statusHandler
 
-import (
-	"errors"
+// StatusMetrics is an alias for statusMetrics to be used in tests
+type StatusMetrics = statusMetrics
 
-	"github.com/prometheus/client_golang/prometheus"
-)
-
-func (psh *PrometheusStatusHandler) GetPrometheusMetricByKey(key string) (prometheus.Gauge, error) {
-	value, ok := psh.prometheusGaugeMetrics.Load(key)
-	if ok {
-		return value.(prometheus.Gauge), nil
-	}
-	return nil, errors.New("metric does not exist")
+// StatusMetricsMap will return all metrics in a map
+func (sm *statusMetrics) StatusMetricsMap() map[string]interface{} {
+	return sm.getMetricsWithKeyFilterMutexProtected(func(_ string) bool {
+		return true
+	})
 }

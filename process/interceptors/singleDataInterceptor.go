@@ -1,41 +1,86 @@
 package interceptors
 
 import (
-	"sync"
+	"errors"
+	"strings"
 
-	"github.com/ElrondNetwork/elrond-go/core/check"
-	"github.com/ElrondNetwork/elrond-go/p2p"
-	"github.com/ElrondNetwork/elrond-go/process"
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/core/check"
+
+	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/debug/handler"
+	"github.com/multiversx/mx-chain-go/p2p"
+	"github.com/multiversx/mx-chain-go/process"
 )
+
+// ArgSingleDataInterceptor is the argument for the single-data interceptor
+type ArgSingleDataInterceptor struct {
+	Topic                   string
+	DataFactory             process.InterceptedDataFactory
+	Processor               process.InterceptorProcessor
+	Throttler               process.InterceptorThrottler
+	AntifloodHandler        process.P2PAntifloodHandler
+	WhiteListRequest        process.WhiteListHandler
+	PreferredPeersHolder    process.PreferredPeersHolderHandler
+	CurrentPeerId           core.PeerID
+	InterceptedDataVerifier process.InterceptedDataVerifier
+	ManagedPeersHolder      common.ManagedPeersHolder
+}
 
 // SingleDataInterceptor is used for intercepting packed multi data
 type SingleDataInterceptor struct {
-	factory   process.InterceptedDataFactory
-	processor process.InterceptorProcessor
-	throttler process.InterceptorThrottler
+	*baseDataInterceptor
+	factory          process.InterceptedDataFactory
+	whiteListRequest process.WhiteListHandler
 }
 
 // NewSingleDataInterceptor hooks a new interceptor for single data
-func NewSingleDataInterceptor(
-	factory process.InterceptedDataFactory,
-	processor process.InterceptorProcessor,
-	throttler process.InterceptorThrottler,
-) (*SingleDataInterceptor, error) {
-
-	if check.IfNil(factory) {
+func NewSingleDataInterceptor(arg ArgSingleDataInterceptor) (*SingleDataInterceptor, error) {
+	if len(arg.Topic) == 0 {
+		return nil, process.ErrEmptyTopic
+	}
+	if check.IfNil(arg.DataFactory) {
 		return nil, process.ErrNilInterceptedDataFactory
 	}
-	if check.IfNil(processor) {
+	if check.IfNil(arg.Processor) {
 		return nil, process.ErrNilInterceptedDataProcessor
 	}
-	if check.IfNil(throttler) {
+	if check.IfNil(arg.Throttler) {
 		return nil, process.ErrNilInterceptorThrottler
+	}
+	if check.IfNil(arg.AntifloodHandler) {
+		return nil, process.ErrNilAntifloodHandler
+	}
+	if check.IfNil(arg.WhiteListRequest) {
+		return nil, process.ErrNilWhiteListHandler
+	}
+	if check.IfNil(arg.PreferredPeersHolder) {
+		return nil, process.ErrNilPreferredPeersHolder
+	}
+	if check.IfNil(arg.InterceptedDataVerifier) {
+		return nil, process.ErrNilInterceptedDataVerifier
+	}
+	if len(arg.CurrentPeerId) == 0 {
+		return nil, process.ErrEmptyPeerID
+	}
+	if check.IfNil(arg.ManagedPeersHolder) {
+		return nil, process.ErrNilManagedPeersHolder
 	}
 
 	singleDataIntercept := &SingleDataInterceptor{
-		factory:   factory,
-		processor: processor,
-		throttler: throttler,
+		baseDataInterceptor: &baseDataInterceptor{
+			throttler:               arg.Throttler,
+			antifloodHandler:        arg.AntifloodHandler,
+			topic:                   arg.Topic,
+			currentPeerId:           arg.CurrentPeerId,
+			processor:               arg.Processor,
+			preferredPeersHolder:    arg.PreferredPeersHolder,
+			debugHandler:            handler.NewDisabledInterceptorDebugHandler(),
+			interceptedDataVerifier: arg.InterceptedDataVerifier,
+			managedPeersHolder:      arg.ManagedPeersHolder,
+		},
+		factory:          arg.DataFactory,
+		whiteListRequest: arg.WhiteListRequest,
 	}
 
 	return singleDataIntercept, nil
@@ -43,46 +88,97 @@ func NewSingleDataInterceptor(
 
 // ProcessReceivedMessage is the callback func from the p2p.Messenger and will be called each time a new message was received
 // (for the topic this validator was registered to)
-func (sdi *SingleDataInterceptor) ProcessReceivedMessage(message p2p.MessageP2P, _ func(buffToSend []byte)) error {
-	err := preProcessMesage(sdi.throttler, message)
+func (sdi *SingleDataInterceptor) ProcessReceivedMessage(message p2p.MessageP2P, fromConnectedPeer core.PeerID, _ p2p.MessageHandler) ([]byte, error) {
+	err := sdi.preProcessMesage(message, fromConnectedPeer)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	interceptedData, err := sdi.factory.Create(message.Data())
-	if err != nil {
-		sdi.throttler.EndProcessing()
-		return err
-	}
-
-	err = interceptedData.CheckValidity()
+	interceptedData, err := sdi.factory.Create(message.Data(), message.Peer())
 	if err != nil {
 		sdi.throttler.EndProcessing()
-		return err
+
+		// this situation is so severe that we need to black list the peers
+		reason := "can not create object from received bytes, topic " + sdi.topic + ", error " + err.Error()
+		sdi.antifloodHandler.BlacklistPeer(message.Peer(), reason, common.InvalidMessageBlacklistDuration)
+		sdi.antifloodHandler.BlacklistPeer(fromConnectedPeer, reason, common.InvalidMessageBlacklistDuration)
+
+		return nil, err
 	}
 
-	if !interceptedData.IsForCurrentShard() {
+	sdi.receivedDebugInterceptedData(interceptedData)
+	messageID := interceptedData.Hash()
+	errOriginator := sdi.antifloodHandler.IsOriginatorEligibleForTopic(message.Peer(), sdi.topic)
+	isWhiteListed := sdi.whiteListRequest.IsWhiteListed(interceptedData)
+	if !isWhiteListed && errOriginator != nil {
+		log.Trace("got message from peer on topic only for validators",
+			"originator", p2p.PeerIdToShortString(message.Peer()), "topic",
+			sdi.topic, "err", errOriginator)
 		sdi.throttler.EndProcessing()
-		log.Debug("intercepted data is for other shards")
-		return nil
+		return nil, errOriginator
 	}
 
-	wgProcess := &sync.WaitGroup{}
-	wgProcess.Add(1)
+	isInterceptedEquivalentProof := strings.HasPrefix(message.Topic(), common.EquivalentProofsTopic)
+	isMessageFromSelfOriginator := sdi.isMessageFromSelfOriginator(message)
+	isMessageFromSelfToSelf := sdi.isMessageFromSelfToSelf(fromConnectedPeer, message)
+	shouldSkipInterceptedDataVerification := isMessageFromSelfOriginator && isInterceptedEquivalentProof && !isMessageFromSelfToSelf
+	if !shouldSkipInterceptedDataVerification {
+		err = sdi.interceptedDataVerifier.Verify(interceptedData, message.Topic(), message.BroadcastMethod())
+		if err != nil {
+			sdi.throttler.EndProcessing()
+			sdi.processDebugInterceptedData(interceptedData, err)
+			if errors.Is(err, common.ErrAlreadyExistingEquivalentProof) ||
+				errors.Is(err, process.ErrDuplicatedInterceptedDataNotAllowed) {
+				return messageID, p2p.ErrMessageShouldBeIgnored
+			}
+
+			isWrongVersion := errors.Is(err, process.ErrInvalidTransactionVersion) || errors.Is(err, process.ErrInvalidChainID)
+			if isWrongVersion {
+				// this situation is so severe that we need to black list de peers
+				reason := "wrong version of received intercepted data, topic " + sdi.topic + ", error " + err.Error()
+				sdi.antifloodHandler.BlacklistPeer(message.Peer(), reason, common.InvalidMessageBlacklistDuration)
+				sdi.antifloodHandler.BlacklistPeer(fromConnectedPeer, reason, common.InvalidMessageBlacklistDuration)
+			}
+
+			return nil, err
+		}
+	} else {
+		sdi.interceptedDataVerifier.MarkVerified(interceptedData, message.BroadcastMethod())
+	}
+
+	isForCurrentShard := interceptedData.IsForCurrentShard()
+	if !isForCurrentShard {
+		sdi.throttler.EndProcessing()
+		log.Trace("intercepted data is for other shards",
+			"pid", p2p.MessageOriginatorPid(message),
+			"seq no", p2p.MessageOriginatorSeq(message),
+			"topic", message.Topic(),
+			"hash", interceptedData.Hash(),
+			"is for current shard", isForCurrentShard,
+		)
+
+		return messageID, process.ErrInterceptedDataNotForCurrentShard
+	}
+
 	go func() {
-		wgProcess.Wait()
+		sdi.processInterceptedData(interceptedData, message, fromConnectedPeer)
 		sdi.throttler.EndProcessing()
 	}()
 
-	go processInterceptedData(sdi.processor, interceptedData, wgProcess)
+	return messageID, nil
+}
 
+// RegisterHandler registers a callback function to be notified on received data
+func (sdi *SingleDataInterceptor) RegisterHandler(handler func(topic string, hash []byte, data interface{})) {
+	sdi.processor.RegisterHandler(handler)
+}
+
+// Close returns nil
+func (sdi *SingleDataInterceptor) Close() error {
 	return nil
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
 func (sdi *SingleDataInterceptor) IsInterfaceNil() bool {
-	if sdi == nil {
-		return true
-	}
-	return false
+	return sdi == nil
 }

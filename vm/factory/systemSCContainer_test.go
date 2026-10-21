@@ -1,12 +1,13 @@
 package factory
 
 import (
-	"github.com/ElrondNetwork/elrond-go/vm"
-	vmcommon "github.com/ElrondNetwork/elrond-vm-common"
+	"errors"
 	"testing"
 
-	"github.com/ElrondNetwork/elrond-go/process"
-	"github.com/ElrondNetwork/elrond-go/vm/mock"
+	"github.com/multiversx/mx-chain-go/process"
+	"github.com/multiversx/mx-chain-go/vm"
+	"github.com/multiversx/mx-chain-go/vm/mock"
+	vmcommon "github.com/multiversx/mx-chain-vm-common-go"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -79,7 +80,7 @@ func TestSystemSCContainer_GetNotFoundShouldErr(t *testing.T) {
 	valRecovered, err := c.Get(keyNotFound)
 
 	assert.Nil(t, valRecovered)
-	assert.Equal(t, process.ErrInvalidContainerKey, err)
+	assert.True(t, errors.Is(err, process.ErrInvalidContainerKey))
 }
 
 func TestSystemSCContainer_GetShouldWork(t *testing.T) {
@@ -176,7 +177,7 @@ func TestSystemSCContainer_RemoveShouldWork(t *testing.T) {
 	valRecovered, err := c.Get(key)
 
 	assert.Nil(t, valRecovered)
-	assert.Equal(t, process.ErrInvalidContainerKey, err)
+	assert.True(t, errors.Is(err, process.ErrInvalidContainerKey))
 }
 
 //------- Len

@@ -1,14 +1,16 @@
 package processor
 
 import (
-	"github.com/ElrondNetwork/elrond-go/dataRetriever"
-	"github.com/ElrondNetwork/elrond-go/process"
-	"github.com/ElrondNetwork/elrond-go/storage"
+	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/dataRetriever"
+	"github.com/multiversx/mx-chain-go/process"
 )
 
 // ArgHdrInterceptorProcessor is the argument for the interceptor processor used for headers (shard, meta and so on)
 type ArgHdrInterceptorProcessor struct {
-	Headers       storage.Cacher
-	HeadersNonces dataRetriever.Uint64SyncMapCacher
-	HdrValidator  process.HeaderValidator
+	Headers             dataRetriever.HeadersPool
+	Proofs              dataRetriever.ProofsPool
+	BlockBlackList      process.TimeCacher
+	EnableEpochsHandler common.EnableEpochsHandler
+	RoundExclusions     common.RoundExclusionHandler
 }

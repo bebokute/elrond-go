@@ -1,0 +1,63 @@
+package factory
+
+import (
+	"github.com/multiversx/mx-chain-core-go/core/check"
+	"github.com/multiversx/mx-chain-go/dataRetriever"
+	"github.com/multiversx/mx-chain-go/outport/process"
+	"github.com/multiversx/mx-chain-go/outport/process/alteredaccounts"
+	"github.com/multiversx/mx-chain-go/outport/process/transactionsfee"
+	processS "github.com/multiversx/mx-chain-go/process"
+)
+
+func checkArgOutportDataProviderFactory(arg ArgOutportDataProviderFactory) error {
+	if check.IfNil(arg.AddressConverter) {
+		return alteredaccounts.ErrNilPubKeyConverter
+	}
+	if check.IfNil(arg.AccountsDB) {
+		return alteredaccounts.ErrNilAccountsDB
+	}
+	if check.IfNil(arg.Marshaller) {
+		return transactionsfee.ErrNilMarshaller
+	}
+	if check.IfNil(arg.EsdtDataStorageHandler) {
+		return alteredaccounts.ErrNilESDTDataStorageHandler
+	}
+	if check.IfNil(arg.EconomicsData) {
+		return transactionsfee.ErrNilTransactionFeeCalculator
+	}
+	if check.IfNil(arg.ShardCoordinator) {
+		return transactionsfee.ErrNilShardCoordinator
+	}
+	if check.IfNil(arg.TxCoordinator) {
+		return process.ErrNilTransactionCoordinator
+	}
+	if check.IfNil(arg.NodesCoordinator) {
+		return process.ErrNilNodesCoordinator
+	}
+	if check.IfNil(arg.GasConsumedProvider) {
+		return process.ErrNilGasConsumedProvider
+	}
+	if check.IfNil(arg.Hasher) {
+		return process.ErrNilHasher
+	}
+	if check.IfNil(arg.EnableEpochsHandler) {
+		return process.ErrNilEnableEpochsHandler
+	}
+	if check.IfNil(arg.ExecutionOrderGetter) {
+		return process.ErrNilExecutionOrderGetter
+	}
+	if check.IfNil(arg.DataPool) {
+		return dataRetriever.ErrNilDataPoolHolder
+	}
+	if check.IfNil(arg.RoundHandler) {
+		return process.ErrNilRoundHandler
+	}
+	if check.IfNil(arg.RewardsGetter) {
+		return process.ErrNilRewardsGetter
+	}
+	if check.IfNil(arg.StorageService) {
+		return processS.ErrNilStorageService
+	}
+
+	return nil
+}

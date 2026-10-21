@@ -1,50 +1,218 @@
 package interceptedBlocks_test
 
 import (
+	"errors"
+	"fmt"
+	"math/big"
 	"testing"
 
-	"github.com/ElrondNetwork/elrond-go/core/check"
-	dataBlock "github.com/ElrondNetwork/elrond-go/data/block"
-	"github.com/ElrondNetwork/elrond-go/process"
-	"github.com/ElrondNetwork/elrond-go/process/block/interceptedBlocks"
-	"github.com/ElrondNetwork/elrond-go/process/mock"
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-core-go/core/check"
+	"github.com/multiversx/mx-chain-core-go/data"
+	dataBlock "github.com/multiversx/mx-chain-core-go/data/block"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/common/graceperiod"
+	"github.com/multiversx/mx-chain-go/config"
+	"github.com/multiversx/mx-chain-go/process"
+	"github.com/multiversx/mx-chain-go/process/block/interceptedBlocks"
+	"github.com/multiversx/mx-chain-go/process/mock"
+	"github.com/multiversx/mx-chain-go/sharding"
+	"github.com/multiversx/mx-chain-go/testscommon/consensus"
+	"github.com/multiversx/mx-chain-go/testscommon/enableEpochsHandlerMock"
 )
 
 func createDefaultMetaArgument() *interceptedBlocks.ArgInterceptedBlockHeader {
-	arg := &interceptedBlocks.ArgInterceptedBlockHeader{
-		ShardCoordinator: mock.NewOneShardCoordinatorMock(),
-		MultiSigVerifier: mock.NewMultiSigner(),
-		Hasher:           testHasher,
-		Marshalizer:      testMarshalizer,
-		NodesCoordinator: &mock.NodesCoordinatorMock{},
-	}
+	shardCoordinator := mock.NewOneShardCoordinatorMock()
+	return createMetaArgumentWithShardCoordinator(shardCoordinator)
+}
 
-	hdr := createMockMetaHeader()
+func createDefaultMetaV3Argument() *interceptedBlocks.ArgInterceptedBlockHeader {
+	shardCoordinator := mock.NewMultiShardsCoordinatorMock(3)
+	arg := createMetaV3ArgumentWithShardCoordinator(shardCoordinator)
+	arg.EnableEpochsHandler = &enableEpochsHandlerMock.EnableEpochsHandlerStub{
+		IsFlagEnabledInEpochCalled: func(flag core.EnableEpochFlag, epoch uint32) bool {
+			return true
+		},
+	}
+	return arg
+}
+
+func createMetaArgumentWithShardCoordinatorAndHeader(shardCoordinator sharding.Coordinator, hdr data.MetaHeaderHandler) *interceptedBlocks.ArgInterceptedBlockHeader {
+	gracePeriod, _ := graceperiod.NewEpochChangeGracePeriod([]config.EpochChangeGracePeriodByEpoch{{EnableEpoch: 0, GracePeriodInRounds: 1}})
+	arg := &interceptedBlocks.ArgInterceptedBlockHeader{
+		ShardCoordinator:        shardCoordinator,
+		Hasher:                  testHasher,
+		Marshalizer:             testMarshalizer,
+		HeaderSigVerifier:       &consensus.HeaderSigVerifierMock{},
+		HeaderIntegrityVerifier: &mock.HeaderIntegrityVerifierStub{},
+		ValidityAttester:        &mock.ValidityAttesterStub{},
+		EpochStartTrigger: &mock.EpochStartTriggerStub{
+			EpochCalled: func() uint32 {
+				return hdrEpoch
+			},
+		},
+		EnableEpochsHandler:           &enableEpochsHandlerMock.EnableEpochsHandlerStub{},
+		EpochChangeGracePeriodHandler: gracePeriod,
+	}
 	arg.HdrBuff, _ = testMarshalizer.Marshal(hdr)
 
 	return arg
 }
 
+func createMetaArgumentWithShardCoordinator(shardCoordinator sharding.Coordinator) *interceptedBlocks.ArgInterceptedBlockHeader {
+	hdr := createMockMetaHeader()
+	return createMetaArgumentWithShardCoordinatorAndHeader(shardCoordinator, hdr)
+}
+
+func createMetaV3ArgumentWithShardCoordinator(shardCoordinator sharding.Coordinator) *interceptedBlocks.ArgInterceptedBlockHeader {
+	hdr := createMockMetaHeaderV3()
+	return createMetaArgumentWithShardCoordinatorAndHeader(shardCoordinator, hdr)
+}
+
 func createMockMetaHeader() *dataBlock.MetaBlock {
 	return &dataBlock.MetaBlock{
-		Nonce:         hdrNonce,
-		PrevHash:      []byte("prev hash"),
-		PrevRandSeed:  []byte("prev rand seed"),
-		RandSeed:      []byte("rand seed"),
-		PubKeysBitmap: []byte{1},
-		TimeStamp:     0,
-		Round:         hdrRound,
-		Epoch:         hdrEpoch,
-		Signature:     []byte("signature"),
-		RootHash:      []byte("root hash"),
-		TxCount:       0,
-		PeerInfo:      nil,
-		ShardInfo:     nil,
+		Nonce:                  hdrNonce,
+		PrevHash:               []byte("prev hash"),
+		PrevRandSeed:           []byte("prev rand seed"),
+		RandSeed:               []byte("rand seed"),
+		PubKeysBitmap:          []byte{1},
+		TimeStamp:              0,
+		Round:                  hdrRound,
+		Epoch:                  hdrEpoch,
+		Signature:              []byte("signature"),
+		RootHash:               []byte("root hash"),
+		TxCount:                0,
+		ShardInfo:              nil,
+		ChainID:                []byte("chain ID"),
+		SoftwareVersion:        []byte("software version"),
+		DeveloperFees:          big.NewInt(0),
+		AccumulatedFees:        big.NewInt(0),
+		AccumulatedFeesInEpoch: big.NewInt(0),
+		DevFeesInEpoch:         big.NewInt(0),
+		ValidatorStatsRootHash: []byte("validator stats root hash"),
 	}
 }
 
-//------- TestNewInterceptedHeader
+func createMockMetaHeaderV3() *dataBlock.MetaBlockV3 {
+	return &dataBlock.MetaBlockV3{
+		Nonce:           42,
+		Epoch:           2,
+		Round:           15,
+		TimestampMs:     123456789,
+		PrevHash:        []byte("prev_hash"),
+		PrevRandSeed:    []byte("prev_seed"),
+		RandSeed:        []byte("new_seed"),
+		ChainID:         []byte("chain-id"),
+		SoftwareVersion: []byte("v1.0.0"),
+		LeaderSignature: []byte("leader_signature"),
+
+		MiniBlockHeaders: []dataBlock.MiniBlockHeader{
+			{Hash: []byte("meta-to-s0"), SenderShardID: core.MetachainShardId, ReceiverShardID: 0},
+			{Hash: []byte("meta-to-s1"), SenderShardID: core.MetachainShardId, ReceiverShardID: 1},
+		},
+
+		ShardInfo: []dataBlock.ShardData{
+			{
+				ShardID:    0,
+				Round:      10,
+				Nonce:      41,
+				Epoch:      1,
+				HeaderHash: []byte("shard0-hash"),
+				ShardMiniBlockHeaders: []dataBlock.MiniBlockHeader{
+					{SenderShardID: 0, ReceiverShardID: 1, Hash: []byte("s0-to-s1")},
+				},
+			},
+			{
+				ShardID:    1,
+				Round:      11,
+				Nonce:      40,
+				Epoch:      1,
+				HeaderHash: []byte("shard1-hash"),
+				ShardMiniBlockHeaders: []dataBlock.MiniBlockHeader{
+					{SenderShardID: 1, ReceiverShardID: 0, Hash: []byte("s1-to-s0")},
+				},
+			},
+		},
+		ShardInfoProposal: []dataBlock.ShardDataProposal{
+			{ShardID: 0, HeaderHash: []byte("shard-0-hash"), Nonce: 41, Round: 10, Epoch: 1},
+			{ShardID: 1, HeaderHash: []byte("shard-1-hash"), Nonce: 40, Round: 11, Epoch: 1},
+		},
+		ExecutionResults: []*dataBlock.MetaExecutionResult{
+			{
+				ExecutionResult: &dataBlock.BaseMetaExecutionResult{
+					BaseExecutionResult: &dataBlock.BaseExecutionResult{
+						HeaderHash:  []byte("hdr-hash-10"),
+						HeaderNonce: 39,
+						HeaderRound: 10,
+						HeaderEpoch: 1,
+						RootHash:    []byte("root-hash-10"),
+					},
+					AccumulatedFeesInEpoch: big.NewInt(1000),
+					DevFeesInEpoch:         big.NewInt(100),
+					ValidatorStatsRootHash: []byte("validator-stats-root-hash"),
+				},
+				AccumulatedFees: big.NewInt(1000),
+				DeveloperFees:   big.NewInt(100),
+				ReceiptsHash:    []byte("receipts hash"),
+			},
+			{
+				ExecutionResult: &dataBlock.BaseMetaExecutionResult{
+					BaseExecutionResult: &dataBlock.BaseExecutionResult{
+						HeaderHash:  []byte("hdr-hash-11"),
+						HeaderNonce: 40,
+						HeaderRound: 11,
+						HeaderEpoch: 1,
+						RootHash:    []byte("root-hash-11"),
+					},
+					AccumulatedFeesInEpoch: big.NewInt(2000),
+					DevFeesInEpoch:         big.NewInt(200),
+					ValidatorStatsRootHash: []byte("validator-stats-root-hash-1"),
+				},
+				AccumulatedFees: big.NewInt(2000),
+				DeveloperFees:   big.NewInt(200),
+				ReceiptsHash:    []byte("receipts-hash-1"),
+			},
+			{
+				ExecutionResult: &dataBlock.BaseMetaExecutionResult{
+					BaseExecutionResult: &dataBlock.BaseExecutionResult{
+						HeaderHash:  []byte("hdr-hash-last"),
+						HeaderNonce: 41,
+						HeaderRound: 12,
+						HeaderEpoch: 2,
+						RootHash:    []byte("root-hash-last"),
+					},
+					AccumulatedFeesInEpoch: big.NewInt(3000),
+					DevFeesInEpoch:         big.NewInt(300),
+					ValidatorStatsRootHash: []byte("validator-stats-root-hash-2"),
+				},
+				AccumulatedFees: big.NewInt(3000),
+				DeveloperFees:   big.NewInt(300),
+				ReceiptsHash:    []byte("receipts-hash-2"),
+			},
+		},
+
+		LastExecutionResult: &dataBlock.MetaExecutionResultInfo{
+			NotarizedInRound: 14,
+			ExecutionResult: &dataBlock.BaseMetaExecutionResult{
+				BaseExecutionResult: &dataBlock.BaseExecutionResult{
+					HeaderHash:  []byte("hdr-hash-last"),
+					HeaderNonce: 41,
+					HeaderRound: 12,
+					HeaderEpoch: 2,
+					RootHash:    []byte("root-hash-last"),
+				},
+				AccumulatedFeesInEpoch: big.NewInt(3000),
+				DevFeesInEpoch:         big.NewInt(300),
+				ValidatorStatsRootHash: []byte("validator-stats-root-hash-2"),
+			},
+		},
+	}
+}
+
+// ------- TestNewInterceptedHeader
 
 func TestNewInterceptedMetaHeader_NilArgumentShouldErr(t *testing.T) {
 	t.Parallel()
@@ -52,7 +220,7 @@ func TestNewInterceptedMetaHeader_NilArgumentShouldErr(t *testing.T) {
 	inHdr, err := interceptedBlocks.NewInterceptedMetaHeader(nil)
 
 	assert.Nil(t, inHdr)
-	assert.Equal(t, process.ErrNilArguments, err)
+	assert.Equal(t, process.ErrNilArgumentStruct, err)
 }
 
 func TestNewInterceptedMetaHeader_MarshalizerFailShouldErr(t *testing.T) {
@@ -79,7 +247,7 @@ func TestNewInterceptedMetaHeader_ShouldWork(t *testing.T) {
 	assert.Nil(t, err)
 }
 
-//------- CheckValidity
+// ------- CheckValidity
 
 func TestInterceptedMetaHeader_CheckValidityNilPubKeyBitmapShouldErr(t *testing.T) {
 	t.Parallel()
@@ -104,7 +272,7 @@ func TestInterceptedMetaHeader_ErrorInMiniBlockShouldErr(t *testing.T) {
 	badShardId := uint32(2)
 	hdr.ShardInfo = []dataBlock.ShardData{
 		{
-			ShardId:               badShardId,
+			ShardID:               badShardId,
 			HeaderHash:            nil,
 			ShardMiniBlockHeaders: nil,
 			TxCount:               0,
@@ -112,7 +280,10 @@ func TestInterceptedMetaHeader_ErrorInMiniBlockShouldErr(t *testing.T) {
 	}
 	buff, _ := testMarshalizer.Marshal(hdr)
 
-	arg := createDefaultShardArgument()
+	shardCoordinator := mock.NewOneShardCoordinatorMock()
+	_ = shardCoordinator.SetSelfId(core.MetachainShardId)
+
+	arg := createMetaArgumentWithShardCoordinator(shardCoordinator)
 	arg.HdrBuff = buff
 	inHdr, _ := interceptedBlocks.NewInterceptedMetaHeader(arg)
 
@@ -132,7 +303,122 @@ func TestInterceptedMetaHeader_CheckValidityShouldWork(t *testing.T) {
 	assert.Nil(t, err)
 }
 
-//------- getters
+func TestInterceptedMetaHeader_CheckValidityExcludedRoundShouldReturnBeforeIntegrityCheck(t *testing.T) {
+	t.Parallel()
+
+	arg := createDefaultMetaArgument()
+	verifyCalled := false
+	arg.HeaderIntegrityVerifier = &mock.HeaderIntegrityVerifierStub{
+		VerifyCalled: func(header data.HeaderHandler) error {
+			verifyCalled = true
+			return nil
+		},
+	}
+	arg.RoundExclusions, _ = common.NewRoundExclusionHandler([]config.HardforkRoundExclusionConfig{
+		{StartRound: hdrRound, EndRound: hdrRound},
+	})
+	inHdr, err := interceptedBlocks.NewInterceptedMetaHeader(arg)
+	require.NoError(t, err)
+
+	err = inHdr.CheckValidity()
+
+	require.ErrorIs(t, err, common.ErrRoundExcluded)
+	require.False(t, verifyCalled)
+}
+
+func createIncomingMiniBlockHeaderAtMetachain(
+	processingType dataBlock.ProcessingType,
+	constructionState dataBlock.MiniBlockState,
+	lastIndex int32,
+) *dataBlock.MiniBlockHeader {
+	mbh := &dataBlock.MiniBlockHeader{
+		Hash:            []byte("incoming-mb-hash"),
+		SenderShardID:   0,
+		ReceiverShardID: core.MetachainShardId,
+		TxCount:         3,
+		Type:            dataBlock.TxBlock,
+	}
+	_ = mbh.SetProcessingType(int32(processingType))
+	_ = mbh.SetConstructionState(int32(constructionState))
+	_ = mbh.SetIndexOfFirstTxProcessed(0)
+	_ = mbh.SetIndexOfLastTxProcessed(lastIndex)
+
+	return mbh
+}
+
+func TestInterceptedMetaHeader_CheckIncomingLegacyMiniBlockExecution(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		processingType    dataBlock.ProcessingType
+		constructionState dataBlock.MiniBlockState
+		lastIndex         int32
+		expectedErr       error
+	}{
+		{"normal final full execution allowed", dataBlock.Normal, dataBlock.Final, 2, nil},
+		{"normal partial execution rejected", dataBlock.Normal, dataBlock.PartialExecuted, 0, process.ErrInvalidConstructionState},
+		{"scheduled final execution rejected", dataBlock.Scheduled, dataBlock.Final, 2, process.ErrInvalidMiniBlockProcessingType},
+		{"scheduled partial execution rejected", dataBlock.Scheduled, dataBlock.PartialExecuted, 0, process.ErrInvalidMiniBlockProcessingType},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			hdr := createMockMetaHeader()
+			mbh := createIncomingMiniBlockHeaderAtMetachain(test.processingType, test.constructionState, test.lastIndex)
+			hdr.MiniBlockHeaders = []dataBlock.MiniBlockHeader{*mbh}
+			arg := createMetaArgumentWithShardCoordinatorAndHeader(mock.NewOneShardCoordinatorMock(), hdr)
+			inHdr, err := interceptedBlocks.NewInterceptedMetaHeader(arg)
+			require.NoError(t, err)
+
+			err = inHdr.CheckValidity()
+			if test.expectedErr == nil {
+				assert.NoError(t, err)
+				return
+			}
+			assert.ErrorIs(t, err, test.expectedErr)
+		})
+	}
+}
+
+func TestInterceptedMetaHeader_CheckAgainstRoundHandlerAttesterFailsShouldErr(t *testing.T) {
+	t.Parallel()
+
+	arg := createDefaultMetaArgument()
+	expectedErr := errors.New("expected error")
+	arg.ValidityAttester = &mock.ValidityAttesterStub{
+		CheckBlockAgainstRoundHandlerCalled: func(headerHandler data.HeaderHandler) error {
+			return expectedErr
+		},
+	}
+	inHdr, _ := interceptedBlocks.NewInterceptedMetaHeader(arg)
+
+	err := inHdr.CheckValidity()
+
+	assert.Equal(t, expectedErr, err)
+}
+
+func TestInterceptedMetaHeader_CheckAgainstFinalHeaderAttesterFailsShouldErr(t *testing.T) {
+	t.Parallel()
+
+	arg := createDefaultMetaArgument()
+	expectedErr := errors.New("expected error")
+	arg.ValidityAttester = &mock.ValidityAttesterStub{
+		CheckBlockAgainstFinalCalled: func(headerHandler data.HeaderHandler) error {
+			return expectedErr
+		},
+	}
+	inHdr, _ := interceptedBlocks.NewInterceptedMetaHeader(arg)
+
+	err := inHdr.CheckValidity()
+
+	assert.Equal(t, expectedErr, err)
+}
+
+// ------- getters
 
 func TestInterceptedMetaHeader_Getters(t *testing.T) {
 	t.Parallel()
@@ -144,9 +430,256 @@ func TestInterceptedMetaHeader_Getters(t *testing.T) {
 
 	assert.Equal(t, hash, inHdr.Hash())
 	assert.True(t, inHdr.IsForCurrentShard())
+	require.False(t, inHdr.ShouldAllowDuplicates())
 }
 
-//------- IsInterfaceNil
+func TestInterceptedMetaHeader_IdentifiersShouldIncludeEpochIdentifierOnlyForEpochStart(t *testing.T) {
+	t.Parallel()
+
+	metaV1EpochStart := createMockMetaHeader()
+	metaV1EpochStart.EpochStart.LastFinalizedHeaders = []dataBlock.EpochStartShardData{{}}
+	metaV3EpochStart := createMockMetaHeaderV3()
+	metaV3EpochStart.EpochStart.LastFinalizedHeaders = []dataBlock.EpochStartShardData{{}}
+	tests := []struct {
+		name                   string
+		header                 data.MetaHeaderHandler
+		includeEpochIdentifier bool
+	}{
+		{name: "regular V1", header: createMockMetaHeader()},
+		{name: "epoch start V1", header: metaV1EpochStart, includeEpochIdentifier: true},
+		{name: "regular V3", header: createMockMetaHeaderV3()},
+		{name: "epoch start V3", header: metaV3EpochStart, includeEpochIdentifier: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			arg := createMetaArgumentWithShardCoordinatorAndHeader(mock.NewOneShardCoordinatorMock(), test.header)
+			inHdr, err := interceptedBlocks.NewInterceptedMetaHeader(arg)
+			require.NoError(t, err)
+			require.Equal(t, test.includeEpochIdentifier, inHdr.HeaderHandler().IsStartOfEpochBlock())
+
+			expectedIdentifiers := [][]byte{
+				inHdr.Hash(),
+				[]byte(fmt.Sprintf("%d-%d", core.MetachainShardId, test.header.GetNonce())),
+			}
+			if test.includeEpochIdentifier {
+				expectedIdentifiers = append(expectedIdentifiers,
+					[]byte(core.EpochStartIdentifier(test.header.GetEpoch())))
+			}
+
+			require.Equal(t, expectedIdentifiers, inHdr.Identifiers())
+		})
+	}
+}
+
+func TestInterceptedMetaHeader_CheckValidityLeaderSignatureNotCorrectShouldErr(t *testing.T) {
+	t.Parallel()
+
+	hdr := createMockMetaHeader()
+	expectedErr := errors.New("expected err")
+	buff, _ := testMarshalizer.Marshal(hdr)
+
+	arg := createDefaultMetaArgument()
+	arg.HeaderSigVerifier = &consensus.HeaderSigVerifierMock{
+		VerifyRandSeedAndLeaderSignatureCalled: func(header data.HeaderHandler) error {
+			return expectedErr
+		},
+	}
+	arg.HdrBuff = buff
+	inHdr, _ := interceptedBlocks.NewInterceptedMetaHeader(arg)
+
+	err := inHdr.CheckValidity()
+	assert.Equal(t, expectedErr, err)
+}
+func TestInterceptedMetaHeader_CheckValidityErrorInMiniBlockShouldErr(t *testing.T) {
+	t.Parallel()
+
+	hdr := createMockMetaHeader()
+	badShardId := uint32(2)
+	hdr.MiniBlockHeaders = []dataBlock.MiniBlockHeader{
+		{
+			Hash:            make([]byte, 0),
+			SenderShardID:   badShardId,
+			ReceiverShardID: 0,
+			TxCount:         0,
+			Type:            0,
+		},
+	}
+
+	arg := createDefaultMetaArgument()
+	marshaller := arg.Marshalizer
+	buff, _ := marshaller.Marshal(hdr)
+	arg.HdrBuff = buff
+	inHdr, err := interceptedBlocks.NewInterceptedMetaHeader(arg)
+	require.Nil(t, err)
+	require.NotNil(t, inHdr)
+
+	err = inHdr.CheckValidity()
+
+	assert.Equal(t, process.ErrInvalidShardId, err)
+}
+
+func TestInterceptedMetaHeader_CheckValidityLeaderSignatureOkShouldWork(t *testing.T) {
+	t.Parallel()
+
+	hdr := createMockMetaHeader()
+	expectedSignature := []byte("ran")
+	hdr.LeaderSignature = expectedSignature
+	buff, _ := testMarshalizer.Marshal(hdr)
+
+	arg := createDefaultMetaArgument()
+	arg.HdrBuff = buff
+	inHdr, _ := interceptedBlocks.NewInterceptedMetaHeader(arg)
+
+	err := inHdr.CheckValidity()
+	assert.Nil(t, err)
+}
+
+func TestInterceptedMetaHeader_CheckValidityExecutionResultMiniblockErrorInMetaHeaderV3ShouldErr(t *testing.T) {
+	t.Parallel()
+
+	arg := createDefaultMetaV3Argument()
+	inHdr, err := interceptedBlocks.NewInterceptedMetaHeader(arg)
+	assert.Nil(t, err)
+	assert.NotNil(t, inHdr)
+
+	assert.True(t, inHdr.HeaderHandler().IsHeaderV3())
+	badShardId := uint32(28)
+	mbs := []dataBlock.MiniBlockHeader{
+		{
+			Hash:            make([]byte, 0),
+			SenderShardID:   badShardId,
+			ReceiverShardID: 0,
+			TxCount:         0,
+			Type:            0,
+		},
+	}
+	mbHandlers := make([]data.MiniBlockHeaderHandler, len(mbs))
+	for i := range mbs {
+		tmp := mbs[i]
+		mbHandlers[i] = &tmp
+	}
+	_ = inHdr.HeaderHandler().(*dataBlock.MetaBlockV3).ExecutionResults[1].SetMiniBlockHeadersHandlers(mbHandlers)
+	err = inHdr.CheckValidity()
+
+	assert.Error(t, err)
+	assert.Equal(t, process.ErrInvalidShardId, err)
+}
+
+func TestInterceptedMetaHeader_CheckValidityShouldWorkV3(t *testing.T) {
+	t.Parallel()
+
+	arg := createDefaultMetaV3Argument()
+	inHdr, _ := interceptedBlocks.NewInterceptedMetaHeader(arg)
+	assert.True(t, inHdr.HeaderHandler().IsHeaderV3())
+	err := inHdr.CheckValidity()
+	assert.Nil(t, err)
+}
+
+func TestInterceptedMetaHeader_isMetaHeaderEpochOutOfRange(t *testing.T) {
+	epochStartTrigger := &mock.EpochStartTriggerStub{
+		EpochCalled: func() uint32 {
+			return 10
+		},
+	}
+	t.Run("old epoch header accepted", func(t *testing.T) {
+		arg := createDefaultMetaArgument()
+		arg.EpochStartTrigger = epochStartTrigger
+		hdr := createMockMetaHeader()
+		hdr.Epoch = 8
+		arg.HdrBuff, _ = testMarshalizer.Marshal(hdr)
+
+		inHdr, _ := interceptedBlocks.NewInterceptedMetaHeader(arg)
+		require.False(t, inHdr.IsMetaHeaderOutOfRange())
+	})
+
+	t.Run("current epoch header accepted", func(t *testing.T) {
+		arg := createDefaultMetaArgument()
+		arg.EpochStartTrigger = epochStartTrigger
+		hdr := createMockMetaHeader()
+		hdr.Epoch = 10
+		arg.HdrBuff, _ = testMarshalizer.Marshal(hdr)
+
+		inHdr, _ := interceptedBlocks.NewInterceptedMetaHeader(arg)
+		require.False(t, inHdr.IsMetaHeaderOutOfRange())
+	})
+
+	t.Run("next epoch header accepted", func(t *testing.T) {
+		arg := createDefaultMetaArgument()
+		arg.EpochStartTrigger = epochStartTrigger
+		hdr := createMockMetaHeader()
+		hdr.Epoch = 11
+		arg.HdrBuff, _ = testMarshalizer.Marshal(hdr)
+
+		inHdr, _ := interceptedBlocks.NewInterceptedMetaHeader(arg)
+		require.False(t, inHdr.IsMetaHeaderOutOfRange())
+	})
+
+	t.Run("larger epoch difference header rejected", func(t *testing.T) {
+		arg := createDefaultMetaArgument()
+		arg.EpochStartTrigger = epochStartTrigger
+		hdr := createMockMetaHeader()
+		hdr.Epoch = 12
+		arg.HdrBuff, _ = testMarshalizer.Marshal(hdr)
+
+		inHdr, _ := interceptedBlocks.NewInterceptedMetaHeader(arg)
+		require.True(t, inHdr.IsMetaHeaderOutOfRange())
+	})
+}
+
+func TestInterceptedMetaHeader_DuplicateMiniBlockHeaderHashesShouldErr(t *testing.T) {
+	t.Parallel()
+
+	hdr := createMockMetaHeader()
+	hdr.MiniBlockHeaders = []dataBlock.MiniBlockHeader{
+		{
+			Hash:            []byte("hash1"),
+			SenderShardID:   0,
+			ReceiverShardID: 0,
+		},
+		{
+			Hash:            []byte("hash1"),
+			SenderShardID:   0,
+			ReceiverShardID: 0,
+		},
+	}
+	buff, _ := testMarshalizer.Marshal(hdr)
+
+	arg := createDefaultMetaArgument()
+	arg.HdrBuff = buff
+	inHdr, _ := interceptedBlocks.NewInterceptedMetaHeader(arg)
+
+	err := inHdr.CheckValidity()
+	assert.Equal(t, process.ErrDuplicatedHashInBlock, err)
+}
+
+func TestInterceptedMetaHeader_UniqueMiniBlockHeaderHashesShouldWork(t *testing.T) {
+	t.Parallel()
+
+	hdr := createMockMetaHeader()
+	hdr.MiniBlockHeaders = []dataBlock.MiniBlockHeader{
+		{
+			Hash:            []byte("hash1"),
+			SenderShardID:   0,
+			ReceiverShardID: 0,
+		},
+		{
+			Hash:            []byte("hash2"),
+			SenderShardID:   0,
+			ReceiverShardID: 0,
+		},
+	}
+	buff, _ := testMarshalizer.Marshal(hdr)
+
+	arg := createDefaultMetaArgument()
+	arg.HdrBuff = buff
+	inHdr, _ := interceptedBlocks.NewInterceptedMetaHeader(arg)
+
+	err := inHdr.CheckValidity()
+	assert.Nil(t, err)
+}
+
+// ------- IsInterfaceNil
 
 func TestInterceptedMetaHeader_IsInterfaceNil(t *testing.T) {
 	t.Parallel()

@@ -1,0 +1,6 @@
+ignore:
+    - "**/*.pb.go"
+    - "integrationTests/**"
+    - "testscommon/**"
+    - "**/mock/**"
+    - "**/disabled*.go"
